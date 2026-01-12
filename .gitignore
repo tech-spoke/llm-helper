@@ -34,3 +34,7 @@ vectors.db
 
 # Models (downloaded/generated)
 models/
+
+# v3.8: devrag vector databases
+vectors-forest.db
+.code-intel/vectors-map.db

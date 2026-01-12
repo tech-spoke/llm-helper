@@ -4,7 +4,11 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-echo "=== Code Intel MCP Server v3.7 Setup ==="
+echo "=== Code Intel MCP Server v3.8 Setup ==="
+echo ""
+echo "This script sets up the MCP server itself."
+echo "For project initialization, use: ./init-project.sh <project-path>"
+echo ""
 
 # Create virtual environment
 if [ ! -d "venv" ]; then
@@ -25,53 +29,106 @@ check_tool() {
         echo "  ✓ $1 found"
         return 0
     else
-        echo "  ✗ $1 not found - $2"
+        echo "  ✗ $1 not found"
+        return 1
+    fi
+}
+
+install_required_tools() {
+    echo ""
+    echo "Installing required tools..."
+
+    # Detect package manager
+    if command -v apt &> /dev/null; then
+        echo "  Using apt..."
+        sudo apt update -qq
+        sudo apt install -y ripgrep universal-ctags
+    elif command -v brew &> /dev/null; then
+        echo "  Using brew..."
+        brew install ripgrep universal-ctags
+    elif command -v dnf &> /dev/null; then
+        echo "  Using dnf..."
+        sudo dnf install -y ripgrep ctags
+    elif command -v pacman &> /dev/null; then
+        echo "  Using pacman..."
+        sudo pacman -S --noconfirm ripgrep ctags
+    else
+        echo "  ✗ No supported package manager found (apt/brew/dnf/pacman)"
+        echo "  Please install ripgrep and universal-ctags manually."
         return 1
     fi
 }
 
 MISSING=0
-check_tool "rg" "Install with: apt install ripgrep" || MISSING=1
-check_tool "ctags" "Install with: apt install universal-ctags" || MISSING=1
-
-echo ""
-echo "Checking optional tools..."
-check_tool "repomix" "Install with: npm install -g repomix (optional)" || true
-check_tool "devrag" "See: https://github.com/tomohiro-owada/devrag (optional)" || true
+check_tool "rg" || MISSING=1
+check_tool "ctags" || MISSING=1
 
 if [ $MISSING -eq 1 ]; then
     echo ""
-    echo "⚠ Required tools missing. Install them before using the server."
+    read -p "Required tools missing. Install automatically? [Y/n] " -n 1 -r
+    echo ""
+    if [[ $REPLY =~ ^[Yy]$ ]] || [[ -z $REPLY ]]; then
+        install_required_tools
+        # Re-check
+        MISSING=0
+        check_tool "rg" || MISSING=1
+        check_tool "ctags" || MISSING=1
+    fi
 fi
 
-# Generate MCP config snippet
-PYTHON_PATH="$SCRIPT_DIR/venv/bin/python"
-SERVER_PATH="$SCRIPT_DIR/code_intel_server.py"
+echo ""
+echo "Checking optional tools..."
+check_tool "repomix" || echo "    Install with: npm install -g repomix (optional)"
+check_tool "devrag" || echo "    See: https://github.com/tomohiro-owada/devrag (required for v3.8)"
+
+# Check and install ONNX Runtime for devrag
+install_onnxruntime() {
+    local ORT_VERSION="1.22.0"
+    local ORT_URL="https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-linux-x64-${ORT_VERSION}.tgz"
+
+    echo ""
+    echo "Installing ONNX Runtime ${ORT_VERSION} for devrag..."
+
+    cd /tmp
+    wget -q "${ORT_URL}" -O onnxruntime.tgz
+    tar xzf onnxruntime.tgz
+    sudo cp onnxruntime-linux-x64-${ORT_VERSION}/lib/*.so* /usr/local/lib/
+    sudo ln -sf /usr/local/lib/libonnxruntime.so /usr/local/lib/onnxruntime.so
+    sudo ldconfig 2>/dev/null || true
+    rm -rf onnxruntime.tgz onnxruntime-linux-x64-${ORT_VERSION}
+    cd - > /dev/null
+
+    echo "  ✓ ONNX Runtime ${ORT_VERSION} installed"
+}
+
+# Check if ONNX Runtime is available
+if ! ldconfig -p 2>/dev/null | grep -q libonnxruntime; then
+    echo ""
+    echo "ONNX Runtime not found (required for devrag embeddings)"
+    read -p "Install ONNX Runtime automatically? [Y/n] " -n 1 -r
+    echo ""
+    if [[ $REPLY =~ ^[Yy]$ ]] || [[ -z $REPLY ]]; then
+        install_onnxruntime
+    else
+        echo "  ⚠ Skip ONNX Runtime installation. devrag may not work."
+    fi
+fi
+
+if [ $MISSING -eq 1 ]; then
+    echo ""
+    echo "⚠ Required tools still missing. Install them manually before using the server."
+    echo "  Ubuntu/Debian: sudo apt install ripgrep universal-ctags"
+    echo "  macOS: brew install ripgrep universal-ctags"
+fi
 
 echo ""
 echo "=== Setup Complete ==="
 echo ""
-echo "1. Add this to your project's .mcp.json:"
+echo "MCP server is ready at: $SCRIPT_DIR"
 echo ""
-cat << EOF
-{
-  "mcpServers": {
-    "code-intel": {
-      "type": "stdio",
-      "command": "$PYTHON_PATH",
-      "args": ["$SERVER_PATH"],
-      "env": {
-        "PYTHONPATH": "$SCRIPT_DIR"
-      }
-    }
-  }
-}
-EOF
-
+echo "Next steps:"
+echo "  1. Initialize your target project:"
+echo "     ./init-project.sh /path/to/your/project"
 echo ""
-echo "2. (Optional) Copy skills to your project:"
+echo "  2. Follow the instructions to configure .mcp.json"
 echo ""
-echo "   mkdir -p .claude/commands"
-echo "   cp $SCRIPT_DIR/.claude/commands/*.md .claude/commands/"
-echo ""
-echo "3. Restart Claude Code to load the MCP server."

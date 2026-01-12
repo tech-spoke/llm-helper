@@ -583,7 +583,7 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="start_session",
             description="Start a new code implementation session with phase-gated execution. "
-                        "v3.6: Returns extraction prompt for QueryFrame. "
+                        "v3.8: Added repo_path for project-specific agreements. "
                         "After calling this, extract QueryFrame using the prompt, then call set_query_frame.",
             inputSchema={
                 "type": "object",
@@ -596,6 +596,11 @@ async def list_tools() -> list[Tool]:
                     "query": {
                         "type": "string",
                         "description": "The user's original request",
+                    },
+                    "repo_path": {
+                        "type": "string",
+                        "description": "v3.8: Project root path for agreements and learned_pairs (default: '.')",
+                        "default": ".",
                     },
                 },
                 "required": ["intent", "query"],
@@ -904,6 +909,31 @@ async def list_tools() -> list[Tool]:
                 "required": ["target_feature", "symbols_identified"],
             },
         ),
+        Tool(
+            name="confirm_symbol_relevance",
+            description="v3.8: Confirm symbol relevance after LLM validation. "
+                        "Updates mapped_symbols confidence based on embedding similarity and LLM's code_evidence. "
+                        "Call this after validate_symbol_relevance with LLM's response.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "relevant_symbols": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Symbols that LLM confirmed as relevant",
+                    },
+                    "code_evidence": {
+                        "type": "string",
+                        "description": "Code evidence explaining why symbols are related (required)",
+                    },
+                    "reasoning": {
+                        "type": "string",
+                        "description": "LLM's reasoning for the selection",
+                    },
+                },
+                "required": ["relevant_symbols", "code_evidence"],
+            },
+        ),
     ]
 
 
@@ -944,7 +974,13 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     if name == "start_session":
         intent = arguments["intent"]
         query = arguments["query"]
-        session = session_manager.create_session(intent=intent, query=query)
+        repo_path = arguments.get("repo_path", ".")  # v3.8: プロジェクトパス
+
+        session = session_manager.create_session(
+            intent=intent,
+            query=query,
+            repo_path=repo_path,  # v3.8
+        )
 
         # v3.6: Get extraction prompt for QueryFrame
         extraction_prompt = QueryDecomposer.get_extraction_prompt(query)
@@ -955,6 +991,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             "intent": session.intent,
             "current_phase": session.phase.name,
             "allowed_tools": session.get_allowed_tools(),
+            "repo_path": session.repo_path,  # v3.8
             "message": f"Session started. Phase: {session.phase.name}",
             # v3.6: QueryFrame extraction
             "query_frame": {
@@ -962,10 +999,17 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 "extraction_prompt": extraction_prompt,
                 "next_step": "Extract slots from query using the prompt, then call set_query_frame.",
             },
+            # v3.8: Map priority info
+            "v38_features": {
+                "map_search": "Use devrag-map for learned agreements (priority search)",
+                "forest_search": "Use devrag-forest for code search (fallback)",
+                "agreements_path": f"{repo_path}/.code-intel/agreements/",
+            },
         }
         if session.phase == Phase.EXPLORATION:
             result["exploration_hint"] = (
-                "After setting QueryFrame, use code-intel tools to fill missing slots. "
+                "v3.8: First search devrag-map for past agreements. "
+                "If no hit, use code-intel tools to fill missing slots. "
                 "Then call submit_understanding."
             )
         return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
@@ -1058,15 +1102,33 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             result = {"error": "no_active_session", "message": "No active session."}
         else:
             # v3.3: confidence は入力から削除。サーバー側で算出する。
+            symbols_identified = arguments.get("symbols_identified", [])
             exploration = ExplorationResult(
-                symbols_identified=arguments.get("symbols_identified", []),
+                symbols_identified=symbols_identified,
                 entry_points=arguments.get("entry_points", []),
                 existing_patterns=arguments.get("existing_patterns", []),
                 files_analyzed=arguments.get("files_analyzed", []),
                 tools_used=[tc["tool"] for tc in session.tool_calls],
                 notes=arguments.get("notes", ""),
             )
+
+            # v3.8: symbols_identified を query_frame.mapped_symbols に自動追加
+            if session.query_frame and symbols_identified:
+                from tools.query_frame import SlotSource
+                for symbol in symbols_identified:
+                    session.query_frame.add_mapped_symbol(
+                        name=symbol,
+                        source=SlotSource.FACT,  # EXPLORATION で発見 = FACT
+                        confidence=0.5,  # デフォルト値（validate_symbol_relevance で更新可能）
+                    )
+
             result = session.submit_exploration(exploration)
+
+            # v3.8: 追加されたシンボル数を結果に含める
+            if session.query_frame:
+                result["mapped_symbols_count"] = len(session.query_frame.mapped_symbols)
+                result["mapped_symbols"] = [s.name for s in session.query_frame.mapped_symbols]
+
         return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
     elif name == "submit_semantic":
@@ -1192,24 +1254,63 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
         result = record_outcome(outcome_log)
 
-        # v3.7: Cache successful pairs
+        # v3.8: Cache successful pairs + Generate agreements
         if arguments["outcome"] == "success" and session and session.query_frame:
             try:
                 from tools.learned_pairs import cache_successful_pair
+                from tools.agreements import AgreementData, get_agreements_manager
+
                 qf = session.query_frame
+                repo_path = session.repo_path
+
                 if qf.target_feature and qf.mapped_symbols:
                     cached_count = 0
+                    agreement_files = []
+
                     for sym in qf.mapped_symbols:
+                        # 1. learned_pairs.json に追加
                         cache_successful_pair(
                             nl_term=qf.target_feature,
                             symbol=sym.name,
                             similarity=sym.confidence,
                             code_evidence=sym.evidence.result_summary if sym.evidence else None,
                             session_id=session_id,
+                            project_root=repo_path,  # v3.8: repo_path を渡す
                         )
                         cached_count += 1
+
+                        # 2. v3.8: agreements/ に Markdown を生成
+                        agreement_data = AgreementData(
+                            nl_term=qf.target_feature,
+                            symbol=sym.name,
+                            similarity=sym.confidence,
+                            code_evidence=sym.evidence.result_summary if sym.evidence else None,
+                            session_id=session_id,
+                            intent=session.intent,
+                            related_files=analysis.related_files if analysis else [],
+                            query_frame_summary={
+                                "target_feature": qf.target_feature,
+                                "trigger_condition": qf.trigger_condition,
+                                "observed_issue": qf.observed_issue,
+                                "desired_action": qf.desired_action,
+                            },
+                        )
+
+                        manager = get_agreements_manager(repo_path)
+                        agreement_file = manager.save_agreement(agreement_data)
+                        agreement_files.append(str(agreement_file.name))
+
                     result["cached_pairs"] = cached_count
-                    result["cache_note"] = f"{cached_count} pairs cached for future reference"
+                    result["agreement_files"] = agreement_files
+                    result["cache_note"] = f"{cached_count} pairs cached, {len(agreement_files)} agreement(s) generated"
+
+                    # 3. v3.8: devrag-map の再インデックス（バックグラウンド）
+                    import asyncio
+                    asyncio.create_task(
+                        get_agreements_manager(repo_path).trigger_devrag_sync()
+                    )
+                    result["map_sync"] = "triggered (background)"
+
             except Exception as e:
                 result["cache_error"] = str(e)
 
@@ -1246,7 +1347,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             "validation_prompt": validation_prompt,
             "target_feature": target_feature,
             "symbols_count": len(symbols),
-            "action_required": "LLMがこのプロンプトに回答し、set_query_frame で mapped_symbols を更新してください。",
+            "action_required": "LLMがこのプロンプトに回答し、confirm_symbol_relevance で検証結果を確定してください。",
             "response_schema": {
                 "relevant_symbols": "array of string",
                 "reasoning": "string (required)",
@@ -1279,6 +1380,72 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 )
         except Exception as e:
             result["embedding_status"] = f"unavailable: {str(e)}"
+
+        return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+
+    elif name == "confirm_symbol_relevance":
+        # v3.8: LLM検証結果を反映して mapped_symbols の confidence を更新
+        session = session_manager.get_active_session()
+        if session is None:
+            result = {"error": "no_active_session", "message": "No active session."}
+        elif not session.query_frame:
+            result = {"error": "no_query_frame", "message": "QueryFrame not set. Call set_query_frame first."}
+        else:
+            relevant_symbols = arguments.get("relevant_symbols", [])
+            code_evidence = arguments.get("code_evidence", "")
+            reasoning = arguments.get("reasoning", "")
+
+            qf = session.query_frame
+            updated_count = 0
+            not_found = []
+
+            # Embedding で類似度を取得
+            embedding_scores = {}
+            try:
+                from tools.embedding import get_embedding_validator, is_embedding_available
+                if is_embedding_available() and qf.target_feature:
+                    validator = get_embedding_validator()
+                    suggestions = validator.find_related_symbols(
+                        qf.target_feature, relevant_symbols, top_k=len(relevant_symbols)
+                    )
+                    embedding_scores = {s["symbol"]: s["similarity"] for s in suggestions}
+            except Exception:
+                pass
+
+            # mapped_symbols の confidence を更新
+            from tools.query_frame import SlotSource, SlotEvidence
+            for symbol in relevant_symbols:
+                # 既存のシンボルを探す
+                existing = [s for s in qf.mapped_symbols if s.name == symbol]
+                if existing:
+                    # Embedding スコアがあればそれを使用、なければ 0.7（LLM確認済み）
+                    new_confidence = embedding_scores.get(symbol, 0.7)
+                    existing[0].confidence = new_confidence
+                    existing[0].source = SlotSource.FACT
+                    if code_evidence:
+                        existing[0].evidence = SlotEvidence(
+                            tool="confirm_symbol_relevance",
+                            params={"reasoning": reasoning},
+                            result_summary=code_evidence,
+                        )
+                    updated_count += 1
+                else:
+                    # submit_understanding で追加されていないシンボル
+                    not_found.append(symbol)
+
+            result = {
+                "success": True,
+                "updated_count": updated_count,
+                "mapped_symbols": [
+                    {"name": s.name, "confidence": s.confidence, "source": s.source.value}
+                    for s in qf.mapped_symbols
+                ],
+                "message": f"{updated_count} symbols confirmed with code_evidence.",
+            }
+
+            if not_found:
+                result["not_found"] = not_found
+                result["hint"] = "These symbols were not in mapped_symbols. Call submit_understanding first to add them."
 
         return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 

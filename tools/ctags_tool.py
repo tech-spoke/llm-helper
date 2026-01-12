@@ -6,6 +6,30 @@ import tempfile
 from pathlib import Path
 
 
+# Common directories to exclude from ctags scanning
+CTAGS_EXCLUDE_PATTERNS = [
+    "venv",
+    ".venv",
+    "node_modules",
+    "__pycache__",
+    ".git",
+    ".svn",
+    "dist",
+    "build",
+    ".tox",
+    ".eggs",
+    "*.egg-info",
+]
+
+
+def _build_ctags_exclude_args() -> list[str]:
+    """Build ctags exclude arguments."""
+    args = []
+    for pattern in CTAGS_EXCLUDE_PATTERNS:
+        args.append(f"--exclude={pattern}")
+    return args
+
+
 async def find_definitions(
     symbol: str,
     path: str = ".",
@@ -38,17 +62,19 @@ async def find_definitions(
         "-R",  # Recursive
     ]
 
+    # Add exclude patterns
+    cmd.extend(_build_ctags_exclude_args())
+
     if language:
         cmd.extend(["--languages", language])
-
-    cmd.append(str(search_path))
 
     try:
         # Create temporary file for output
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
             temp_path = f.name
 
-        cmd_with_output = cmd + ["-f", temp_path]
+        # -f must come before the path argument
+        cmd_with_output = cmd + ["-f", temp_path, str(search_path)]
 
         process = await asyncio.create_subprocess_exec(
             *cmd_with_output,
@@ -228,16 +254,18 @@ async def get_symbols(
         "-R",
     ]
 
+    # Add exclude patterns
+    cmd.extend(_build_ctags_exclude_args())
+
     if language:
         cmd.extend(["--languages", language])
-
-    cmd.append(str(search_path))
 
     try:
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
             temp_path = f.name
 
-        cmd_with_output = cmd + ["-f", temp_path]
+        # -f must come before the path argument
+        cmd_with_output = cmd + ["-f", temp_path, str(search_path)]
 
         process = await asyncio.create_subprocess_exec(
             *cmd_with_output,

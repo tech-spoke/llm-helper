@@ -1,8 +1,8 @@
-# Code Intelligence MCP Server v3.7
+# Code Intelligence MCP Server v3.8
 
-Cursor IDEのようなコードインテリジェンス機能をオープンソースツールで実現するMCPサーバー。
+Cursor IDE のようなコードインテリジェンス機能をオープンソースツールで実現する MCP サーバー。
 
-## なぜ必要か
+## 目的
 
 同じ Opus 4.5 モデルでも、呼び出し元によって挙動が異なる：
 
@@ -11,13 +11,80 @@ Cursor IDEのようなコードインテリジェンス機能をオープンソ�
 | **Cursor** | コードベース全体を理解した上で修正する |
 | **Claude Code** | 修正箇所だけを見て修正する傾向がある |
 
-このMCPサーバーは、Claude Codeに「コードベースを理解させる情報」を提供します。
+この MCP サーバーは、Claude Code に「コードベースを理解させる」ための仕組みを提供する。
 
-## v3.7 の特徴
+---
 
-### フェーズゲート実行
+## 設計思想
 
-LLMが探索をスキップできないよう、物理的に制限：
+```
+LLM に判断をさせない。守らせるのではなく、守らないと進めない設計。
+そして、失敗から学ぶ仕組みを持つ。
+```
+
+| 原則 | 実装 |
+|------|------|
+| フェーズ強制 | ツール使用制限（EXPLORATION で devrag 禁止等） |
+| サーバー評価 | confidence はサーバーが算出、LLM の自己申告を排除 |
+| 構造化入力 | Quote 検証による幻覚防止 |
+| Embedding 検証 | NL→Symbol の関連性をベクトル類似度で客観評価 |
+| Write 制限 | 探索済みファイルのみ許可 |
+| 改善サイクル | Outcome Log + agreements による学習 |
+| プロジェクト分離 | 各プロジェクトごとに独立した学習データ |
+
+---
+
+## アーキテクチャ
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    MCP Clients (Claude Code)                 │
+└─────────────────────────────────────────────────────────────┘
+                               │
+               ┌───────────────┼───────────────┐
+               ▼               ▼               ▼
+        ┌─────────────┐ ┌─────────────┐ ┌─────────────────┐
+        │ devrag-map  │ │devrag-forest│ │   code-intel    │
+        │ (地図)      │ │ (森)        │ │ (オーケストレータ)│
+        └─────────────┘ └─────────────┘ └─────────────────┘
+               │               │                 │
+               └───────────────┼─────────────────┘
+                               ▼
+                    ┌───────────────────┐
+                    │ Project/.code-intel│  ← プロジェクト固有
+                    │ ├─ vectors-map.db  │
+                    │ ├─ vectors-forest.db│
+                    │ ├─ agreements/     │
+                    │ └─ learned_pairs.json│
+                    └───────────────────┘
+```
+
+### プロジェクト分離
+
+MCP サーバー（ロジック）は共有、学習データ（記憶）はプロジェクトごとに分離：
+
+```
+llm-helper/                    ← MCP サーバー本体（共有）
+├── code_intel_server.py
+├── setup.sh                   ← サーバーセットアップ
+└── init-project.sh            ← プロジェクト初期化
+
+ProjectA/.code-intel/          ← ProjectA 固有の学習データ
+ProjectB/.code-intel/          ← ProjectB 固有の学習データ
+```
+
+### 森と地図
+
+| 名称 | MCP サーバー | 役割 | データの性質 |
+|------|-------------|------|-------------|
+| **森 (Forest)** | devrag-forest | ソースコード全体の意味検索 | 生データ・HYPOTHESIS |
+| **地図 (Map)** | devrag-map | 過去の成功ペア・合意事項 | 確定データ・FACT |
+
+**Short-circuit Logic**: 地図でスコア ≥ 0.7 → 森の探索をスキップ
+
+---
+
+## フェーズゲート
 
 ```
 EXPLORATION → VALIDATION → SEMANTIC → VERIFICATION → READY
@@ -26,37 +93,14 @@ EXPLORATION → VALIDATION → SEMANTIC → VERIFICATION → READY
    ツール      検証        (仮説)     (確定)
 ```
 
-### Embedding による意味的検証（v3.7 新機能）
+| フェーズ | 許可 | 禁止 |
+|----------|------|------|
+| EXPLORATION | code-intel ツール | devrag |
+| SEMANTIC | devrag-forest | code-intel |
+| VERIFICATION | code-intel ツール | devrag |
+| READY | すべて | - |
 
-LLMが見つけたシンボルの関連性を、ベクトル類似度で客観的に検証：
-
-| 類似度 | 処理 | 効果 |
-|--------|------|------|
-| > 0.6 | FACT として承認 | 高信頼、そのまま進行 |
-| 0.3-0.6 | 承認するが risk_level を HIGH に | 探索ノルマ増加 |
-| < 0.3 | 物理的拒否 + 再調査ガイダンス | 幻覚とみなす |
-
-### QueryFrame
-
-自然文を4+1スロットで構造化：
-
-| スロット | 説明 | 例 |
-|----------|------|-----|
-| `target_feature` | 対象機能 | 「ログイン機能」 |
-| `trigger_condition` | 再現条件 | 「パスワードが空のとき」 |
-| `observed_issue` | 問題 | 「エラーが出ない」 |
-| `desired_action` | 期待 | 「チェックを追加」 |
-| `mapped_symbols` | 探索で見つけたシンボル | `["LoginService"]` |
-
-### 設計原則
-
-| 原則 | 実装 |
-|------|------|
-| LLMに判断をさせない | confidence はサーバーが算出 |
-| 幻覚を物理的に排除 | Quote検証 + Embedding検証（v3.7） |
-| 動的な要件調整 | risk_level (HIGH/MEDIUM/LOW) で探索要件を変更 |
-| 情報の確実性を追跡 | FACT（確定）vs HYPOTHESIS（要検証） |
-| 成功パターンの学習 | NL→Symbol ペアの自動キャッシュ（v3.7） |
+---
 
 ## ツール一覧
 
@@ -64,119 +108,154 @@ LLMが見つけたシンボルの関連性を、ベクトル類似度で客観�
 
 | ツール | 用途 |
 |--------|------|
-| `query` | 自然言語でのインテリジェントクエリ |
-| `search_text` | 高速テキスト検索 (ripgrep) |
-| `search_files` | ファイル名検索 (ripgrep) |
-| `analyze_structure` | コード構造解析 (tree-sitter) |
+| `search_text` | テキスト検索 (ripgrep) |
+| `search_files` | ファイル名検索 |
 | `find_definitions` | シンボル定義検索 (ctags) |
 | `find_references` | シンボル参照検索 (ctags) |
-| `get_symbols` | シンボル一覧取得 (ctags) |
-| `get_function_at_line` | 特定行の関数取得 (tree-sitter) |
-| `repo_pack` | リポジトリ全体をLLM用にパック (Repomix) |
+| `get_symbols` | シンボル一覧取得 |
+| `analyze_structure` | コード構造解析 (tree-sitter) |
+| `get_function_at_line` | 特定行の関数取得 |
+| `repo_pack` | リポジトリパック (Repomix) |
+| `query` | 自然言語でのインテリジェントクエリ |
 
-### セッション管理（v3.7）
+### セッション管理
 
 | ツール | 用途 |
 |--------|------|
 | `start_session` | セッション開始、extraction_prompt を返す |
-| `set_query_frame` | QueryFrame 設定（Quote検証付き） |
+| `set_query_frame` | QueryFrame 設定（Quote 検証） |
 | `get_session_status` | 現在のフェーズ・状態を確認 |
-| `submit_understanding` | EXPLORATION 完了 |
+| `submit_understanding` | EXPLORATION 完了、mapped_symbols 自動追加 |
+| `validate_symbol_relevance` | Embedding 提案を取得 |
+| `confirm_symbol_relevance` | 検証結果確定、confidence 更新 |
 | `submit_semantic` | SEMANTIC 完了 |
 | `submit_verification` | VERIFICATION 完了 |
-| `check_write_target` | Write 可否確認（探索済みファイルのみ許可） |
-| `record_outcome` | 結果を記録（成功ペアをキャッシュ） |
-| `validate_symbol_relevance` | **v3.7** シンボル関連性を Embedding で検証 |
+| `check_write_target` | Write 可否確認 |
+| `record_outcome` | 結果記録、agreements 自動生成 |
 
-## スキル
-
-### /code スキル
-
-コード実装を支援するエージェント。フェーズゲートに従って探索→実装を行います。
-
-```
-/code ログイン機能でパスワードが空のときエラーが出ないバグを直して
-```
-
-### /outcome スキル
-
-実装結果を記録するエージェント。失敗パターンの分析に使用。
-
-```
-/outcome この実装は失敗だった
-```
+---
 
 ## 依存関係
+
+### システムツール
 
 | ツール | 必須 | 用途 |
 |--------|------|------|
 | ripgrep (rg) | Yes | search_text, search_files, find_references |
 | universal-ctags | Yes | find_definitions, find_references, get_symbols |
 | Python 3.10+ | Yes | サーバー本体 |
-| tree-sitter | Yes | analyze_structure (pip で自動インストール) |
-| sentence-transformers | Yes | **v3.7** Embedding 検証 (pip で自動インストール) |
-| repomix | No | repo_pack, bootstrapキャッシュ |
-| devrag | No | 意味検索フォールバック |
+| devrag | Yes | 森/地図の意味検索 |
+| ONNX Runtime 1.22.0+ | Yes | devrag の Embedding 処理 |
+| repomix | No | repo_pack |
+
+### Python パッケージ
+
+```
+mcp>=1.0.0
+tree-sitter>=0.21.0
+tree-sitter-languages>=1.10.0
+sentence-transformers>=2.2.0
+scikit-learn>=1.0.0
+pytest>=7.0.0
+```
+
+---
 
 ## セットアップ
 
-### 1. 依存ツールのインストール
+### Step 1: MCP サーバーのセットアップ（1回のみ）
 
 ```bash
-# Ubuntu/Debian
-sudo apt install ripgrep universal-ctags
-
-# macOS
-brew install ripgrep universal-ctags
-
-# 任意: Repomix
-npm install -g repomix
-```
-
-### 2. サーバーのセットアップ
-
-```bash
+# リポジトリをクローン
 git clone https://github.com/tech-spoke/llm-helper.git
 cd llm-helper
 
-# セットアップスクリプト実行
+# サーバーをセットアップ（venv、依存関係、ONNX Runtime）
 ./setup.sh
 ```
 
-または手動で:
+### Step 2: devrag のインストール（1回のみ）
 
 ```bash
-python3 -m venv venv
-./venv/bin/pip install -r requirements.txt
+# Linux x64
+wget https://github.com/tomohiro-owada/devrag/releases/latest/download/devrag-linux-x64.tar.gz
+tar xzf devrag-linux-x64.tar.gz
+sudo mv devrag /usr/local/bin/
 ```
 
-### 3. MCP設定
+### Step 3: プロジェクトの初期化（プロジェクトごと）
 
-対象プロジェクトのルートに `.mcp.json` を作成:
+```bash
+# 対象プロジェクトを初期化
+./init-project.sh /path/to/your-project
+
+# オプション: ソースディレクトリを指定
+./init-project.sh /path/to/your-project --src-dirs=src,packages,modules
+```
+
+これにより以下が作成されます：
+
+```
+your-project/
+└── .code-intel/
+    ├── devrag-forest.json   ← 森（コード検索）設定
+    ├── devrag-map.json      ← 地図（合意事項）設定
+    └── agreements/          ← 合意事項ディレクトリ
+```
+
+### Step 4: .mcp.json の設定
+
+`init-project.sh` が出力する設定を `.mcp.json` に追加：
 
 ```json
 {
   "mcpServers": {
+    "devrag-map": {
+      "type": "stdio",
+      "command": "/usr/local/bin/devrag",
+      "args": ["--config", "/path/to/your-project/.code-intel/devrag-map.json"],
+      "env": {"LD_LIBRARY_PATH": "/usr/local/lib"}
+    },
+    "devrag-forest": {
+      "type": "stdio",
+      "command": "/usr/local/bin/devrag",
+      "args": ["--config", "/path/to/your-project/.code-intel/devrag-forest.json"],
+      "env": {"LD_LIBRARY_PATH": "/usr/local/lib"}
+    },
     "code-intel": {
       "type": "stdio",
       "command": "/path/to/llm-helper/venv/bin/python",
       "args": ["/path/to/llm-helper/code_intel_server.py"],
-      "env": {
-        "PYTHONPATH": "/path/to/llm-helper"
-      }
+      "env": {"PYTHONPATH": "/path/to/llm-helper"}
     }
   }
 }
 ```
 
-### 4. スキルの設定（任意）
-
-`.claude/commands/` に `code.md` と `outcome.md` をコピー:
+### Step 5: devrag データベースの初期化
 
 ```bash
-mkdir -p .claude/commands
-cp /path/to/llm-helper/.claude/commands/*.md .claude/commands/
+cd /path/to/your-project/.code-intel
+
+# 森（コード検索）を初期化
+devrag --config devrag-forest.json sync
+
+# 地図（合意事項）を初期化
+devrag --config devrag-map.json sync
 ```
+
+### Step 6: スキルの設定（任意）
+
+```bash
+mkdir -p /path/to/your-project/.claude/commands
+cp /path/to/llm-helper/.claude/commands/*.md /path/to/your-project/.claude/commands/
+```
+
+### Step 7: Claude Code を再起動
+
+MCP サーバーを読み込むために再起動。
+
+---
 
 ## 利用方法
 
@@ -186,14 +265,17 @@ cp /path/to/llm-helper/.claude/commands/*.md .claude/commands/
 /code AuthServiceのlogin関数でパスワードが空のときエラーが出ないバグを直して
 ```
 
-スキルが自動的に:
-1. Intent判定（MODIFY）
+スキルが自動的に：
+1. Intent 判定（MODIFY）
 2. セッション開始
-3. QueryFrame抽出・検証
-4. EXPLORATION（find_definitions, find_references等）
-5. 必要に応じてSEMANTIC（devrag）
-6. VERIFICATION（仮説検証）
-7. READY（実装）
+3. QueryFrame 抽出・検証
+4. 地図を検索（過去の成功パターン）
+5. EXPLORATION（find_definitions, find_references 等）
+6. シンボル検証（Embedding）
+7. 必要に応じて SEMANTIC（devrag-forest）
+8. VERIFICATION（仮説検証）
+9. READY（実装）
+10. 成功時に地図を更新
 
 ### 直接ツールを呼び出す
 
@@ -208,80 +290,100 @@ mcp__code-intel__find_definitions で "SessionState" の定義を探して
 mcp__code-intel__analyze_structure で tools/router.py を解析して
 ```
 
-## フェーズの詳細
+---
 
-### EXPLORATION
+## スキル
 
-code-intelツールでコードベースを探索：
-- `find_definitions`: シンボルの定義場所
-- `find_references`: シンボルの使用箇所
-- `search_text`: テキストパターン検索
-- `analyze_structure`: AST解析
+### /code
 
-**devragは使用禁止**（物理的にブロック）
+コード実装を支援するエージェント。フェーズゲートに従って探索→実装を行う。
 
-### SEMANTIC
-
-探索結果が不十分な場合のみ発動：
-- `devrag_search`: 意味検索
-- 結果は **HYPOTHESIS**（仮説）として記録
-
-### VERIFICATION
-
-HYPOTHESISをcode-intelツールで検証：
-- 確認されれば **FACT** に昇格
-- 否定されれば **rejected** として記録
-
-**devragは使用禁止**（物理的にブロック）
-
-### READY
-
-実装が許可される：
-- HYPOTHESISが残っていないことを確認
-- Write対象は探索済みファイルのみ許可
-
-## devrag（オプション）
-
-devragは意味検索のフォールバック機構です。未導入でも基本機能は動作します。
-
-### インストール
-
-```bash
-# Linux x64
-wget https://github.com/tomohiro-owada/devrag/releases/latest/download/devrag-linux-x64.tar.gz
-tar xzf devrag-linux-x64.tar.gz
-sudo mv devrag /usr/local/bin/
+```
+/code ログイン機能でパスワードが空のときエラーが出ないバグを直して
 ```
 
-### 設定
+### /outcome
 
-対象プロジェクトに `rag-custom-config.json` を作成:
+実装結果を記録するエージェント。失敗パターンの分析に使用。
 
-```json
-{
-  "document_patterns": ["./src", "./docs"],
-  "db_path": "./vectors.db",
-  "chunk_size": 500,
-  "search_top_k": 5,
-  "model": {
-    "name": "multilingual-e5-small",
-    "dimensions": 384
-  }
-}
+```
+/outcome この実装は失敗だった
 ```
 
-### インデックス作成
+---
 
-```bash
-devrag -config rag-custom-config.json index
+## 合意事項（Agreements）
+
+成功した NL→Symbol ペアは `.code-intel/agreements/` に Markdown として保存され、devrag-map でベクトル検索可能になる：
+
+```markdown
+---
+doc_type: agreement
+nl_term: ログイン機能
+symbol: AuthService
+similarity: 0.85
+session_id: session_20250112_143000
+---
+
+# ログイン機能 → AuthService
+
+## 根拠 (Code Evidence)
+
+AuthService.login() がユーザー認証を処理
+
+## 関連ファイル
+
+- `src/auth/service.py`
 ```
+
+次回以降の探索で優先的に参照される。
+
+---
+
+## プロジェクト構造
+
+### MCP サーバー（llm-helper/）
+
+```
+llm-helper/
+├── code_intel_server.py    ← MCP サーバー本体
+├── tools/                  ← ツール実装
+│   ├── session.py
+│   ├── query_frame.py
+│   ├── agreements.py
+│   └── learned_pairs.py
+├── setup.sh                ← サーバーセットアップ
+├── init-project.sh         ← プロジェクト初期化
+└── .claude/commands/       ← スキル定義
+    ├── code.md
+    └── outcome.md
+```
+
+### 対象プロジェクト
+
+```
+your-project/
+├── .mcp.json               ← MCP 設定（手動設定）
+├── .code-intel/            ← Code Intel データ（自動生成）
+│   ├── devrag-forest.json
+│   ├── devrag-map.json
+│   ├── vectors-forest.db   ← devrag sync で生成
+│   ├── vectors-map.db      ← devrag sync で生成
+│   ├── agreements/         ← 成功ペア（自動生成）
+│   └── learned_pairs.json  ← キャッシュ（自動生成）
+├── .claude/commands/       ← スキル（任意コピー）
+└── src/                    ← あなたのソースコード
+```
+
+---
 
 ## ドキュメント
 
 - [ARCHITECTURE.md](docs/ARCHITECTURE.md) - システム設計
-- [ROUTER.md](docs/ROUTER.md) - Router詳細
-- [DESIGN_v3.7.md](docs/DESIGN_v3.7.md) - v3.7設計（Embedding + LLM委譲）
-- [DESIGN_v3.6.md](docs/DESIGN_v3.6.md) - v3.6設計（QueryFrame）
+- [ROUTER.md](docs/ROUTER.md) - Router 詳細
+- [DESIGN_v3.8.md](docs/DESIGN_v3.8.md) - v3.8 設計詳細
+
+---
 
 ## ライセンス
 

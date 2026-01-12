@@ -267,9 +267,41 @@ def _is_semantically_consistent(value: str, quote: str) -> bool:
 # NL → Symbol 整合性チェック (v3.7: LLM委譲)
 # =============================================================================
 
-# v3.7: BASIC_SYNONYMS と is_related() を削除
-# 代わりに validate_symbol_relevance ツールでLLMに判定を委譲
-# 詳細は code_intel_server.py の validate_symbol_relevance を参照
+# v3.7: LLM委譲への移行
+# validate_symbol_relevance ツールでLLMに詳細判定を委譲
+# ただし基本的なマッチングはサーバー側で実行
+
+
+def validate_nl_symbol_mapping(
+    nl_term: str,
+    symbols: list[str],
+) -> tuple[bool, list[str]]:
+    """
+    v3.7: 基本的なNL→シンボルマッチング。
+
+    詳細な関連性判定はvalidate_symbol_relevanceツールでLLMに委譲。
+    ここでは単純な文字列マッチングのみ。
+
+    Returns:
+        (has_match, matched_symbols)
+    """
+    nl_lower = nl_term.lower()
+    matched = []
+
+    for sym in symbols:
+        sym_lower = sym.lower()
+        # 単純な包含チェック
+        if nl_lower in sym_lower or sym_lower in nl_lower:
+            matched.append(sym)
+            continue
+
+        # 単語レベルの共通性
+        nl_words = set(nl_lower.replace("_", " ").split())
+        sym_words = set(sym_lower.replace("_", " ").split())
+        if nl_words & sym_words:
+            matched.append(sym)
+
+    return len(matched) > 0, matched
 
 
 # =============================================================================

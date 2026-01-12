@@ -577,6 +577,11 @@ class SessionState:
     """
     Manages the state of a code implementation session.
 
+    v3.8 changes:
+    - Added repo_path for project-specific paths
+    - Added map_results and forest_results for devrag dual search
+    - Added map_hit flag for short-circuit logic
+
     v3.6 changes:
     - Added query_frame for natural language structuring
     - Added risk_level for dynamic requirements
@@ -601,6 +606,9 @@ class SessionState:
     query: str
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
 
+    # v3.8: Project path for agreements and learned_pairs
+    repo_path: str = "."
+
     # v3.5: Decision Log for Outcome matching
     decision_log: dict | None = None
 
@@ -615,6 +623,11 @@ class SessionState:
     exploration: ExplorationResult | None = None
     semantic: SemanticResult | None = None
     verification: VerificationResult | None = None
+
+    # v3.8: Devrag dual search results
+    map_results: list[dict] = field(default_factory=list)  # 地図検索結果
+    forest_results: list[dict] = field(default_factory=list)  # 森検索結果
+    map_hit: bool = False  # 地図でヒットしたか（Short-circuit用）
 
     # Tracking
     tool_calls: list[dict] = field(default_factory=list)
@@ -954,7 +967,7 @@ class SessionState:
             "success": True,
             "next_phase": Phase.VERIFICATION.name,
             "message": "Semantic search complete. Now verify hypotheses with code-intel.",
-            "hypotheses_to_verify": result.hypotheses,
+            "hypotheses_to_verify": [h.to_dict() for h in result.hypotheses],
         }
 
     def submit_verification(self, result: VerificationResult) -> dict:
@@ -1071,8 +1084,13 @@ class SessionManager:
         intent: str,
         query: str,
         session_id: str | None = None,
+        repo_path: str = ".",  # v3.8: プロジェクトパス
     ) -> SessionState:
-        """Create a new session."""
+        """
+        Create a new session.
+
+        v3.8: repo_path を追加。agreements と learned_pairs の保存先を指定。
+        """
         if session_id is None:
             session_id = f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
@@ -1084,6 +1102,7 @@ class SessionManager:
             intent=intent,
             query=query,
             phase=initial_phase,
+            repo_path=repo_path,
         )
 
         self._sessions[session_id] = session
