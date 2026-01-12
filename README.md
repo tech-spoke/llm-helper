@@ -1,4 +1,4 @@
-# Code Intelligence MCP Server v3.6
+# Code Intelligence MCP Server v3.7
 
 Cursor IDEのようなコードインテリジェンス機能をオープンソースツールで実現するMCPサーバー。
 
@@ -13,18 +13,28 @@ Cursor IDEのようなコードインテリジェンス機能をオープンソ�
 
 このMCPサーバーは、Claude Codeに「コードベースを理解させる情報」を提供します。
 
-## v3.6 の特徴
+## v3.7 の特徴
 
 ### フェーズゲート実行
 
 LLMが探索をスキップできないよう、物理的に制限：
 
 ```
-EXPLORATION → SEMANTIC → VERIFICATION → READY
-     ↓            ↓           ↓           ↓
-  code-intel   devrag      検証       実装許可
-   ツール      (仮説)     (確定)
+EXPLORATION → VALIDATION → SEMANTIC → VERIFICATION → READY
+     ↓            ↓           ↓           ↓           ↓
+  code-intel  Embedding    devrag      検証       実装許可
+   ツール      検証        (仮説)     (確定)
 ```
+
+### Embedding による意味的検証（v3.7 新機能）
+
+LLMが見つけたシンボルの関連性を、ベクトル類似度で客観的に検証：
+
+| 類似度 | 処理 | 効果 |
+|--------|------|------|
+| > 0.6 | FACT として承認 | 高信頼、そのまま進行 |
+| 0.3-0.6 | 承認するが risk_level を HIGH に | 探索ノルマ増加 |
+| < 0.3 | 物理的拒否 + 再調査ガイダンス | 幻覚とみなす |
 
 ### QueryFrame
 
@@ -43,9 +53,10 @@ EXPLORATION → SEMANTIC → VERIFICATION → READY
 | 原則 | 実装 |
 |------|------|
 | LLMに判断をさせない | confidence はサーバーが算出 |
-| 幻覚を物理的に排除 | Quote検証（引用が原文にあるか確認） |
+| 幻覚を物理的に排除 | Quote検証 + Embedding検証（v3.7） |
 | 動的な要件調整 | risk_level (HIGH/MEDIUM/LOW) で探索要件を変更 |
 | 情報の確実性を追跡 | FACT（確定）vs HYPOTHESIS（要検証） |
+| 成功パターンの学習 | NL→Symbol ペアの自動キャッシュ（v3.7） |
 
 ## ツール一覧
 
@@ -63,7 +74,7 @@ EXPLORATION → SEMANTIC → VERIFICATION → READY
 | `get_function_at_line` | 特定行の関数取得 (tree-sitter) |
 | `repo_pack` | リポジトリ全体をLLM用にパック (Repomix) |
 
-### セッション管理（v3.6）
+### セッション管理（v3.7）
 
 | ツール | 用途 |
 |--------|------|
@@ -74,7 +85,8 @@ EXPLORATION → SEMANTIC → VERIFICATION → READY
 | `submit_semantic` | SEMANTIC 完了 |
 | `submit_verification` | VERIFICATION 完了 |
 | `check_write_target` | Write 可否確認（探索済みファイルのみ許可） |
-| `record_outcome` | 結果を記録（改善サイクル用） |
+| `record_outcome` | 結果を記録（成功ペアをキャッシュ） |
+| `validate_symbol_relevance` | **v3.7** シンボル関連性を Embedding で検証 |
 
 ## スキル
 
@@ -102,6 +114,7 @@ EXPLORATION → SEMANTIC → VERIFICATION → READY
 | universal-ctags | Yes | find_definitions, find_references, get_symbols |
 | Python 3.10+ | Yes | サーバー本体 |
 | tree-sitter | Yes | analyze_structure (pip で自動インストール) |
+| sentence-transformers | Yes | **v3.7** Embedding 検証 (pip で自動インストール) |
 | repomix | No | repo_pack, bootstrapキャッシュ |
 | devrag | No | 意味検索フォールバック |
 
@@ -267,7 +280,8 @@ devrag -config rag-custom-config.json index
 
 - [ARCHITECTURE.md](docs/ARCHITECTURE.md) - システム設計
 - [ROUTER.md](docs/ROUTER.md) - Router詳細
-- [DESIGN_v3.6.md](docs/DESIGN_v3.6.md) - v3.6設計
+- [DESIGN_v3.7.md](docs/DESIGN_v3.7.md) - v3.7設計（Embedding + LLM委譲）
+- [DESIGN_v3.6.md](docs/DESIGN_v3.6.md) - v3.6設計（QueryFrame）
 
 ## ライセンス
 

@@ -4,6 +4,14 @@
 
 **重要**: このエージェントはフェーズゲート方式で動作します。システムが各フェーズを強制するため、手順をスキップできません。
 
+## v3.7 変更点（Embedding + LLM委譲）
+
+- **validate_symbol_relevance**: 探索で見つけたシンボルの関連性をEmbeddingで検証
+- **code_evidence**: LLMはシンボル関連性を主張する際、コード上の根拠を必須で提供
+- **3層類似度判定**: >0.6 FACT、0.3-0.6 HIGH risk（要追加探索）、<0.3 REJECT
+- **cached_matches**: 過去に成功したNL→シンボルペアをキャッシュから優先提示
+- **embedding_suggestions**: ベクトル類似度で最も関連性の高いシンボルを提案
+
 ## v3.6 変更点（QueryFrame）
 
 - **QueryFrame**: 自然文を構造化（target_feature, trigger_condition, observed_issue, desired_action）
@@ -21,8 +29,10 @@
 ## フェーズ概要
 
 ```
-EXPLORATION (必須) → SEMANTIC (必要時) → VERIFICATION (devrag使用時) → READY (実装許可)
+EXPLORATION (必須) → VALIDATION (v3.7) → SEMANTIC (必要時) → VERIFICATION (devrag使用時) → READY (実装許可)
 ```
+
+**v3.7**: 探索後にシンボル関連性を Embedding で検証（Step 3.5）
 
 ---
 
@@ -187,8 +197,94 @@ mcp__code-intel__submit_understanding
 | LOW | 最小限でOK |
 
 **次のフェーズ:**
-- サーバー評価 "high" + 整合性OK → **READY へ**
+- サーバー評価 "high" + 整合性OK → **Step 3.5 へ**
 - それ以外 → **SEMANTIC へ**（理由が通知される）
+
+---
+
+## Step 3.5: シンボル関連性検証（v3.7 新規）
+
+**目的:** 探索で見つけたシンボルが本当に target_feature に関連しているか Embedding で検証
+
+**なぜ必要か:**
+- LLMが「関連あり」と主張しても、実際には無関係な場合がある
+- ベクトル類似度で客観的に検証し、誤った紐付けを防止
+
+**呼び出し:**
+```
+mcp__code-intel__validate_symbol_relevance
+  target_feature: "ログイン機能"
+  symbols: ["AuthService", "UserRepository", "Logger"]
+```
+
+**レスポンス例:**
+```json
+{
+  "validation_prompt": "以下のシンボルが '認証機能' に関連しているか判定し...",
+  "cached_matches": [
+    {
+      "nl_term": "認証機能",
+      "symbol": "AuthService",
+      "similarity": 0.85,
+      "code_evidence": "AuthService.login() handles user authentication"
+    }
+  ],
+  "embedding_suggestions": [
+    {"symbol": "AuthService", "similarity": 0.82, "rank": 1},
+    {"symbol": "UserRepository", "similarity": 0.45, "rank": 2}
+  ],
+  "schema": {
+    "mapped_symbols": [
+      {
+        "symbol": "string (シンボル名)",
+        "approved": "boolean (関連ありか)",
+        "code_evidence": "string (コード上の根拠、approved=true時は必須)"
+      }
+    ]
+  }
+}
+```
+
+**LLMの応答方法:**
+
+1. `cached_matches` があれば、その情報を優先的に活用
+2. `embedding_suggestions` の上位シンボルは関連性が高い可能性
+3. 各シンボルについて判定し、**approved=true の場合は code_evidence 必須**
+
+**code_evidence の書き方:**
+- ❌ 悪い例: `"関連あり"`（根拠なし）
+- ✅ 良い例: `"AuthService.login() メソッドがユーザー認証を処理"`
+- ✅ 良い例: `"UserController:45 で AuthService を呼び出し"`
+
+**サーバーの処理:**
+1. 各シンボルの Embedding 類似度を計算
+2. 3層判定:
+   - 類似度 > 0.6: FACT として承認
+   - 類似度 0.3-0.6: 承認するが risk_level を HIGH に引き上げ
+   - 類似度 < 0.3: 物理的に拒否、再探索ガイダンスを提供
+
+**拒否された場合:**
+```json
+{
+  "rejected": [
+    {
+      "symbol": "Logger",
+      "similarity": 0.15,
+      "guidance": {
+        "reason": "'ログイン機能' と 'Logger' の類似度が低すぎます",
+        "next_actions": [
+          "search_text で 'ログイン機能' に関連する別のシンボルを探す",
+          "find_references で 'Logger' の使用箇所を確認"
+        ]
+      }
+    }
+  ]
+}
+```
+
+**次のフェーズ:**
+- 全シンボル承認 → **READY へ**
+- 一部拒否 → ガイダンスに従い再探索、または **SEMANTIC へ**
 
 ---
 

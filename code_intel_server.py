@@ -844,8 +844,8 @@ async def list_tools() -> list[Tool]:
                                 "description": "What went wrong / what succeeded",
                             },
                             "failure_point": {
-                                "type": "string",
-                                "enum": ["EXPLORATION", "SEMANTIC", "VERIFICATION", "READY", null],
+                                "type": ["string", "null"],
+                                "enum": ["EXPLORATION", "SEMANTIC", "VERIFICATION", "READY", None],
                                 "description": "Phase where failure occurred",
                             },
                             "related_symbols": {
@@ -880,6 +880,28 @@ async def list_tools() -> list[Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {},
+            },
+        ),
+        # v3.7: LLM委譲による関連性判定
+        Tool(
+            name="validate_symbol_relevance",
+            description="v3.7: Validate relevance between natural language term and code symbols. "
+                        "Returns a validation prompt for LLM to determine relevance with code_evidence. "
+                        "LLM must explain WHY symbols are related using code evidence (method names, comments, etc.).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "target_feature": {
+                        "type": "string",
+                        "description": "Natural language term for the target feature (e.g., 'ログイン機能')",
+                    },
+                    "symbols_identified": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of code symbols found during exploration",
+                    },
+                },
+                "required": ["target_feature", "symbols_identified"],
             },
         ),
     ]
@@ -1169,11 +1191,95 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         )
 
         result = record_outcome(outcome_log)
+
+        # v3.7: Cache successful pairs
+        if arguments["outcome"] == "success" and session and session.query_frame:
+            try:
+                from tools.learned_pairs import cache_successful_pair
+                qf = session.query_frame
+                if qf.target_feature and qf.mapped_symbols:
+                    cached_count = 0
+                    for sym in qf.mapped_symbols:
+                        cache_successful_pair(
+                            nl_term=qf.target_feature,
+                            symbol=sym.name,
+                            similarity=sym.confidence,
+                            code_evidence=sym.evidence.result_summary if sym.evidence else None,
+                            session_id=session_id,
+                        )
+                        cached_count += 1
+                    result["cached_pairs"] = cached_count
+                    result["cache_note"] = f"{cached_count} pairs cached for future reference"
+            except Exception as e:
+                result["cache_error"] = str(e)
+
         return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
     elif name == "get_outcome_stats":
         # v3.5: Get outcome statistics
         result = get_failure_stats()
+        return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+
+    elif name == "validate_symbol_relevance":
+        # v3.7: LLM委譲 + Embedding検証のハイブリッド
+        target_feature = arguments["target_feature"]
+        symbols = arguments["symbols_identified"]
+
+        # Build validation prompt for LLM
+        symbols_list = "\n".join(f"- {s}" for s in symbols)
+        validation_prompt = f"""以下のシンボル群から、対象機能「{target_feature}」に関連するものを選んでください。
+
+シンボル一覧:
+{symbols_list}
+
+回答形式（JSON）:
+{{
+  "relevant_symbols": ["関連するシンボル名"],
+  "reasoning": "選定理由",
+  "code_evidence": "コード上の根拠（メソッド名、コメント、命名規則など）"
+}}
+
+※ code_evidence は必須。根拠なしの判定は無効。
+※ 関連するシンボルがない場合は relevant_symbols を空配列に。"""
+
+        result = {
+            "validation_prompt": validation_prompt,
+            "target_feature": target_feature,
+            "symbols_count": len(symbols),
+            "action_required": "LLMがこのプロンプトに回答し、set_query_frame で mapped_symbols を更新してください。",
+            "response_schema": {
+                "relevant_symbols": "array of string",
+                "reasoning": "string (required)",
+                "code_evidence": "string (required)",
+            },
+        }
+
+        # v3.7: Check learned pairs cache first
+        try:
+            from tools.learned_pairs import find_cached_matches
+            cached_matches = find_cached_matches(target_feature, symbols)
+            if cached_matches:
+                result["cached_matches"] = cached_matches
+                result["cache_note"] = (
+                    "cached_matches は過去に成功したペア。優先的に採用してください。"
+                )
+        except Exception as e:
+            result["cache_status"] = f"unavailable: {str(e)}"
+
+        # v3.7: Embedding-based suggestions (if available)
+        try:
+            from tools.embedding import get_embedding_validator, is_embedding_available
+            if is_embedding_available():
+                validator = get_embedding_validator()
+                suggestions = validator.find_related_symbols(target_feature, symbols, top_k=5)
+                result["embedding_suggestions"] = suggestions
+                result["embedding_note"] = (
+                    "embedding_suggestions はサーバーがベクトル類似度で算出した候補。"
+                    "LLM判定の参考にしてください。similarity > 0.6 は高信頼。"
+                )
+        except Exception as e:
+            result["embedding_status"] = f"unavailable: {str(e)}"
+
         return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
     # v3.2: Check phase access for other tools

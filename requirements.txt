@@ -7,3 +7,7 @@ tree-sitter-languages>=1.10.0
 
 # For async subprocess handling
 asyncio
+
+# v3.7: Embedding for semantic similarity
+sentence-transformers>=2.2.0
+scikit-learn>=1.0.0

@@ -4,7 +4,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-echo "=== Code Intel MCP Server v3.6 Setup ==="
+echo "=== Code Intel MCP Server v3.7 Setup ==="
 
 # Create virtual environment
 if [ ! -d "venv" ]; then

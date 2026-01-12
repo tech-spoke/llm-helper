@@ -264,93 +264,12 @@ def _is_semantically_consistent(value: str, quote: str) -> bool:
 
 
 # =============================================================================
-# NL → Symbol 整合性チェック
+# NL → Symbol 整合性チェック (v3.7: LLM委譲)
 # =============================================================================
 
-# 基本的なシノニム（Phase 1: 最小限のハードコード）
-BASIC_SYNONYMS: dict[str, list[str]] = {
-    "ログイン": ["login", "auth", "signin", "sign_in"],
-    "認証": ["auth", "authentication", "authenticate"],
-    "ユーザー": ["user", "account", "member"],
-    "登録": ["register", "signup", "sign_up", "create"],
-    "削除": ["delete", "remove", "destroy"],
-    "更新": ["update", "edit", "modify"],
-    "検索": ["search", "find", "query"],
-    "一覧": ["list", "index", "all"],
-    "詳細": ["detail", "show", "view"],
-    "設定": ["setting", "config", "preference"],
-    "通知": ["notification", "notify", "alert"],
-    "メール": ["email", "mail"],
-    "パスワード": ["password", "pass", "pwd"],
-    "トークン": ["token", "jwt", "bearer"],
-    "セッション": ["session", "sess"],
-    "キャッシュ": ["cache", "cached"],
-    "データベース": ["database", "db"],
-    "API": ["api", "endpoint", "route"],
-    "エラー": ["error", "exception", "err"],
-    "バリデーション": ["validation", "validate", "validator"],
-}
-
-
-def is_related(nl_term: str, symbol: str) -> bool:
-    """
-    NL用語とシンボルの関連性チェック。
-
-    Phase 1: 部分一致 + 基本的なシノニム
-
-    Args:
-        nl_term: 自然言語の用語（「ログイン機能」）
-        symbol: コード上のシンボル（「LoginController」）
-
-    Returns:
-        関連していればTrue
-    """
-    nl_lower = nl_term.lower()
-    sym_lower = symbol.lower()
-
-    # 1. 直接的な部分一致
-    if nl_lower in sym_lower or sym_lower in nl_lower:
-        return True
-
-    # 2. 単語レベルでの部分一致
-    nl_words = set(nl_lower.replace("機能", "").replace("処理", "").split())
-    for word in nl_words:
-        if len(word) >= 2 and word in sym_lower:
-            return True
-
-    # 3. シノニム辞書によるマッチング（日本語→英語）
-    for jp_term, en_terms in BASIC_SYNONYMS.items():
-        if jp_term in nl_term:
-            if any(en in sym_lower for en in en_terms):
-                return True
-
-    # 4. シノニム辞書によるマッチング（英語→英語）
-    # nl_term が英語シノニムの場合、同じグループの他のシノニムとマッチ
-    for jp_term, en_terms in BASIC_SYNONYMS.items():
-        if any(en in nl_lower for en in en_terms):
-            # nl_term がシノニムグループに含まれる
-            if any(en in sym_lower for en in en_terms):
-                return True
-
-    return False
-
-
-def validate_nl_symbol_mapping(
-    nl_term: str,
-    symbols: list[str],
-) -> tuple[bool, list[str]]:
-    """
-    NL用語に対応するシンボルが見つかっているか検証。
-
-    Args:
-        nl_term: 自然言語の用語
-        symbols: 見つかったシンボルのリスト
-
-    Returns:
-        (has_match, matched_symbols)
-    """
-    matched = [s for s in symbols if is_related(nl_term, s)]
-    return bool(matched), matched
+# v3.7: BASIC_SYNONYMS と is_related() を削除
+# 代わりに validate_symbol_relevance ツールでLLMに判定を委譲
+# 詳細は code_intel_server.py の validate_symbol_relevance を参照
 
 
 # =============================================================================

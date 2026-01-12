@@ -1,4 +1,4 @@
-# Code Intelligence MCP Server v3.6 設計資料
+# Code Intelligence MCP Server v3.7 設計資料
 
 ## 背景：なぜこのMCPサーバーが必要か
 
@@ -33,6 +33,47 @@ Code Intelligence MCP Server
 | 文字検索 | ripgrep | 高速なテキスト検索 |
 | 構造解析 | tree-sitter | AST 解析、関数/クラス抽出 |
 | 参照解析 | ctags | 定義・参照の解析 |
+
+---
+
+## v3.7 の主要変更
+
+### 課題（v3.6）
+
+v3.6 では以下の問題が残っていた：
+
+- `BASIC_SYNONYMS` 辞書によるハードコードされた関連性判定
+- 文字重複率による意味的一致判定の限界（「サインイン」と「Login」が一致しない）
+- `QueryClassifier` の正規表現ベースのルーティング
+
+### 解決策（v3.7）
+
+**Embedding + LLM委譲**: パターンマッチ依存を排除し、意味理解に基づくシステムへ
+
+| 変更領域 | v3.6 | v3.7 |
+|----------|------|------|
+| クエリカテゴリ | 正規表現キーワードマッチ | Intent × スロット欠損状況 |
+| 用語の関連性 | ハードコード辞書 | LLM判定 + Embedding検証 |
+| 幻覚チェック | 原文一致 + 文字重複率 | Embedding類似度 |
+
+### 新ツール: `validate_symbol_relevance`
+
+探索で見つけたシンボルの関連性を Embedding で検証：
+
+```python
+# 3層類似度判定
+if similarity > 0.6:
+    return "FACT"           # 高信頼
+elif similarity >= 0.3:
+    return "FACT + HIGH"    # 承認するがリスク引き上げ
+else:
+    return "REJECTED"       # 物理的拒否 + 再調査ガイダンス
+```
+
+### 成功ペアの自動キャッシュ
+
+LLMが判定し、Embeddingで承認されたNL→Symbolペアを `.code-intel/learned_pairs.json` に保存。
+次回以降の探索で優先的に提示。
 
 ---
 
@@ -145,7 +186,7 @@ LLM に判断をさせない。守らせるのではなく、守らないと進�
 
 ---
 
-## フェーズゲート（v3.6）
+## フェーズゲート（v3.7）
 
 ```
 start_session(intent, query)
@@ -166,17 +207,23 @@ start_session(intent, query)
 │  許可: query, find_definitions, find_references, search_text    │
 │  禁止: devrag_search                                            │
 │  完了: submit_understanding(...)                                │
-│                                                                 │
-│  v3.6 検証:                                                     │
-│  - 動的要件（risk_level に応じた symbols/files/patterns 数）    │
-│  - NL→Symbol 整合性（target_feature と symbols の対応）         │
-│  - slot_evidence 要件（HIGH risk では必須）                     │
-│  - HYPOTHESIS スロットの有無                                    │
 └─────────────────────────────────────────────────────────────────┘
         │
-        ├─ high + 整合性 OK + HYPOTHESIS なし ─────────────┐
+        ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  VALIDATION                                         ← v3.7     │
+│  ─────────────────────────────────────────────────────────────  │
+│  ツール: validate_symbol_relevance                              │
+│  サーバー: Embedding類似度による3層判定                         │
+│  - > 0.6: FACT として承認                                       │
+│  - 0.3-0.6: 承認 + risk_level を HIGH に強制                    │
+│  - < 0.3: 物理的拒否 + 再調査ガイダンス                         │
+│  キャッシュ参照: learned_pairs.json から既知ペアを優先提示      │
+└─────────────────────────────────────────────────────────────────┘
+        │
+        ├─ 全承認 + 整合性 OK + HYPOTHESIS なし ───────────┐
         │                                                   │
-        ▼ low または HYPOTHESIS あり                        │
+        ▼ 一部拒否 または HYPOTHESIS あり                   │
 ┌───────────────────────────────────────┐                  │
 │  SEMANTIC                             │                  │
 │  ─────────────────────────────────    │                  │
@@ -406,19 +453,21 @@ class DecisionLog:
 
 ---
 
-## ツール一覧（v3.6 更新）
+## ツール一覧（v3.7 更新）
 
 ### セッション管理ツール
 
-| ツール | 用途 | v3.6 変更 |
-|--------|------|-----------|
+| ツール | 用途 | 変更 |
+|--------|------|------|
 | `start_session` | セッション開始 | extraction_prompt を返す |
-| `set_query_frame` | QueryFrame 設定 | **新規** |
+| `set_query_frame` | QueryFrame 設定 | v3.6 |
 | `get_session_status` | 状態確認 | QueryFrame 情報を含む |
-| `submit_understanding` | EXPLORATION 完了 | NL→Symbol 整合性チェック追加 |
+| `submit_understanding` | EXPLORATION 完了 | NL→Symbol 整合性チェック |
 | `submit_semantic` | SEMANTIC 完了 | slot_source を HYPOTHESIS に設定 |
 | `submit_verification` | VERIFICATION 完了 | HYPOTHESIS を FACT に昇格 |
-| `check_write_target` | Write 可否確認 | HYPOTHESIS チェック追加 |
+| `check_write_target` | Write 可否確認 | HYPOTHESIS チェック |
+| `validate_symbol_relevance` | シンボル関連性検証 | **v3.7 新規** |
+| `record_outcome` | 結果記録 | **v3.7** 成功ペアをキャッシュ |
 
 ---
 
@@ -455,9 +504,12 @@ class DecisionLog:
 
 ## 関連ドキュメント
 
-- [ROUTER.md](./ROUTER.md) - Router詳細設計（v3.6）
-- [DESIGN_v3.6.md](./DESIGN_v3.6.md) - v3.6設計ドラフト
+- [ROUTER.md](./ROUTER.md) - Router詳細設計
+- [DESIGN_v3.7.md](./DESIGN_v3.7.md) - v3.7設計（Embedding + LLM委譲）
+- [DESIGN_v3.6.md](./DESIGN_v3.6.md) - v3.6設計（QueryFrame）
 - [code_intel_server.py](../code_intel_server.py) - MCPサーバー実装
-- [query_frame.py](../tools/query_frame.py) - QueryFrame実装
-- [session.py](../tools/session.py) - セッション管理
-- [outcome_log.py](../tools/outcome_log.py) - 結果ログ
+- [tools/embedding.py](../tools/embedding.py) - Embedding検証（v3.7）
+- [tools/learned_pairs.py](../tools/learned_pairs.py) - 成功ペアキャッシュ（v3.7）
+- [tools/query_frame.py](../tools/query_frame.py) - QueryFrame実装
+- [tools/session.py](../tools/session.py) - セッション管理
+- [tools/outcome_log.py](../tools/outcome_log.py) - 結果ログ
