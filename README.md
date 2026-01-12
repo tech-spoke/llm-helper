@@ -1,12 +1,59 @@
-# Code Intelligence MCP Server
+# Code Intelligence MCP Server v3.6
 
 Cursor IDEのようなコードインテリジェンス機能をオープンソースツールで実現するMCPサーバー。
 
-## 機能
+## なぜ必要か
+
+同じ Opus 4.5 モデルでも、呼び出し元によって挙動が異なる：
+
+| 呼び出し元 | 挙動 |
+|-----------|------|
+| **Cursor** | コードベース全体を理解した上で修正する |
+| **Claude Code** | 修正箇所だけを見て修正する傾向がある |
+
+このMCPサーバーは、Claude Codeに「コードベースを理解させる情報」を提供します。
+
+## v3.6 の特徴
+
+### フェーズゲート実行
+
+LLMが探索をスキップできないよう、物理的に制限：
+
+```
+EXPLORATION → SEMANTIC → VERIFICATION → READY
+     ↓            ↓           ↓           ↓
+  code-intel   devrag      検証       実装許可
+   ツール      (仮説)     (確定)
+```
+
+### QueryFrame
+
+自然文を4+1スロットで構造化：
+
+| スロット | 説明 | 例 |
+|----------|------|-----|
+| `target_feature` | 対象機能 | 「ログイン機能」 |
+| `trigger_condition` | 再現条件 | 「パスワードが空のとき」 |
+| `observed_issue` | 問題 | 「エラーが出ない」 |
+| `desired_action` | 期待 | 「チェックを追加」 |
+| `mapped_symbols` | 探索で見つけたシンボル | `["LoginService"]` |
+
+### 設計原則
+
+| 原則 | 実装 |
+|------|------|
+| LLMに判断をさせない | confidence はサーバーが算出 |
+| 幻覚を物理的に排除 | Quote検証（引用が原文にあるか確認） |
+| 動的な要件調整 | risk_level (HIGH/MEDIUM/LOW) で探索要件を変更 |
+| 情報の確実性を追跡 | FACT（確定）vs HYPOTHESIS（要検証） |
+
+## ツール一覧
+
+### コードインテリジェンス
 
 | ツール | 用途 |
 |--------|------|
-| `repo_pack` | リポジトリ全体をLLM用にパック (Repomix) |
+| `query` | 自然言語でのインテリジェントクエリ |
 | `search_text` | 高速テキスト検索 (ripgrep) |
 | `search_files` | ファイル名検索 (ripgrep) |
 | `analyze_structure` | コード構造解析 (tree-sitter) |
@@ -14,7 +61,38 @@ Cursor IDEのようなコードインテリジェンス機能をオープンソ�
 | `find_references` | シンボル参照検索 (ctags) |
 | `get_symbols` | シンボル一覧取得 (ctags) |
 | `get_function_at_line` | 特定行の関数取得 (tree-sitter) |
-| `query` | 自然言語でのインテリジェントクエリ |
+| `repo_pack` | リポジトリ全体をLLM用にパック (Repomix) |
+
+### セッション管理（v3.6）
+
+| ツール | 用途 |
+|--------|------|
+| `start_session` | セッション開始、extraction_prompt を返す |
+| `set_query_frame` | QueryFrame 設定（Quote検証付き） |
+| `get_session_status` | 現在のフェーズ・状態を確認 |
+| `submit_understanding` | EXPLORATION 完了 |
+| `submit_semantic` | SEMANTIC 完了 |
+| `submit_verification` | VERIFICATION 完了 |
+| `check_write_target` | Write 可否確認（探索済みファイルのみ許可） |
+| `record_outcome` | 結果を記録（改善サイクル用） |
+
+## スキル
+
+### /code スキル
+
+コード実装を支援するエージェント。フェーズゲートに従って探索→実装を行います。
+
+```
+/code ログイン機能でパスワードが空のときエラーが出ないバグを直して
+```
+
+### /outcome スキル
+
+実装結果を記録するエージェント。失敗パターンの分析に使用。
+
+```
+/outcome この実装は失敗だった
+```
 
 ## 依存関係
 
@@ -25,109 +103,11 @@ Cursor IDEのようなコードインテリジェンス機能をオープンソ�
 | Python 3.10+ | Yes | サーバー本体 |
 | tree-sitter | Yes | analyze_structure (pip で自動インストール) |
 | repomix | No | repo_pack, bootstrapキャッシュ |
-
-### devrag（オプション：意味検索フォールバック）
-
-> **devragは完全にオプションです。** 未導入でもコードインテリジェンス機能（search_text, find_definitions等）は正常に動作します。
-
-devragはRouterに統合されたフォールバック機構です:
-
-```
-Query → Router → コードツール実行 → 結果不十分? → devrag発動
-                                    ↓
-                              結果十分 → 終了
-```
-
-- コードベースのツールで結果が不十分な場合に**自動発動**
-- 曖昧なクエリや意味的な質問で効果を発揮
-- **最後の保険**として設計
-
-#### devragのインストール
-
-GitHub Releases: https://github.com/tomohiro-owada/devrag/releases
-
-```bash
-# Linux x64
-wget https://github.com/tomohiro-owada/devrag/releases/latest/download/devrag-linux-x64.tar.gz
-tar xzf devrag-linux-x64.tar.gz
-sudo mv devrag /usr/local/bin/
-
-# macOS Apple Silicon
-wget https://github.com/tomohiro-owada/devrag/releases/latest/download/devrag-macos-apple-silicon.tar.gz
-tar xzf devrag-macos-apple-silicon.tar.gz
-sudo mv devrag /usr/local/bin/
-
-# 確認
-devrag -version
-```
-
-#### devragの設定
-
-対象プロジェクトのルートに `rag-custom-config.json` を作成:
-
-```json
-{
-    "document_patterns": [
-        "./src",
-        "./docs"
-    ],
-    "db_path": "./vectors.db",
-    "chunk_size": 500,
-    "search_top_k": 5,
-    "compute": {
-        "device": "auto",
-        "fallback_to_cpu": true
-    },
-    "model": {
-        "name": "multilingual-e5-small",
-        "dimensions": 384
-    }
-}
-```
-
-| 設定 | 説明 |
-|------|------|
-| document_patterns | インデックス対象ディレクトリ |
-| db_path | ベクトルDBの保存先 |
-| chunk_size | ドキュメント分割サイズ |
-| search_top_k | 検索結果数 |
-| model.name | 埋め込みモデル |
-
-#### devragのインデックス作成
-
-```bash
-cd /path/to/your/project
-devrag -config rag-custom-config.json index
-```
-
-#### devragのMCP設定（任意）
-
-code-intelのフォールバックはdevrag CLIを直接呼び出すため、**MCP設定は不要**です。
-
-Claude Codeからdevragを直接使いたい場合のみ、`.mcp.json`に追加:
-
-```json
-{
-  "mcpServers": {
-    "devrag": {
-      "type": "stdio",
-      "command": "/usr/local/bin/devrag",
-      "args": ["--config", "rag-custom-config.json"]
-    }
-  }
-}
-```
-
-#### devragがない場合
-
-- 基本機能（search_text, find_definitions等）は正常動作
-- フォールバックがスキップされ、結果が不十分なまま返る可能性あり
+| devrag | No | 意味検索フォールバック |
 
 ## セットアップ
 
 ### 1. 依存ツールのインストール
-
-#### 必須
 
 ```bash
 # Ubuntu/Debian
@@ -135,19 +115,16 @@ sudo apt install ripgrep universal-ctags
 
 # macOS
 brew install ripgrep universal-ctags
-```
 
-#### 任意
-
-```bash
-# Repomix - repo_pack機能に必要 (Node.js必須)
+# 任意: Repomix
 npm install -g repomix
 ```
 
 ### 2. サーバーのセットアップ
 
 ```bash
-cd /home/kazuki/public_html/llm-helper
+git clone https://github.com/tech-spoke/llm-helper.git
+cd llm-helper
 
 # セットアップスクリプト実行
 ./setup.sh
@@ -156,16 +133,11 @@ cd /home/kazuki/public_html/llm-helper
 または手動で:
 
 ```bash
-# 仮想環境作成
 python3 -m venv venv
-
-# 依存関係インストール
-./venv/bin/pip install mcp tree-sitter tree-sitter-languages
+./venv/bin/pip install -r requirements.txt
 ```
 
-### 3. 他プロジェクトでの設定
-
-#### 方法A: プロジェクトローカル設定（推奨）
+### 3. MCP設定
 
 対象プロジェクトのルートに `.mcp.json` を作成:
 
@@ -174,204 +146,128 @@ python3 -m venv venv
   "mcpServers": {
     "code-intel": {
       "type": "stdio",
-      "command": "/home/kazuki/public_html/llm-helper/venv/bin/python",
-      "args": ["/home/kazuki/public_html/llm-helper/code_intel_server.py"],
+      "command": "/path/to/llm-helper/venv/bin/python",
+      "args": ["/path/to/llm-helper/code_intel_server.py"],
       "env": {
-        "PYTHONPATH": "/home/kazuki/public_html/llm-helper"
+        "PYTHONPATH": "/path/to/llm-helper"
       }
     }
   }
 }
 ```
 
-#### 方法B: グローバル設定（全プロジェクト共通）
+### 4. スキルの設定（任意）
 
-`~/.claude/mcp.json` に追加:
-
-```json
-{
-  "mcpServers": {
-    "code-intel": {
-      "type": "stdio",
-      "command": "/home/kazuki/public_html/llm-helper/venv/bin/python",
-      "args": ["/home/kazuki/public_html/llm-helper/code_intel_server.py"],
-      "env": {
-        "PYTHONPATH": "/home/kazuki/public_html/llm-helper"
-      }
-    }
-  }
-}
-```
-
-### 4. 設定の確認
-
-Claude Codeを再起動し、MCPツールが認識されているか確認:
+`.claude/commands/` に `code.md` と `outcome.md` をコピー:
 
 ```bash
-# Claude Codeを起動
-claude
-
-# /mcp コマンドでMCPサーバー一覧を確認
-/mcp
+mkdir -p .claude/commands
+cp /path/to/llm-helper/.claude/commands/*.md .claude/commands/
 ```
-
-`code-intel` サーバーが表示されればOK。
 
 ## 利用方法
 
-### 基本的なツール呼び出し
+### /code スキルを使う（推奨）
 
-Claude Codeから直接ツールを呼び出せます:
+```
+/code AuthServiceのlogin関数でパスワードが空のときエラーが出ないバグを直して
+```
+
+スキルが自動的に:
+1. Intent判定（MODIFY）
+2. セッション開始
+3. QueryFrame抽出・検証
+4. EXPLORATION（find_definitions, find_references等）
+5. 必要に応じてSEMANTIC（devrag）
+6. VERIFICATION（仮説検証）
+7. READY（実装）
+
+### 直接ツールを呼び出す
 
 ```
 # テキスト検索
 mcp__code-intel__search_text でパターン "Router" を検索して
 
 # 定義検索
-mcp__code-intel__find_definitions で "SessionBootstrap" の定義を探して
+mcp__code-intel__find_definitions で "SessionState" の定義を探して
 
 # 構造解析
 mcp__code-intel__analyze_structure で tools/router.py を解析して
-
-# シンボル一覧
-mcp__code-intel__get_symbols で tools/ 配下のシンボルを取得して
 ```
 
-### インテリジェントクエリ（推奨）
+## フェーズの詳細
 
-`query` ツールを使うと、質問に応じて適切なツールを自動選択:
+### EXPLORATION
 
+code-intelツールでコードベースを探索：
+- `find_definitions`: シンボルの定義場所
+- `find_references`: シンボルの使用箇所
+- `search_text`: テキストパターン検索
+- `analyze_structure`: AST解析
+
+**devragは使用禁止**（物理的にブロック）
+
+### SEMANTIC
+
+探索結果が不十分な場合のみ発動：
+- `devrag_search`: 意味検索
+- 結果は **HYPOTHESIS**（仮説）として記録
+
+### VERIFICATION
+
+HYPOTHESISをcode-intelツールで検証：
+- 確認されれば **FACT** に昇格
+- 否定されれば **rejected** として記録
+
+**devragは使用禁止**（物理的にブロック）
+
+### READY
+
+実装が許可される：
+- HYPOTHESISが残っていないことを確認
+- Write対象は探索済みファイルのみ許可
+
+## devrag（オプション）
+
+devragは意味検索のフォールバック機構です。未導入でも基本機能は動作します。
+
+### インストール
+
+```bash
+# Linux x64
+wget https://github.com/tomohiro-owada/devrag/releases/latest/download/devrag-linux-x64.tar.gz
+tar xzf devrag-linux-x64.tar.gz
+sudo mv devrag /usr/local/bin/
 ```
-mcp__code-intel__query で「Router classはどこで定義されている？」を調べて
 
-mcp__code-intel__query で「この関数は何をしている？」を調べて
-```
+### 設定
 
-#### queryの動作
-
-1. 質問を4カテゴリに分類
-   - A_SYNTAX: 定義場所、構文
-   - B_REFERENCE: 参照、呼び出し元
-   - C_SEMANTIC: 目的、設計意図
-   - D_IMPACT: 影響範囲、変更分析
-
-2. カテゴリに応じたツールを自動選択
-
-3. 結果が不十分な場合はdevrag（意味検索）にフォールバック
-
-### 出力例
+対象プロジェクトに `rag-custom-config.json` を作成:
 
 ```json
 {
-  "question": "Where is Router defined?",
-  "categories": ["A_SYNTAX"],
-  "intent_confidence": "low",
-  "force_devrag": true,
-  "results": [
-    {
-      "file_path": "tools/router.py",
-      "symbol_name": "Router",
-      "start_line": 792,
-      "source_tool": "find_definitions"
-    }
-  ],
-  "decision_log": {
-    "classification": {
-      "categories": ["A_SYNTAX"],
-      "confidence": "low",
-      "pattern_match_count": 1,
-      "ambiguous": true
-    },
-    "fallback": {
-      "triggered": false,
-      "reason": "devrag already executed",
-      "threshold": 1
-    }
+  "document_patterns": ["./src", "./docs"],
+  "db_path": "./vectors.db",
+  "chunk_size": 500,
+  "search_top_k": 5,
+  "model": {
+    "name": "multilingual-e5-small",
+    "dimensions": 384
   }
 }
 ```
 
-## アーキテクチャ
-
-```
-User Query
-    |
-    v
-+-------------------+
-|      Router       |
-|  - QueryClassifier (質問分類)
-|  - ToolSelector   (ツール選択)
-|  - FallbackDecider (フォールバック判定)
-+-------------------+
-    |
-    v
-+-------------------+
-|   Tool Execution  |
-|  ripgrep, ctags,  |
-|  tree-sitter, etc |
-+-------------------+
-    |
-    v
-+-------------------+
-| ResultIntegrator  |
-|  結果の統合・重複排除 |
-+-------------------+
-```
-
-## v3.1 機能
-
-### Decision Log
-
-全ての判断理由を構造化ログとして記録:
-
-```json
-{
-  "classification": { "categories": [...], "confidence": "..." },
-  "tool_selection": { "tools_planned": [...], "force_devrag": ... },
-  "fallback": { "triggered": ..., "reason": "...", "threshold": ... }
-}
-```
-
-### Cache Invalidation
-
-repo_packのキャッシュを簡易チェックで無効化:
-- ファイル数が変わったら無効化
-- ファイルが更新されたら（mtime変化）無効化
-
-※ 簡易的なチェックであり、差分解析や依存関係追跡は行いません。
-
-## トラブルシューティング
-
-### MCPサーバーが認識されない
+### インデックス作成
 
 ```bash
-# サーバーを直接起動してエラー確認
-/home/kazuki/public_html/llm-helper/venv/bin/python \
-  /home/kazuki/public_html/llm-helper/code_intel_server.py
+devrag -config rag-custom-config.json index
 ```
 
-### 依存ツールが見つからない
+## ドキュメント
 
-```bash
-# 各ツールの存在確認
-which rg        # ripgrep
-which ctags     # universal-ctags
-which repomix   # repomix
-```
-
-### devragフォールバックが動作しない
-
-devragはRouterに統合されたフォールバック機構です。動作しない場合:
-
-```bash
-# devrag CLIが存在するか確認
-which devrag
-
-# 直接実行してエラー確認
-devrag search "test query" --path . --format json
-```
-
-devragが未設定でも基本機能は動作しますが、結果が不十分な場合の補完ができません。
+- [ARCHITECTURE.md](docs/ARCHITECTURE.md) - システム設計
+- [ROUTER.md](docs/ROUTER.md) - Router詳細
+- [DESIGN_v3.6.md](docs/DESIGN_v3.6.md) - v3.6設計
 
 ## ライセンス
 
