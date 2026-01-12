@@ -1,0 +1,9 @@
+# MCP Server
+mcp>=1.0.0
+
+# Tree-sitter for code structure analysis
+tree-sitter>=0.21.0
+tree-sitter-languages>=1.10.0
+
+# For async subprocess handling
+asyncio
