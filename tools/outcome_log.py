@@ -1,19 +1,23 @@
 """
-Outcome Log - Records session outcomes for improvement cycle.
+Improvement Cycle Logs - Records decisions and outcomes for analysis.
 
-v3.5: Added for matching with Decision Log.
+v3.10: Added DecisionLog persistence
+v3.5: Added OutcomeLog for matching with Decision Log.
 
 Design principles:
 - Observer only: Records, does not intervene
 - Append-only: Never modifies past records
-- Human-triggered: /outcome skill invokes this
-- LLM-analyzed: LLM analyzes conversation context
+- Two-log system: DecisionLog (automatic) + OutcomeLog (human-triggered)
 
-Usage:
-1. Human recognizes failure ("やり直して", "違う", etc.)
-2. Human calls /outcome skill
-3. LLM analyzes context and calls record_outcome()
-4. This tool appends to logs/outcomes.jsonl
+Log files:
+- decisions.jsonl: Automatic recording at session start
+- outcomes.jsonl: Human-triggered via /outcome skill
+
+Improvement cycle:
+1. Session starts → DecisionLog recorded automatically
+2. Session ends (success/failure)
+3. Human calls /outcome → OutcomeLog recorded
+4. Analysis matches DecisionLog + OutcomeLog by session_id
 """
 
 import json
@@ -26,6 +30,7 @@ from typing import Literal
 
 # Log file location (inside .code-intel for project isolation)
 LOG_DIR = Path(__file__).parent.parent / ".code-intel" / "logs"
+DECISION_LOG_FILE = LOG_DIR / "decisions.jsonl"
 OUTCOME_LOG_FILE = LOG_DIR / "outcomes.jsonl"
 
 
@@ -221,3 +226,197 @@ def get_failure_stats() -> dict:
             stats["confidence_correlation"][confidence][outcome] += 1
 
     return stats
+
+
+# ============================================================================
+# Decision Log Functions (v3.10)
+# ============================================================================
+
+def record_decision(decision_log: dict) -> dict:
+    """
+    Record a decision log at session start.
+
+    Called automatically when a session starts.
+    The decision_log should contain:
+    - session_id: str
+    - query: str
+    - timestamp: str
+    - intent: str
+    - required_phases: list[str]
+    - missing_slots: list[str]
+    - risk_level: str
+    - tools_planned: list[str]
+    - needs_bootstrap: bool
+    - bootstrap_reason: str | None
+
+    Returns:
+        {"success": True, "log_file": str, "record_id": str}
+        or {"success": False, "error": str}
+    """
+    try:
+        ensure_log_dir()
+
+        session_id = decision_log.get("session_id", "unknown")
+        timestamp = decision_log.get("timestamp", datetime.now().isoformat())
+        record_id = f"decision_{session_id}_{timestamp}"
+        decision_log["record_id"] = record_id
+
+        with open(DECISION_LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(decision_log, ensure_ascii=False) + "\n")
+
+        return {
+            "success": True,
+            "log_file": str(DECISION_LOG_FILE),
+            "record_id": record_id,
+        }
+
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+        }
+
+
+def get_decision_for_session(session_id: str) -> dict | None:
+    """
+    Get the decision log for a specific session.
+
+    Returns the first decision log matching the session_id,
+    or None if not found.
+    """
+    if not DECISION_LOG_FILE.exists():
+        return None
+
+    with open(DECISION_LOG_FILE, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+                if record.get("session_id") == session_id:
+                    return record
+            except json.JSONDecodeError:
+                continue
+
+    return None
+
+
+def get_session_analysis(session_id: str) -> dict:
+    """
+    Get combined decision + outcome analysis for a session.
+
+    This is the key function for improvement cycle analysis.
+    Links DecisionLog and OutcomeLog by session_id.
+
+    Returns:
+        {
+            "session_id": str,
+            "decision": dict | None,
+            "outcomes": list[dict],
+            "analysis": {
+                "had_decision": bool,
+                "had_outcome": bool,
+                "final_outcome": str | None,
+                "tools_planned": list[str],
+                "failure_point": str | None,
+            }
+        }
+    """
+    decision = get_decision_for_session(session_id)
+    outcomes = get_outcomes_for_session(session_id)
+
+    # Determine final outcome (last recorded)
+    final_outcome = None
+    failure_point = None
+    if outcomes:
+        last_outcome = outcomes[-1]
+        final_outcome = last_outcome.get("outcome")
+        if last_outcome.get("analysis"):
+            failure_point = last_outcome["analysis"].get("failure_point")
+
+    return {
+        "session_id": session_id,
+        "decision": decision,
+        "outcomes": outcomes,
+        "analysis": {
+            "had_decision": decision is not None,
+            "had_outcome": len(outcomes) > 0,
+            "final_outcome": final_outcome,
+            "tools_planned": decision.get("tools_planned", []) if decision else [],
+            "failure_point": failure_point,
+        }
+    }
+
+
+def get_improvement_insights(limit: int = 100) -> dict:
+    """
+    Analyze recent sessions to find improvement opportunities.
+
+    Looks for patterns in failures:
+    - Which intents fail most often?
+    - Which tools are associated with failures?
+    - Are HIGH risk sessions more likely to fail?
+
+    Returns actionable insights for system improvement.
+    """
+    # Get recent decisions
+    decisions = {}
+    if DECISION_LOG_FILE.exists():
+        with open(DECISION_LOG_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                    sid = record.get("session_id")
+                    if sid:
+                        decisions[sid] = record
+                except json.JSONDecodeError:
+                    continue
+
+    # Get recent outcomes
+    outcomes = get_recent_outcomes(limit=limit)
+
+    # Match and analyze
+    insights = {
+        "total_sessions_with_outcomes": len(outcomes),
+        "sessions_with_decisions": 0,
+        "tool_failure_correlation": {},
+        "risk_level_correlation": {"HIGH": {"success": 0, "failure": 0},
+                                    "MEDIUM": {"success": 0, "failure": 0},
+                                    "LOW": {"success": 0, "failure": 0}},
+        "common_failure_points": {},
+    }
+
+    for outcome in outcomes:
+        sid = outcome.get("session_id")
+        outcome_result = outcome.get("outcome", "unknown")
+
+        if sid in decisions:
+            insights["sessions_with_decisions"] += 1
+            decision = decisions[sid]
+
+            # Risk level correlation
+            risk = decision.get("risk_level", "UNKNOWN")
+            if risk in insights["risk_level_correlation"]:
+                if outcome_result in ("success", "failure"):
+                    insights["risk_level_correlation"][risk][outcome_result] += 1
+
+            # Tool failure correlation
+            if outcome_result == "failure":
+                for tool in decision.get("tools_planned", []):
+                    if tool not in insights["tool_failure_correlation"]:
+                        insights["tool_failure_correlation"][tool] = 0
+                    insights["tool_failure_correlation"][tool] += 1
+
+        # Common failure points
+        if outcome_result == "failure" and outcome.get("analysis"):
+            fp = outcome["analysis"].get("failure_point", "unknown")
+            if fp:
+                if fp not in insights["common_failure_points"]:
+                    insights["common_failure_points"][fp] = 0
+                insights["common_failure_points"][fp] += 1
+
+    return insights

@@ -60,9 +60,11 @@ from tools.session import (
     IntentReclassificationRequired,
     InvalidSemanticReason, WriteTargetBlocked,  # v3.4
 )
-from tools.outcome_log import (  # v3.5
+from tools.outcome_log import (  # v3.5, v3.10
     OutcomeLog, OutcomeAnalysis, record_outcome,
     get_outcomes_for_session, get_failure_stats,
+    record_decision, get_decision_for_session,  # v3.10
+    get_session_analysis, get_improvement_insights,  # v3.10
 )
 from tools.query_frame import (  # v3.6
     QueryFrame, QueryDecomposer, SlotSource, SlotEvidence,
@@ -198,8 +200,19 @@ async def execute_query(
     output["step_outputs"] = step_outputs
 
     # v3.7: Include decision log for observability
+    # v3.10: Persist decision log for improvement cycle
     if plan.decision_log:
-        output["decision_log"] = plan.decision_log.to_dict()
+        decision_dict = plan.decision_log.to_dict()
+
+        # Add session_id if there's an active session
+        active_session = session_manager.get_active_session()
+        if active_session:
+            decision_dict["session_id"] = active_session.session_id
+
+        # Persist decision log
+        record_decision(decision_dict)
+
+        output["decision_log"] = decision_dict
 
     return output
 
