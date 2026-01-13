@@ -7,7 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 usage() {
     echo "Usage: $0 <project-path> [options]"
     echo ""
-    echo "Initialize a project for Code Intel MCP Server v3.8"
+    echo "Initialize a project for Code Intel MCP Server v3.9"
     echo ""
     echo "Arguments:"
     echo "  project-path    Path to the target project (required)"
@@ -15,6 +15,7 @@ usage() {
     echo "Options:"
     echo "  --src-dirs      Source directories to index (default: src,lib,app)"
     echo "                  Comma-separated, relative to project root"
+    echo "  --sync-ttl      Hours between auto-sync (default: 1)"
     echo "  --help          Show this help message"
     echo ""
     echo "Examples:"
@@ -27,11 +28,16 @@ usage() {
 # Parse arguments
 PROJECT_PATH=""
 SRC_DIRS="src,lib,app"
+SYNC_TTL_HOURS="1"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
         --src-dirs=*)
             SRC_DIRS="${1#*=}"
+            shift
+            ;;
+        --sync-ttl=*)
+            SYNC_TTL_HOURS="${1#*=}"
             shift
             ;;
         --help|-h)
@@ -65,7 +71,7 @@ PROJECT_PATH="$(cd "$PROJECT_PATH" 2>/dev/null && pwd)" || {
     exit 1
 }
 
-echo "=== Code Intel Project Initialization ==="
+echo "=== Code Intel Project Initialization v3.9 ==="
 echo ""
 echo "Project: $PROJECT_PATH"
 echo "MCP Server: $SCRIPT_DIR"
@@ -74,22 +80,64 @@ echo ""
 # Create .code-intel directory structure
 echo "Creating .code-intel/ directory..."
 mkdir -p "$PROJECT_PATH/.code-intel/agreements"
+mkdir -p "$PROJECT_PATH/.code-intel/chroma"
 echo "  ✓ .code-intel/"
 echo "  ✓ .code-intel/agreements/"
+echo "  ✓ .code-intel/chroma/"
 
-# Generate devrag-forest.json (森: source code search)
-# Convert comma-separated dirs to JSON array with ../ prefix
+# Convert comma-separated dirs to JSON array
 IFS=',' read -ra DIRS <<< "$SRC_DIRS"
-PATTERNS=""
+DIRS_JSON=""
 for dir in "${DIRS[@]}"; do
     dir=$(echo "$dir" | xargs)  # trim whitespace
-    if [ -n "$PATTERNS" ]; then
-        PATTERNS="$PATTERNS, "
+    if [ -n "$DIRS_JSON" ]; then
+        DIRS_JSON="$DIRS_JSON, "
     fi
-    PATTERNS="$PATTERNS\"../$dir\""
+    DIRS_JSON="$DIRS_JSON\"$dir\""
 done
 
-cat > "$PROJECT_PATH/.code-intel/devrag-forest.json" << EOF
+# Generate v3.9 config.json
+cat > "$PROJECT_PATH/.code-intel/config.json" << EOF
+{
+  "version": "3.9",
+  "embedding_model": "multilingual-e5-small",
+  "source_dirs": [$DIRS_JSON],
+  "exclude_patterns": [
+    "**/node_modules/**",
+    "**/__pycache__/**",
+    "**/venv/**",
+    "**/vendor/**",
+    "**/.git/**",
+    "**/.code-intel/**"
+  ],
+  "chunk_strategy": "ast",
+  "chunk_max_tokens": 512,
+  "sync_ttl_hours": $SYNC_TTL_HOURS,
+  "sync_on_start": true,
+  "max_chunks": 10000,
+  "search_weights": {
+    "vector": 0.4,
+    "keyword": 0.2,
+    "definition": 0.3,
+    "reference": 0.1
+  }
+}
+EOF
+echo "  ✓ .code-intel/config.json (v3.9)"
+
+# Backward compatibility: keep devrag configs if they exist
+if [ ! -f "$PROJECT_PATH/.code-intel/devrag-forest.json" ]; then
+    # Generate devrag-forest.json for legacy fallback
+    PATTERNS=""
+    for dir in "${DIRS[@]}"; do
+        dir=$(echo "$dir" | xargs)
+        if [ -n "$PATTERNS" ]; then
+            PATTERNS="$PATTERNS, "
+        fi
+        PATTERNS="$PATTERNS\"../$dir\""
+    done
+
+    cat > "$PROJECT_PATH/.code-intel/devrag-forest.json" << EOF
 {
   "document_patterns": [$PATTERNS],
   "db_path": "./vectors-forest.db",
@@ -105,10 +153,11 @@ cat > "$PROJECT_PATH/.code-intel/devrag-forest.json" << EOF
   }
 }
 EOF
-echo "  ✓ .code-intel/devrag-forest.json"
+    echo "  ✓ .code-intel/devrag-forest.json (legacy fallback)"
+fi
 
-# Generate devrag-map.json (地図: agreements search)
-cat > "$PROJECT_PATH/.code-intel/devrag-map.json" << 'EOF'
+if [ ! -f "$PROJECT_PATH/.code-intel/devrag-map.json" ]; then
+    cat > "$PROJECT_PATH/.code-intel/devrag-map.json" << 'EOF'
 {
   "document_patterns": ["./agreements"],
   "db_path": "./vectors-map.db",
@@ -124,32 +173,34 @@ cat > "$PROJECT_PATH/.code-intel/devrag-map.json" << 'EOF'
   }
 }
 EOF
-echo "  ✓ .code-intel/devrag-map.json"
+    echo "  ✓ .code-intel/devrag-map.json (legacy fallback)"
+fi
 
 # Update .gitignore
+GITIGNORE_ENTRIES="
+# Code Intel MCP Server v3.9
+.code-intel/vectors-*.db
+.code-intel/chroma/
+.code-intel/sync_state.json
+.code-intel/.last_sync
+.code-intel/learned_pairs.json
+"
+
 if [ -f "$PROJECT_PATH/.gitignore" ]; then
-    if ! grep -q ".code-intel/vectors" "$PROJECT_PATH/.gitignore" 2>/dev/null; then
-        echo "" >> "$PROJECT_PATH/.gitignore"
-        echo "# Code Intel MCP Server v3.8" >> "$PROJECT_PATH/.gitignore"
-        echo ".code-intel/vectors-*.db" >> "$PROJECT_PATH/.gitignore"
-        echo ".code-intel/learned_pairs.json" >> "$PROJECT_PATH/.gitignore"
+    if ! grep -q ".code-intel/chroma" "$PROJECT_PATH/.gitignore" 2>/dev/null; then
+        echo "$GITIGNORE_ENTRIES" >> "$PROJECT_PATH/.gitignore"
         echo "  ✓ Updated .gitignore"
     else
         echo "  - .gitignore already configured"
     fi
 else
-    cat > "$PROJECT_PATH/.gitignore" << 'EOF'
-# Code Intel MCP Server v3.8
-.code-intel/vectors-*.db
-.code-intel/learned_pairs.json
-EOF
+    echo "$GITIGNORE_ENTRIES" > "$PROJECT_PATH/.gitignore"
     echo "  ✓ Created .gitignore"
 fi
 
 # Get paths for MCP config
 PYTHON_PATH="$SCRIPT_DIR/venv/bin/python"
 SERVER_PATH="$SCRIPT_DIR/code_intel_server.py"
-DEVRAG_PATH=$(command -v devrag 2>/dev/null || echo "/usr/local/bin/devrag")
 
 echo ""
 echo "=== Initialization Complete ==="
@@ -157,35 +208,23 @@ echo ""
 echo "Project structure:"
 echo "  $PROJECT_PATH/"
 echo "  └── .code-intel/"
-echo "      ├── devrag-forest.json  (source code search config)"
-echo "      ├── devrag-map.json     (agreements search config)"
-echo "      ├── agreements/         (learned NL→Symbol pairs)"
-echo "      ├── vectors-forest.db   (created after sync)"
-echo "      └── vectors-map.db      (created after sync)"
+echo "      ├── config.json          (v3.9 configuration)"
+echo "      ├── agreements/          (learned NL→Symbol pairs)"
+echo "      ├── chroma/              (ChromaDB vector database)"
+echo "      ├── sync_state.json      (incremental sync state)"
+echo "      └── devrag-*.json        (legacy fallback configs)"
 echo ""
 echo "=== Next Steps ==="
 echo ""
-echo "1. Add to your .mcp.json (create if not exists):"
+echo "1. Install chromadb (required for v3.9):"
+echo ""
+echo "   pip install chromadb"
+echo ""
+echo "2. Add to your .mcp.json (create if not exists):"
 echo ""
 cat << EOF
 {
   "mcpServers": {
-    "devrag-map": {
-      "type": "stdio",
-      "command": "$DEVRAG_PATH",
-      "args": ["--config", "$PROJECT_PATH/.code-intel/devrag-map.json"],
-      "env": {
-        "LD_LIBRARY_PATH": "/usr/local/lib"
-      }
-    },
-    "devrag-forest": {
-      "type": "stdio",
-      "command": "$DEVRAG_PATH",
-      "args": ["--config", "$PROJECT_PATH/.code-intel/devrag-forest.json"],
-      "env": {
-        "LD_LIBRARY_PATH": "/usr/local/lib"
-      }
-    },
     "code-intel": {
       "type": "stdio",
       "command": "$PYTHON_PATH",
@@ -198,16 +237,21 @@ cat << EOF
 }
 EOF
 echo ""
-echo "2. Initialize devrag databases:"
-echo ""
-echo "   cd $PROJECT_PATH/.code-intel"
-echo "   devrag --config devrag-forest.json sync"
-echo "   devrag --config devrag-map.json sync"
-echo ""
 echo "3. (Optional) Copy skills to your project:"
 echo ""
 echo "   mkdir -p $PROJECT_PATH/.claude/commands"
 echo "   cp $SCRIPT_DIR/.claude/commands/*.md $PROJECT_PATH/.claude/commands/"
 echo ""
-echo "4. Restart Claude Code to load the MCP servers."
+echo "4. Restart Claude Code to load the MCP server."
+echo ""
+echo "=== v3.9 New Features ==="
+echo ""
+echo "• ChromaDB-based semantic search (replaces devrag)"
+echo "• AST-based chunking for PHP, Python, JS, Blade, etc."
+echo "• Fingerprint-based incremental sync (SHA256)"
+echo "• Auto-sync on session start (configurable)"
+echo "• Short-circuit: map hits ≥0.7 skip forest search"
+echo ""
+echo "Use 'sync_index' tool to manually trigger re-indexing."
+echo "Use 'semantic_search' tool for map/forest vector search."
 echo ""

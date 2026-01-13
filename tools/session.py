@@ -305,10 +305,9 @@ DEVRAG_ALLOWED_REASONS_BY_MISSING = {
         DevragReason.CONTEXT_FRAGMENTED,
         DevragReason.ARCHITECTURE_UNKNOWN,
     },
-    "required_tools": {
-        # ツール未使用は devrag の理由にはならない（ツールを使えば済む）
-        # ただし使っても見つからない場合は他の理由が適用される
-    },
+    # required_tools: ツール未使用は devrag の理由にはならない（ツールを使えば済む）
+    # ただし使っても見つからない場合は他の理由が適用される
+    "required_tools": set(),
 }
 
 
@@ -766,6 +765,108 @@ class SessionState:
             "error": error,
             "explored_files": list(explored_files),
             "hint": "Add the file to exploration first, or run additional exploration.",
+            "recovery_options": {
+                "add_explored_files": {
+                    "description": "Add files/directories to explored list without leaving READY phase",
+                    "example": "session.add_explored_files(['tests_with_code/'])",
+                },
+                "revert_to_exploration": {
+                    "description": "Go back to EXPLORATION phase for thorough re-exploration",
+                    "example": "session.revert_to_exploration()",
+                },
+            },
+        }
+
+    def add_explored_files(self, files: list[str]) -> dict:
+        """
+        v3.10: READYフェーズで探索済みファイルを追加登録。
+
+        check_write_target でブロックされた場合の軽量な復帰手段。
+        新しいディレクトリやファイルを探索済みとして追加できる。
+
+        Args:
+            files: 追加する探索済みファイル/ディレクトリのリスト
+
+        Returns:
+            {"success": bool, "added": list, "explored_files": list}
+        """
+        if self.phase != Phase.READY:
+            return {
+                "success": False,
+                "error": f"add_explored_files is only allowed in READY phase, current: {self.phase.name}",
+            }
+
+        if not files:
+            return {
+                "success": False,
+                "error": "No files provided to add",
+            }
+
+        # exploration が None の場合は初期化
+        if self.exploration is None:
+            self.exploration = ExplorationResult()
+
+        added = []
+        for f in files:
+            if f not in self.exploration.files_analyzed:
+                self.exploration.files_analyzed.append(f)
+                added.append(f)
+
+        return {
+            "success": True,
+            "added": added,
+            "explored_files": self.exploration.files_analyzed,
+            "message": f"Added {len(added)} file(s) to explored list.",
+        }
+
+    def revert_to_exploration(self, keep_results: bool = True) -> dict:
+        """
+        v3.10: EXPLORATIONフェーズに戻る。
+
+        check_write_target でブロックされた場合や、
+        追加の探索が必要な場合に使用。
+
+        Args:
+            keep_results: True の場合、既存の探索結果を保持
+
+        Returns:
+            {"success": bool, "previous_phase": str, "current_phase": str}
+        """
+        previous_phase = self.phase.name
+
+        if self.phase == Phase.EXPLORATION:
+            return {
+                "success": True,
+                "previous_phase": previous_phase,
+                "current_phase": Phase.EXPLORATION.name,
+                "message": "Already in EXPLORATION phase.",
+            }
+
+        # フェーズを戻す
+        self.phase = Phase.EXPLORATION
+
+        # 結果をクリアするかどうか
+        if not keep_results:
+            self.semantic = None
+            self.verification = None
+            # exploration は保持（追加探索のため）
+
+        # フェーズ履歴に記録
+        self.phase_history.append({
+            "action": "revert_to_exploration",
+            "from": previous_phase,
+            "to": Phase.EXPLORATION.name,
+            "keep_results": keep_results,
+            "timestamp": datetime.now().isoformat(),
+        })
+
+        return {
+            "success": True,
+            "previous_phase": previous_phase,
+            "current_phase": Phase.EXPLORATION.name,
+            "kept_exploration": self.exploration.to_dict() if self.exploration else None,
+            "message": f"Reverted from {previous_phase} to EXPLORATION. "
+                      f"{'Previous exploration results kept.' if keep_results else 'Results cleared.'}",
         }
 
     def submit_exploration(self, result: ExplorationResult) -> dict:

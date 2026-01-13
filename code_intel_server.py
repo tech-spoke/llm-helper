@@ -8,6 +8,12 @@ Provides Cursor-like code intelligence capabilities using open source tools:
 - tree-sitter: Code structure analysis
 - ctags: Symbol definitions and references
 
+v3.9: ChromaDB-based semantic search (devrag 置換)
+- ChromaDBManager: AST チャンキング + ベクトル検索
+- sync_index: ソースコードの増分同期
+- semantic_search: 地図/森の統合検索（Short-circuit対応）
+- Agreement 自動生成と map インデックス
+
 v3.6: QueryFrame-based natural language handling
 - QueryFrame: 自然文を構造化（target_feature, trigger_condition, etc.）
 - QueryDecomposer: LLMが抽出 → サーバーが検証
@@ -62,12 +68,33 @@ from tools.query_frame import (  # v3.6
     QueryFrame, QueryDecomposer, SlotSource, SlotEvidence,
     validate_slot, assess_risk_level, generate_investigation_guidance,
 )
+from tools.chromadb_manager import (  # v3.9
+    ChromaDBManager, SearchResult, SearchHit,
+    CHROMADB_AVAILABLE,
+)
 
 
 # Create MCP server, router, and session manager
 router = Router()
 server = Server("code-intel")
 session_manager = SessionManager()
+
+# v3.9: ChromaDB manager cache (per project)
+_chromadb_managers: dict[str, ChromaDBManager] = {}
+
+
+def get_chromadb_manager(project_root: str = ".") -> ChromaDBManager:
+    """Get or create ChromaDBManager for a project."""
+    if not CHROMADB_AVAILABLE:
+        raise RuntimeError("chromadb is not installed. Install with: pip install chromadb")
+
+    project_path = Path(project_root).resolve()
+    key = str(project_path)
+
+    if key not in _chromadb_managers:
+        _chromadb_managers[key] = ChromaDBManager(project_path)
+
+    return _chromadb_managers[key]
 
 
 async def execute_query(
@@ -81,13 +108,9 @@ async def execute_query(
     """
     Execute an intelligent query using the Router.
 
-    This function:
-    1. Uses intent from caller (v3.2) or defaults to INVESTIGATE
-    2. Checks if bootstrap (repo_pack) is needed
-    3. Creates an execution plan
-    4. Runs tools in order (composite - all categories combined)
-    5. Integrates results
-    6. Falls back to devrag if needed
+    v3.7: Updated to use QueryFrame-based routing.
+    This function creates a simple QueryFrame from the question and executes
+    the planned tools.
 
     Args:
         intent: One of "IMPLEMENT", "MODIFY", "INVESTIGATE", "QUESTION".
@@ -100,16 +123,24 @@ async def execute_query(
     if file_path:
         context["file_path"] = file_path
 
-    # Create execution plan (v3.2: pass intent from caller)
-    plan = router.create_plan(question, context, intent=intent)
+    # v3.7: Create QueryFrame from question
+    query_frame = QueryFrame(raw_query=question)
+    if symbol:
+        query_frame.target_feature = symbol
+
+    # Resolve intent
+    resolved_intent = intent or "INVESTIGATE"
+
+    # Create execution plan (v3.7: pass QueryFrame and intent)
+    plan = router.create_plan(query_frame, resolved_intent, context)
 
     output = {
         "question": question,
-        "categories": [c.name for c in plan.categories],
+        "intent": plan.intent.name,
         "reasoning": plan.reasoning,
         "needs_bootstrap": plan.needs_bootstrap,
-        "intent_confidence": plan.intent_confidence,  # v3
-        "force_devrag": plan.force_devrag,            # v3
+        "risk_level": plan.risk_level,
+        "missing_slots": plan.missing_slots,
     }
 
     if show_plan:
@@ -127,38 +158,6 @@ async def execute_query(
     all_results: list[UnifiedResult] = []
     step_outputs = []
 
-    # Step 0: Bootstrap if needed (repo_pack as pre-processing)
-    if plan.needs_bootstrap:
-        bootstrap_context = router.bootstrap.get_context(path)
-        if bootstrap_context is None:
-            # Execute repo_pack for this path
-            bootstrap_result = await pack_repository(
-                path=path,
-                output_format="markdown",
-            )
-            if "error" not in bootstrap_result:
-                router.bootstrap.set_context(path, bootstrap_result)
-                step_outputs.append({
-                    "tool": "repo_pack",
-                    "phase": "bootstrap",
-                    "raw_result": {
-                        "status": "cached",
-                        "file_count": bootstrap_result.get("file_count", 0),
-                        "note": "Repository context cached for session",
-                    },
-                })
-                # Normalize bootstrap results
-                normalized = router.integrator.normalize("repo_pack", bootstrap_result)
-                all_results.extend(normalized)
-            else:
-                step_outputs.append({
-                    "tool": "repo_pack",
-                    "phase": "bootstrap",
-                    "raw_result": bootstrap_result,
-                })
-        else:
-            output["bootstrap_cached"] = True
-
     # Execute planned steps
     for step in plan.steps:
         step_result = await execute_tool_step(step.tool, step.params, context)
@@ -169,56 +168,18 @@ async def execute_query(
             "raw_result": step_result,
         })
 
-        # Normalize results
-        normalized = router.integrator.normalize(step.tool, step_result)
-        all_results.extend(normalized)
-
-    # Check if we need devrag fallback (v3.1: get full decision details)
-    fallback_decision = router.get_fallback_decision(
-        results=all_results,
-        categories=plan.categories,
-        path=path,
-        intent_confidence=plan.intent_confidence,
-    )
-    devrag_used = any(s.tool == "devrag_search" for s in plan.steps)
-
-    # v3.1: Update decision log with fallback info
-    if plan.decision_log:
-        plan.decision_log.fallback_triggered = fallback_decision.should_fallback and not devrag_used
-        plan.decision_log.fallback_reason = fallback_decision.reason
-        plan.decision_log.fallback_threshold = fallback_decision.threshold
-        plan.decision_log.code_results_count = fallback_decision.code_results_count
-
-    if fallback_decision.should_fallback and not devrag_used:
-        output["fallback_triggered"] = True
-        output["fallback_reason"] = fallback_decision.reason  # v3.1: From decision
-
-        # If bootstrap wasn't done yet, do it now before devrag
-        if not router.bootstrap.is_initialized(path):
-            bootstrap_result = await pack_repository(path=path, output_format="markdown")
-            if "error" not in bootstrap_result:
-                router.bootstrap.set_context(path, bootstrap_result)
-                step_outputs.append({
-                    "tool": "repo_pack",
-                    "phase": "fallback_bootstrap",
-                    "raw_result": {"status": "cached_for_devrag"},
-                })
-
-        # v3: Use enhanced query with repo context
-        enhanced_query = router.bootstrap.get_enhanced_query(path, question)
-        devrag_result = await execute_devrag_search(enhanced_query, path)
-        if devrag_result:
-            step_outputs.append({
-                "tool": "devrag_search",
-                "phase": "fallback",
-                "enhanced_query": enhanced_query,  # v3: Show the enhanced query
-                "raw_result": devrag_result,
-            })
-            normalized = router.integrator.normalize("devrag_search", devrag_result)
-            all_results.extend(normalized)
-
-    # Merge and deduplicate results
-    merged_results = router.integrator.merge(all_results)
+        # Collect results (simple normalization)
+        if isinstance(step_result, dict) and "matches" in step_result:
+            for match in step_result.get("matches", []):
+                all_results.append(UnifiedResult(
+                    file_path=match.get("file", ""),
+                    symbol_name=match.get("symbol"),
+                    start_line=match.get("line", 0),
+                    end_line=match.get("end_line"),
+                    content_snippet=match.get("content", "")[:200],
+                    source_tool=step.tool,
+                    confidence=1.0,
+                ))
 
     # Format output
     output["results"] = [
@@ -231,17 +192,14 @@ async def execute_query(
             "source_tool": r.source_tool,
             "confidence": r.confidence,
         }
-        for r in merged_results
+        for r in all_results
     ]
-    output["total_results"] = len(merged_results)
+    output["total_results"] = len(all_results)
     output["step_outputs"] = step_outputs
 
-    # v3.1: Include decision log for observability
+    # v3.7: Include decision log for observability
     if plan.decision_log:
         output["decision_log"] = plan.decision_log.to_dict()
-
-    # v3.1: Include cache status
-    output["cache_status"] = router.bootstrap.get_cache_status(path)
 
     return output
 
@@ -290,13 +248,30 @@ async def execute_tool_step(tool: str, params: dict, context: dict) -> dict:
 
 async def execute_devrag_search(query: str, path: str) -> dict:
     """
-    Execute devrag semantic search.
+    Execute semantic search using ChromaDB (v3.9) or fallback to devrag CLI.
 
-    Note: This requires devrag to be running as a separate MCP server.
-    We call it via subprocess since it's a separate process.
+    v3.9: Uses internal ChromaDB for vector search.
+    Falls back to devrag CLI if ChromaDB is not available.
     """
+    # v3.9: Try ChromaDB first
+    if CHROMADB_AVAILABLE:
+        try:
+            manager = get_chromadb_manager(path)
+            result = manager.search(query)
+
+            return {
+                "source": result.source,
+                "results": [h.to_dict() for h in result.hits],
+                "skip_forest": result.skip_forest,
+                "confidence": result.confidence,
+                "engine": "chromadb",
+            }
+        except Exception as e:
+            # ChromaDB failed, fall back to devrag
+            pass
+
+    # Fallback: devrag CLI (legacy)
     try:
-        # Try to call devrag CLI directly
         process = await asyncio.create_subprocess_exec(
             "devrag", "search", query,
             "--path", path,
@@ -307,7 +282,9 @@ async def execute_devrag_search(query: str, path: str) -> dict:
         stdout, stderr = await process.communicate()
 
         if process.returncode == 0:
-            return json.loads(stdout.decode())
+            result = json.loads(stdout.decode())
+            result["engine"] = "devrag"
+            return result
         else:
             return {
                 "error": f"devrag search failed: {stderr.decode()}",
@@ -316,11 +293,12 @@ async def execute_devrag_search(query: str, path: str) -> dict:
 
     except FileNotFoundError:
         return {
-            "error": "devrag not found",
-            "note": "Install devrag or configure it in .mcp.json"
+            "error": "No search engine available",
+            "note": "Install chromadb or devrag. ChromaDB recommended.",
+            "chromadb_available": CHROMADB_AVAILABLE,
         }
     except Exception as e:
-        return {"error": f"devrag search failed: {str(e)}"}
+        return {"error": f"Semantic search failed: {str(e)}"}
 
 
 @server.list_tools()
@@ -823,6 +801,40 @@ async def list_tools() -> list[Tool]:
                 "required": ["file_path"],
             },
         ),
+        # v3.10: Recovery from check_write_target block
+        Tool(
+            name="add_explored_files",
+            description="v3.10: Add files/directories to explored list in READY phase. "
+                        "Use when check_write_target blocks a write to an unexplored location. "
+                        "Lightweight recovery without reverting to EXPLORATION phase.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "files": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of file paths or directory paths to add to explored list",
+                    },
+                },
+                "required": ["files"],
+            },
+        ),
+        Tool(
+            name="revert_to_exploration",
+            description="v3.10: Revert from any phase back to EXPLORATION phase. "
+                        "Use when additional exploration is needed after reaching READY phase. "
+                        "Previous exploration results are kept by default for incremental exploration.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "keep_results": {
+                        "type": "boolean",
+                        "default": True,
+                        "description": "Keep existing exploration results (default: true)",
+                    },
+                },
+            },
+        ),
         # v3.5: Outcome logging for improvement cycle
         Tool(
             name="record_outcome",
@@ -934,6 +946,67 @@ async def list_tools() -> list[Tool]:
                 "required": ["relevant_symbols", "code_evidence"],
             },
         ),
+        # v3.9: ChromaDB-based semantic search tools
+        Tool(
+            name="sync_index",
+            description="v3.9: Sync source code to ChromaDB index. "
+                        "Uses AST-based chunking with fingerprint-based incremental sync. "
+                        "Run this after code changes or at session start.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Project root path (default: current session's repo_path)",
+                    },
+                    "force": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Force full re-index (ignore fingerprints)",
+                    },
+                    "sync_map": {
+                        "type": "boolean",
+                        "default": True,
+                        "description": "Also sync agreements to map collection",
+                    },
+                },
+            },
+        ),
+        Tool(
+            name="semantic_search",
+            description="v3.9: Semantic search using ChromaDB. "
+                        "Searches map (agreements) first, then forest (code) if needed. "
+                        "Short-circuits if map has high-confidence match (≥0.7).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Natural language search query",
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "Project root path (default: current session's repo_path)",
+                    },
+                    "target_feature": {
+                        "type": "string",
+                        "description": "Target feature from QueryFrame (optional, improves search)",
+                    },
+                    "collection": {
+                        "type": "string",
+                        "enum": ["auto", "map", "forest"],
+                        "default": "auto",
+                        "description": "Collection to search: auto (short-circuit), map only, forest only",
+                    },
+                    "n_results": {
+                        "type": "integer",
+                        "default": 10,
+                        "description": "Maximum number of results",
+                    },
+                },
+                "required": ["query"],
+            },
+        ),
     ]
 
 
@@ -971,6 +1044,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
     # v3.2: Session management tools (no phase check needed)
     # v3.6: Updated with QueryFrame support
+    # v3.9: ChromaDB integration
     if name == "start_session":
         intent = arguments["intent"]
         query = arguments["query"]
@@ -999,16 +1073,40 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 "extraction_prompt": extraction_prompt,
                 "next_step": "Extract slots from query using the prompt, then call set_query_frame.",
             },
-            # v3.8: Map priority info
-            "v38_features": {
-                "map_search": "Use devrag-map for learned agreements (priority search)",
-                "forest_search": "Use devrag-forest for code search (fallback)",
-                "agreements_path": f"{repo_path}/.code-intel/agreements/",
-            },
         }
+
+        # v3.9: ChromaDB status and auto-sync
+        if CHROMADB_AVAILABLE:
+            try:
+                manager = get_chromadb_manager(repo_path)
+                chromadb_info = {
+                    "available": True,
+                    "stats": manager.get_stats(),
+                    "needs_sync": manager.needs_sync(),
+                }
+
+                # Auto-sync if needed and configured
+                if manager.config.get("sync_on_start", True) and manager.needs_sync():
+                    sync_result = manager.sync_forest()
+                    chromadb_info["auto_sync"] = sync_result.to_dict()
+
+                result["chromadb"] = chromadb_info
+                result["v39_features"] = {
+                    "semantic_search": "Use semantic_search for map/forest vector search",
+                    "sync_index": "Use sync_index to manually trigger re-indexing",
+                    "short_circuit": "High-confidence map hits (≥0.7) skip forest search",
+                }
+            except Exception as e:
+                result["chromadb"] = {"available": True, "error": str(e)}
+        else:
+            result["chromadb"] = {
+                "available": False,
+                "note": "Install chromadb for v3.9 features: pip install chromadb",
+            }
+
         if session.phase == Phase.EXPLORATION:
             result["exploration_hint"] = (
-                "v3.8: First search devrag-map for past agreements. "
+                "v3.9: Use semantic_search to find past agreements (map) and relevant code (forest). "
                 "If no hit, use code-intel tools to fill missing slots. "
                 "Then call submit_understanding."
             )
@@ -1114,7 +1212,6 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
             # v3.8: symbols_identified を query_frame.mapped_symbols に自動追加
             if session.query_frame and symbols_identified:
-                from tools.query_frame import SlotSource
                 for symbol in symbols_identified:
                     session.query_frame.add_mapped_symbol(
                         name=symbol,
@@ -1212,6 +1309,28 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             )
         return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
+    elif name == "add_explored_files":
+        # v3.10: Add files to explored list in READY phase
+        session = session_manager.get_active_session()
+        if session is None:
+            result = {"error": "no_active_session", "message": "No active session."}
+        else:
+            result = session.add_explored_files(
+                files=arguments["files"],
+            )
+        return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+
+    elif name == "revert_to_exploration":
+        # v3.10: Revert to EXPLORATION phase
+        session = session_manager.get_active_session()
+        if session is None:
+            result = {"error": "no_active_session", "message": "No active session."}
+        else:
+            result = session.revert_to_exploration(
+                keep_results=arguments.get("keep_results", True),
+            )
+        return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+
     elif name == "record_outcome":
         # v3.5: Record session outcome
         session_id = arguments["session_id"]
@@ -1304,12 +1423,27 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                     result["agreement_files"] = agreement_files
                     result["cache_note"] = f"{cached_count} pairs cached, {len(agreement_files)} agreement(s) generated"
 
-                    # 3. v3.8: devrag-map の再インデックス（バックグラウンド）
-                    import asyncio
-                    asyncio.create_task(
-                        get_agreements_manager(repo_path).trigger_devrag_sync()
-                    )
-                    result["map_sync"] = "triggered (background)"
+                    # 3. v3.9: ChromaDB map に追加
+                    if CHROMADB_AVAILABLE:
+                        try:
+                            chromadb_manager = get_chromadb_manager(repo_path)
+                            symbols_list = [sym.name for sym in qf.mapped_symbols]
+                            code_evidence = "; ".join(
+                                sym.evidence.result_summary
+                                for sym in qf.mapped_symbols
+                                if sym.evidence and sym.evidence.result_summary
+                            ) or "Success confirmed by user"
+
+                            chromadb_manager.add_agreement(
+                                nl_term=qf.target_feature,
+                                symbols=symbols_list,
+                                code_evidence=code_evidence,
+                                session_id=session_id,
+                                similarity=max(sym.confidence for sym in qf.mapped_symbols) if qf.mapped_symbols else 0.0,
+                            )
+                            result["chromadb_map"] = "agreement added"
+                        except Exception as chromadb_err:
+                            result["chromadb_error"] = str(chromadb_err)
 
             except Exception as e:
                 result["cache_error"] = str(e)
@@ -1413,7 +1547,6 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 pass
 
             # mapped_symbols の confidence を更新
-            from tools.query_frame import SlotSource, SlotEvidence
             for symbol in relevant_symbols:
                 # 既存のシンボルを探す
                 existing = [s for s in qf.mapped_symbols if s.name == symbol]
@@ -1446,6 +1579,79 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             if not_found:
                 result["not_found"] = not_found
                 result["hint"] = "These symbols were not in mapped_symbols. Call submit_understanding first to add them."
+
+        return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+
+    elif name == "sync_index":
+        # v3.9: Sync source code to ChromaDB
+        session = session_manager.get_active_session()
+        path = arguments.get("path") or (session.repo_path if session else ".")
+        force = arguments.get("force", False)
+        sync_map = arguments.get("sync_map", True)
+
+        if not CHROMADB_AVAILABLE:
+            result = {
+                "error": "chromadb_not_available",
+                "message": "chromadb is not installed. Install with: pip install chromadb",
+            }
+        else:
+            try:
+                manager = get_chromadb_manager(path)
+
+                # Sync forest (source code)
+                forest_result = manager.sync_forest(force=force)
+
+                result = {
+                    "success": True,
+                    "forest_sync": forest_result.to_dict(),
+                    "stats": manager.get_stats(),
+                }
+
+                # Sync map (agreements) if requested
+                if sync_map:
+                    map_result = manager.sync_map()
+                    result["map_sync"] = map_result.to_dict()
+
+            except Exception as e:
+                result = {"error": str(e)}
+
+        return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+
+    elif name == "semantic_search":
+        # v3.9: Semantic search using ChromaDB
+        session = session_manager.get_active_session()
+        query = arguments["query"]
+        path = arguments.get("path") or (session.repo_path if session else ".")
+        target_feature = arguments.get("target_feature") or (
+            session.query_frame.target_feature if session and session.query_frame else None
+        )
+        collection = arguments.get("collection", "auto")
+        n_results = arguments.get("n_results", 10)
+
+        if not CHROMADB_AVAILABLE:
+            result = {
+                "error": "chromadb_not_available",
+                "message": "chromadb is not installed. Install with: pip install chromadb",
+            }
+        else:
+            try:
+                manager = get_chromadb_manager(path)
+                search_result = manager.search(
+                    query=query,
+                    target_feature=target_feature,
+                    collection=collection,
+                    n_results=n_results,
+                )
+
+                result = {
+                    "success": True,
+                    **search_result.to_dict(),
+                    "query": query,
+                    "target_feature": target_feature,
+                }
+
+            except Exception as e:
+                result = {"error": str(e)}
 
         return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 

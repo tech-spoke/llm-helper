@@ -381,7 +381,7 @@ python -m tools.migrate_to_v38
 # 4. .mcp.json を更新（devrag-map, devrag-forest を追加）
 
 # 5. devrag-map を初期化
-devrag --config devrag-map.json sync
+LD_LIBRARY_PATH=/usr/local/lib devrag --config devrag-map.json sync
 ```
 
 ---

@@ -4,7 +4,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-echo "=== Code Intel MCP Server v3.8 Setup ==="
+echo "=== Code Intel MCP Server v3.9 Setup ==="
 echo ""
 echo "This script sets up the MCP server itself."
 echo "For project initialization, use: ./init-project.sh <project-path>"
@@ -79,39 +79,16 @@ fi
 echo ""
 echo "Checking optional tools..."
 check_tool "repomix" || echo "    Install with: npm install -g repomix (optional)"
-check_tool "devrag" || echo "    See: https://github.com/tomohiro-owada/devrag (required for v3.8)"
 
-# Check and install ONNX Runtime for devrag
-install_onnxruntime() {
-    local ORT_VERSION="1.22.0"
-    local ORT_URL="https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-linux-x64-${ORT_VERSION}.tgz"
-
-    echo ""
-    echo "Installing ONNX Runtime ${ORT_VERSION} for devrag..."
-
-    cd /tmp
-    wget -q "${ORT_URL}" -O onnxruntime.tgz
-    tar xzf onnxruntime.tgz
-    sudo cp onnxruntime-linux-x64-${ORT_VERSION}/lib/*.so* /usr/local/lib/
-    sudo ln -sf /usr/local/lib/libonnxruntime.so /usr/local/lib/onnxruntime.so
-    sudo ldconfig 2>/dev/null || true
-    rm -rf onnxruntime.tgz onnxruntime-linux-x64-${ORT_VERSION}
-    cd - > /dev/null
-
-    echo "  ✓ ONNX Runtime ${ORT_VERSION} installed"
-}
-
-# Check if ONNX Runtime is available
-if ! ldconfig -p 2>/dev/null | grep -q libonnxruntime; then
-    echo ""
-    echo "ONNX Runtime not found (required for devrag embeddings)"
-    read -p "Install ONNX Runtime automatically? [Y/n] " -n 1 -r
-    echo ""
-    if [[ $REPLY =~ ^[Yy]$ ]] || [[ -z $REPLY ]]; then
-        install_onnxruntime
-    else
-        echo "  ⚠ Skip ONNX Runtime installation. devrag may not work."
-    fi
+# Verify chromadb installation
+echo ""
+echo "Verifying ChromaDB installation..."
+if ./venv/bin/python -c "import chromadb; print(f'  ✓ chromadb {chromadb.__version__}')" 2>/dev/null; then
+    :
+else
+    echo "  ✗ chromadb installation failed"
+    echo "  Trying to install again..."
+    ./venv/bin/pip install chromadb
 fi
 
 if [ $MISSING -eq 1 ]; then
@@ -126,9 +103,18 @@ echo "=== Setup Complete ==="
 echo ""
 echo "MCP server is ready at: $SCRIPT_DIR"
 echo ""
+echo "v3.9 features:"
+echo "  • ChromaDB-based semantic search (replaces devrag)"
+echo "  • AST-based chunking for PHP, Python, JS, Blade, etc."
+echo "  • Fingerprint-based incremental sync"
+echo "  • Auto-sync on session start"
+echo ""
 echo "Next steps:"
 echo "  1. Initialize your target project:"
 echo "     ./init-project.sh /path/to/your/project"
 echo ""
 echo "  2. Follow the instructions to configure .mcp.json"
+echo ""
+echo "Note: devrag is no longer required for v3.9."
+echo "      ChromaDB handles all semantic search internally."
 echo ""

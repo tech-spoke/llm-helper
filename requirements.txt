@@ -1,8 +1,12 @@
 # MCP Server
 mcp>=1.0.0
 
+# v3.9: ChromaDB for semantic search
+chromadb>=1.0.0
+
 # Tree-sitter for code structure analysis
-tree-sitter>=0.21.0
+# Note: tree-sitter 0.22+ breaks compatibility with tree-sitter-languages
+tree-sitter>=0.21.0,<0.22.0
 tree-sitter-languages>=1.10.0
 
 # For async subprocess handling
