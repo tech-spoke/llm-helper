@@ -24,8 +24,8 @@ from pathlib import Path
 from typing import Literal
 
 
-# Log file location (relative to project root)
-LOG_DIR = Path(__file__).parent.parent / "logs"
+# Log file location (inside .code-intel for project isolation)
+LOG_DIR = Path(__file__).parent.parent / ".code-intel" / "logs"
 OUTCOME_LOG_FILE = LOG_DIR / "outcomes.jsonl"
 
 
