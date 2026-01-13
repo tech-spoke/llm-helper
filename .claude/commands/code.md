@@ -4,6 +4,12 @@
 
 **重要**: このエージェントはフェーズゲート方式で動作します。システムが各フェーズを強制するため、手順をスキップできません。
 
+## v3.10 変更点（自動失敗検出）
+
+- **Step 0 追加**: 今回のリクエストが「前回の失敗」を示しているか自動判定
+- **自動 OutcomeLog**: 失敗検出時に前回セッションの failure を自動記録
+- **改善サイクル強化**: `/outcome` 手動呼び出し不要で失敗データを収集
+
 ## v3.7 変更点（Embedding + LLM委譲）
 
 - **validate_symbol_relevance**: 探索で見つけたシンボルの関連性をEmbeddingで検証
@@ -33,6 +39,57 @@ EXPLORATION (必須) → VALIDATION (v3.7) → SEMANTIC (必要時) → VERIFICA
 ```
 
 **v3.7**: 探索後にシンボル関連性を Embedding で検証（Step 3.5）
+
+---
+
+## Step 0: 前回セッション失敗チェック（v3.10 新規）
+
+**目的:** 今回のリクエストが「前回の修正が失敗した」ことを示しているか判定し、自動で失敗を記録する
+
+**最初に以下を実行:**
+```
+mcp__code-intel__get_session_status
+```
+
+**前回セッションが存在する場合、今回のリクエストを分析:**
+
+以下のパターンに該当するか判定してください：
+
+| パターン | 例 |
+|----------|-----|
+| やり直し要求 | 「やり直して」「もう一度」「再度」 |
+| 否定・不満 | 「違う」「違った」「そうじゃない」 |
+| 動作不良 | 「動かない」「エラーになる」「落ちる」 |
+| バグ報告 | 「バグがある」「おかしい」「変だ」 |
+| 前回参照+否定 | 「さっきの〇〇が動かない」「前回の修正で〇〇」 |
+
+**判定結果を出力:**
+```json
+{
+  "previous_session_exists": true,
+  "indicates_failure": true,
+  "failure_signals": ["やり直して", "動かない"],
+  "confidence": 0.9
+}
+```
+
+**失敗と判定した場合（confidence >= 0.7）:**
+```
+mcp__code-intel__record_outcome
+  session_id: "前回のセッションID"
+  outcome: "failure"
+  phase_at_outcome: "READY"  // 前回の最終フェーズ
+  intent: "MODIFY"  // 前回のintent
+  trigger_message: "ユーザーの今回のリクエスト"
+  analysis: {
+    "root_cause": "LLMの推測（例: 実装が要件を満たしていなかった）",
+    "failure_point": "推測される失敗箇所",
+    "user_feedback_summary": "ユーザーの不満の要約"
+  }
+```
+
+**前回セッションがない、または失敗を示していない場合:**
+→ Step 1 に進む
 
 ---
 

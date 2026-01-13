@@ -849,10 +849,11 @@ async def list_tools() -> list[Tool]:
             },
         ),
         # v3.5: Outcome logging for improvement cycle
+        # v3.10: Extended schema for auto-failure detection
         Tool(
             name="record_outcome",
-            description="v3.5: Record session outcome (success/failure/partial) for improvement analysis. "
-                        "Called by /outcome skill when human recognizes success or failure. "
+            description="v3.5/v3.10: Record session outcome (success/failure/partial) for improvement analysis. "
+                        "v3.10: Also called automatically by /code when failure is detected. "
                         "Observer only: records, does not intervene or change behavior.",
             inputSchema={
                 "type": "object",
@@ -865,6 +866,16 @@ async def list_tools() -> list[Tool]:
                         "type": "string",
                         "enum": ["success", "failure", "partial"],
                         "description": "Outcome type",
+                    },
+                    "phase_at_outcome": {
+                        "type": "string",
+                        "enum": ["EXPLORATION", "SEMANTIC", "VERIFICATION", "READY"],
+                        "description": "v3.10: Phase at outcome (optional, auto-detected from session if available)",
+                    },
+                    "intent": {
+                        "type": "string",
+                        "enum": ["IMPLEMENT", "MODIFY", "INVESTIGATE", "QUESTION"],
+                        "description": "v3.10: Intent type (optional, auto-detected from session if available)",
                     },
                     "analysis": {
                         "type": "object",
@@ -1346,10 +1357,11 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
     elif name == "record_outcome":
         # v3.5: Record session outcome
+        # v3.10: Support explicit phase/intent for auto-failure detection
         session_id = arguments["session_id"]
         session = session_manager.get_session(session_id)
 
-        # Get session context
+        # Get session context (prefer session data, fallback to arguments)
         phase_at_outcome = "UNKNOWN"
         intent = "UNKNOWN"
         devrag_used = False
@@ -1361,6 +1373,12 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             devrag_used = session.semantic is not None
             if session.exploration:
                 confidence_was = session.exploration._evaluated_confidence
+
+        # v3.10: Allow explicit override (for cases where session is not in memory)
+        if "phase_at_outcome" in arguments:
+            phase_at_outcome = arguments["phase_at_outcome"]
+        if "intent" in arguments:
+            intent = arguments["intent"]
 
         # Build analysis
         analysis_data = arguments.get("analysis", {})
