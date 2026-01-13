@@ -27,9 +27,12 @@ from tools.session import (
     VerificationEvidence,
     Hypothesis,
     evaluate_exploration,
+    evaluate_exploration_v36,
     validate_exploration_consistency,
     validate_semantic_reason,
     validate_write_target,
+    is_markup_context,
+    MARKUP_EXTENSIONS,
     STRICT_EXPLORATION_REQUIREMENTS,
 )
 
@@ -577,6 +580,157 @@ class TestCheckWriteTargetRecovery:
         assert "recovery_options" in result
         assert "add_explored_files" in result["recovery_options"]
         assert "revert_to_exploration" in result["recovery_options"]
+
+
+# =============================================================================
+# Test: v1.1 Markup Context Relaxation
+# =============================================================================
+
+class TestIsMarkupContext:
+    def test_html_files_are_markup(self):
+        """HTML files should be detected as markup."""
+        files = ["index.html", "about.htm"]
+        assert is_markup_context(files) is True
+
+    def test_css_files_are_markup(self):
+        """CSS files should be detected as markup."""
+        files = ["styles.css", "main.scss", "theme.sass"]
+        assert is_markup_context(files) is True
+
+    def test_blade_php_files_are_not_markup(self):
+        """Blade PHP templates should NOT be detected as markup (has PHP logic)."""
+        files = ["layout.blade.php", "home.blade.php"]
+        assert is_markup_context(files) is False
+
+    def test_vue_svelte_files_are_not_markup(self):
+        """Vue and Svelte files should NOT be detected as markup (has JS logic)."""
+        files = ["App.vue", "Component.svelte"]
+        assert is_markup_context(files) is False
+
+    def test_jsx_tsx_files_are_not_markup(self):
+        """JSX/TSX files should NOT be detected as markup (JavaScript)."""
+        files = ["App.jsx", "Component.tsx"]
+        assert is_markup_context(files) is False
+
+    def test_mixed_with_logic_is_not_markup(self):
+        """Mixed files including logic should not be markup context."""
+        files = ["index.html", "app.py"]
+        assert is_markup_context(files) is False
+
+    def test_pure_logic_files_are_not_markup(self):
+        """Pure logic files should not be markup context."""
+        files = ["app.py", "utils.js"]
+        assert is_markup_context(files) is False
+
+    def test_empty_files_is_not_markup(self):
+        """Empty file list should not be markup context."""
+        assert is_markup_context([]) is False
+
+
+class TestMarkupContextRelaxation:
+    def test_markup_context_relaxes_required_tools(self):
+        """Markup context should not require find_definitions/find_references."""
+        result = ExplorationResult(
+            symbols_identified=[],  # No symbols
+            entry_points=[],
+            files_analyzed=["checkout.html"],
+            tools_used=["search_text"],  # Only grep
+            existing_patterns=[],
+        )
+
+        confidence, missing = evaluate_exploration_v36(
+            result,
+            intent="MODIFY",
+            risk_level="LOW",
+        )
+
+        assert confidence == "high"
+        assert not any("find_definitions" in m for m in missing)
+        assert not any("find_references" in m for m in missing)
+
+    def test_logic_context_requires_tools(self):
+        """Logic context should still require find_definitions/find_references."""
+        result = ExplorationResult(
+            symbols_identified=["function1", "function2", "function3"],
+            entry_points=["function1()"],
+            files_analyzed=["app.py", "utils.py"],
+            tools_used=["search_text"],  # Missing find_definitions/find_references
+            existing_patterns=["pattern1"],
+        )
+
+        confidence, missing = evaluate_exploration_v36(
+            result,
+            intent="MODIFY",
+            risk_level="LOW",
+        )
+
+        assert confidence == "low"
+        assert any("required_tools" in m for m in missing)
+
+    def test_markup_context_relaxes_symbol_requirements(self):
+        """Markup context should not require symbols."""
+        result = ExplorationResult(
+            symbols_identified=[],  # No symbols - OK for markup
+            entry_points=[],
+            files_analyzed=["styles.css"],
+            tools_used=["search_text"],
+            existing_patterns=[],
+        )
+
+        confidence, missing = evaluate_exploration_v36(
+            result,
+            intent="MODIFY",
+            risk_level="LOW",
+        )
+
+        assert confidence == "high"
+        assert not any("symbols_identified" in m for m in missing)
+
+    def test_submit_exploration_with_markup_context(self):
+        """Submit exploration should succeed with relaxed requirements for markup."""
+        session = SessionState(
+            session_id="test",
+            intent="MODIFY",
+            query="Fix button order in checkout.html",
+            phase=Phase.EXPLORATION,
+            risk_level="HIGH",  # Even HIGH risk should be relaxed for markup
+        )
+
+        result = ExplorationResult(
+            symbols_identified=[],
+            entry_points=[],
+            files_analyzed=["checkout.html"],
+            tools_used=["search_text"],
+            existing_patterns=[],
+        )
+
+        response = session.submit_exploration(result)
+
+        assert response["success"] is True
+        assert response["next_phase"] == "READY"
+        assert response.get("markup_context") is True
+
+    def test_mixed_context_uses_strict_requirements(self):
+        """Mixed markup + logic should use strict requirements."""
+        session = SessionState(
+            session_id="test",
+            intent="MODIFY",
+            query="Fix button handler",
+            phase=Phase.EXPLORATION,
+        )
+
+        result = ExplorationResult(
+            symbols_identified=[],
+            entry_points=[],
+            files_analyzed=["checkout.html", "handlers.js"],  # Mixed
+            tools_used=["search_text"],
+            existing_patterns=[],
+        )
+
+        response = session.submit_exploration(result)
+
+        # Should go to SEMANTIC because strict requirements not met
+        assert response["next_phase"] == "SEMANTIC"
 
 
 if __name__ == "__main__":

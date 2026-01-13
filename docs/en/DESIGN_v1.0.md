@@ -1,0 +1,337 @@
+# Code Intelligence MCP Server v1.0 Design Document
+
+## Overview
+
+Code Intelligence MCP Server provides guardrails for LLMs (Large Language Models) to accurately understand codebases and safely implement changes.
+
+### Design Philosophy
+
+1. **Phase-Gated Execution**: Enforces the order of exploration → verification → implementation, preventing "implement without investigating"
+2. **Forest/Map Architecture**: Two-layer structure of entire codebase (forest) and success patterns (map)
+3. **Improvement Cycle**: Automatically records failures and uses them for system improvement
+4. **LLM Delegation + Server Verification**: Hybrid approach where server verifies LLM decisions
+
+---
+
+## Architecture
+
+### Forest/Map Two-Layer Structure
+
+```
+┌─────────────────────────────────────────────────────┐
+│                    LLM Agent                         │
+│                   (/code skill)                      │
+└─────────────────────┬───────────────────────────────┘
+                      │ MCP Protocol
+                      ▼
+┌─────────────────────────────────────────────────────┐
+│             Code Intelligence Server                 │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐ │
+│  │   Router    │  │   Session   │  │ QueryFrame  │ │
+│  │             │  │   Manager   │  │ Decomposer  │ │
+│  └─────────────┘  └─────────────┘  └─────────────┘ │
+│  ┌─────────────────────────────────────────────────┐│
+│  │              ChromaDB Manager                   ││
+│  │  ┌─────────────────┐  ┌─────────────────────┐  ││
+│  │  │  Forest          │  │  Map                 │  ││
+│  │  │  All code chunks │  │  Successful agreements│  ││
+│  │  └─────────────────┘  └─────────────────────┘  ││
+│  └─────────────────────────────────────────────────┘│
+└─────────────────────────────────────────────────────┘
+                      │
+                      ▼
+┌─────────────────────────────────────────────────────┐
+│                  Tool Layer                          │
+│  ctags │ ripgrep │ tree-sitter │ AST Chunker        │
+└─────────────────────────────────────────────────────┘
+```
+
+### Forest
+
+- **Purpose**: Vectorize entire project code for searchability
+- **Contents**: AST-chunked code fragments
+- **Sync**: Incremental sync via SHA256 fingerprinting
+- **Use**: Semantic search, code understanding
+
+### Map
+
+- **Purpose**: Remember and reuse successful patterns
+- **Contents**: Successful NL→Symbol pairs, agreements
+- **Update**: Automatically added on `/outcome success`
+- **Use**: Exploration shortcuts, reliable suggestions
+
+---
+
+## Phase Gates
+
+Divides the LLM's implementation process into 4 phases, with server verification of each phase completion.
+
+```
+EXPLORATION → SEMANTIC → VERIFICATION → READY
+    │            │            │           │
+    │            │            │           └─ Implementation allowed
+    │            │            └─ Hypothesis verification
+    │            └─ Semantic search
+    └─ Code exploration
+```
+
+### Phase Details
+
+| Phase | Purpose | Allowed Tools |
+|-------|---------|---------------|
+| EXPLORATION | Understand codebase | query, find_definitions, find_references, search_text, analyze_structure |
+| SEMANTIC | Supplement missing info | semantic_search (ChromaDB) |
+| VERIFICATION | Verify hypotheses | All exploration tools |
+| READY | Implementation allowed | check_write_target, add_explored_files |
+
+### Phase Transition Conditions
+
+```
+EXPLORATION → SEMANTIC
+  Condition: Server evaluation is "low" or consistency error
+
+EXPLORATION → READY
+  Condition: Server evaluation is "high" and consistency OK
+
+SEMANTIC → VERIFICATION
+  Condition: submit_semantic completed
+
+VERIFICATION → READY
+  Condition: submit_verification completed
+```
+
+---
+
+## QueryFrame
+
+Structures natural language requests and clarifies "what is missing".
+
+### Slot Structure
+
+| Slot | Description | Example |
+|------|-------------|---------|
+| target_feature | Target feature | "Login functionality" |
+| trigger_condition | Trigger condition | "When password is empty" |
+| observed_issue | Observed problem | "No error displayed" |
+| desired_action | Expected behavior | "Add validation" |
+
+### Quote Verification
+
+Server verifies that the `quote` extracted by LLM exists in the original query. This prevents hallucination.
+
+```json
+{
+  "target_feature": {
+    "value": "Login functionality",
+    "quote": "login functionality"  // Must exist in original query
+  }
+}
+```
+
+### Risk Level
+
+| Level | Condition | Exploration Requirements |
+|-------|-----------|-------------------------|
+| HIGH | MODIFY + issue unknown | Strict: all slots required |
+| MEDIUM | IMPLEMENT or partial unknown | Standard requirements |
+| LOW | INVESTIGATE or all info available | Minimum OK |
+
+---
+
+## Improvement Cycle
+
+A mechanism to automatically record failures and use them for system improvement.
+
+### Two Logs
+
+| Log | File | Trigger |
+|-----|------|---------|
+| DecisionLog | `.code-intel/logs/decisions.jsonl` | On query tool execution (automatic) |
+| OutcomeLog | `.code-intel/logs/outcomes.jsonl` | On failure detection (automatic) or /outcome (manual) |
+
+### Automatic Failure Detection
+
+At `/code` skill start, automatically determines if the current request indicates "previous failure".
+
+**Detection Patterns:**
+- Redo requests: "redo", "again", "retry"
+- Negation/dissatisfaction: "wrong", "not that", "incorrect"
+- Malfunction: "doesn't work", "error occurs", "crashes"
+- Bug reports: "there's a bug", "something's wrong"
+
+### Analysis Functions
+
+```python
+get_session_analysis(session_id)      # Combine decision + outcome
+get_improvement_insights(limit=100)   # Failure pattern analysis
+```
+
+---
+
+## /code Skill Flow
+
+```
+Step 0: Failure Check
+    ├─ Check previous session
+    └─ Detect failure pattern → Auto-record
+
+Step 1: Intent Determination
+    └─ IMPLEMENT / MODIFY / INVESTIGATE / QUESTION
+
+Step 2: Session Start
+    └─ start_session
+
+Step 3: QueryFrame Setup
+    └─ set_query_frame
+
+Step 4: EXPLORATION
+    ├─ find_definitions (required)
+    ├─ find_references (required)
+    └─ submit_understanding
+
+Step 5: Symbol Verification
+    └─ validate_symbol_relevance
+
+Step 6: SEMANTIC (if needed)
+    └─ semantic_search → submit_semantic
+
+Step 7: VERIFICATION (if needed)
+    └─ Verify hypotheses → submit_verification
+
+Step 8: READY
+    ├─ check_write_target
+    └─ Implementation (Edit/Write)
+```
+
+---
+
+## MCP Tool List
+
+### Session Management
+
+| Tool | Description |
+|------|-------------|
+| start_session | Start session |
+| get_session_status | Get current status |
+| set_query_frame | Set QueryFrame |
+
+### Exploration Tools
+
+| Tool | Description |
+|------|-------------|
+| query | General query (via Router) |
+| find_definitions | Symbol definition search (ctags) |
+| find_references | Reference search (ripgrep) |
+| search_text | Text search |
+| analyze_structure | Structure analysis (tree-sitter) |
+| get_symbols | Get symbol list |
+
+### Phase Completion
+
+| Tool | Description |
+|------|-------------|
+| submit_understanding | Complete EXPLORATION |
+| submit_semantic | Complete SEMANTIC |
+| submit_verification | Complete VERIFICATION |
+
+### Verification & Control
+
+| Tool | Description |
+|------|-------------|
+| validate_symbol_relevance | Verify symbol relevance |
+| check_write_target | Verify write target |
+| add_explored_files | Add explored files |
+| revert_to_exploration | Return to EXPLORATION |
+
+### Improvement Cycle
+
+| Tool | Description |
+|------|-------------|
+| record_outcome | Record outcome |
+| get_outcome_stats | Get statistics |
+
+### ChromaDB
+
+| Tool | Description |
+|------|-------------|
+| sync_index | Sync index |
+| semantic_search | Semantic search |
+
+---
+
+## Project Structure
+
+```
+llm-helper/
+├── code_intel_server.py      # MCP server main
+├── tools/
+│   ├── session.py            # Session management
+│   ├── query_frame.py        # QueryFrame processing
+│   ├── router.py             # Query routing
+│   ├── chromadb_manager.py   # ChromaDB management
+│   ├── ast_chunker.py        # AST chunking
+│   ├── sync_state.py         # Sync state management
+│   ├── ctags_tool.py         # ctags wrapper
+│   ├── ripgrep_tool.py       # ripgrep wrapper
+│   ├── treesitter_tool.py    # tree-sitter wrapper
+│   ├── embedding.py          # Embedding calculation
+│   ├── learned_pairs.py      # Learned pairs cache
+│   ├── agreements.py         # Agreement management
+│   └── outcome_log.py        # Improvement cycle log
+├── .claude/
+│   └── commands/
+│       └── code.md           # /code skill definition
+├── .code-intel/              # Project-specific data
+│   ├── chroma/               # ChromaDB data
+│   ├── agreements/           # Agreements (.md)
+│   ├── logs/                 # DecisionLog, OutcomeLog
+│   ├── config.json           # Configuration
+│   └── sync_state.json       # Sync state
+└── docs/
+    ├── ja/
+    │   ├── DESIGN_v1.0.md    # Overall design (Japanese)
+    │   └── INTERNALS_v1.0.md # Internal details (Japanese)
+    └── en/
+        ├── DESIGN_v1.0.md    # Overall design (this document)
+        └── INTERNALS_v1.0.md # Internal details (English)
+```
+
+---
+
+## Setup
+
+```bash
+# Install dependencies
+pip install -r requirements.txt
+
+# Initialize project
+./init-project.sh
+
+# Start server
+python code_intel_server.py
+```
+
+### Required External Tools
+
+- Universal Ctags
+- ripgrep
+- tree-sitter
+
+---
+
+## Configuration File
+
+`.code-intel/config.json`:
+
+```json
+{
+  "version": "1.0",
+  "embedding_model": "multilingual-e5-small",
+  "source_dirs": ["src", "lib"],
+  "exclude_patterns": ["**/node_modules/**", "**/__pycache__/**"],
+  "chunk_strategy": "ast",
+  "chunk_max_tokens": 512,
+  "sync_ttl_hours": 1,
+  "sync_on_start": true
+}
+```

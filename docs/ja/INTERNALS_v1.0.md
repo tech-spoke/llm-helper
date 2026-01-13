@@ -267,6 +267,51 @@ def evaluate_exploration(
     """
 ```
 
+### マークアップコンテキスト緩和（v1.1）
+
+```python
+# マークアップファイル拡張子（純粋なマークアップのみ）
+# 注意: .blade.php, .vue, .jsx, .tsx, .svelte 等は除外
+# これらはロジックと密接に結合しており、find_definitions/find_references が有効
+MARKUP_EXTENSIONS = {
+    ".html", ".htm",                    # 静的HTML
+    ".css", ".scss", ".sass", ".less",  # スタイルシート
+    ".xml", ".svg",                     # データ/グラフィック
+    ".md", ".markdown",                 # ドキュメント
+}
+
+def is_markup_context(files: list[str]) -> bool:
+    """探索済みファイルがすべてマークアップ系か判定"""
+```
+
+**除外されるファイル（ロジックとの結合が強い）:**
+- `.blade.php` - Laravel: `@if`, `@foreach`, `{{ $var }}` でPHPと結合
+- `.vue` - Vue: `<script>` セクションにJSロジック
+- `.jsx`, `.tsx` - React: JavaScriptとHTMLが混在
+- `.svelte` - Svelte: `<script>` セクションがある
+- `.twig`, `.ejs`, `.pug` 等 - サーバーサイドロジックと結合
+
+**緩和される要件:**
+
+| 項目 | 通常（ロジック系） | マークアップ系 |
+|------|-------------------|---------------|
+| symbols_identified | 3個以上 | 0個（不要） |
+| entry_points | 1個以上 | 0個（不要） |
+| files_analyzed | 2個以上 | 1個以上 |
+| existing_patterns | 1個以上 | 0個（不要） |
+| required_tools | find_definitions, find_references | search_text のみ |
+| trigger_condition | 必須（欠損でHIGHリスク） | オプショナル |
+
+**設計理由:**
+- 静的HTML/CSSは「シンボル」という概念がない
+- find_definitions/find_references は意味を成さない
+- trigger_condition（再現条件）はスタイル変更に不自然
+
+**判定タイミング:**
+- `submit_exploration` 時に `files_analyzed` の拡張子をチェック
+- すべてが純粋なマークアップ拡張子の場合のみ緩和を適用
+- 1ファイルでもロジック系があれば通常要件
+
 ### 復帰機能
 
 ```python

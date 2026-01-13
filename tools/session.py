@@ -6,12 +6,53 @@ v1.0: Code Intelligence MCP Server
 - Server-side confidence calculation (no LLM self-reporting)
 - QueryFrame for structured natural language processing
 - ChromaDB-based semantic search (Forest/Map architecture)
+
+v1.1: Context-Aware Guardrails
+- Markup files (.html, .css, .blade.php等) への緩和要件
+- find_references/find_definitions 必須要件の条件付き解除
+- trigger_condition 欠損時のリスク緩和
 """
 
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum, auto
+from pathlib import Path
 from typing import Literal
+
+
+# =============================================================================
+# Context-Aware Constants (v1.1)
+# =============================================================================
+
+# マークアップファイル拡張子（シンボル検索が意味を成さないファイル）
+# 注意: .blade.php, .vue, .jsx, .tsx, .svelte 等は除外
+# これらはロジックと密接に結合しており、find_definitions/find_references が有効
+MARKUP_EXTENSIONS = {
+    ".html", ".htm",                    # 静的HTML
+    ".css", ".scss", ".sass", ".less",  # スタイルシート
+    ".xml", ".svg",                     # データ/グラフィック
+    ".md", ".markdown",                 # ドキュメント
+}
+
+
+def is_markup_context(files: list[str]) -> bool:
+    """
+    探索済みファイルがすべてマークアップ系かを判定。
+
+    Args:
+        files: 探索済みファイルのリスト
+
+    Returns:
+        True if all files are markup files
+    """
+    if not files:
+        return False
+
+    for f in files:
+        ext = Path(f).suffix.lower()
+        if ext not in MARKUP_EXTENSIONS:
+            return False
+    return True
 
 
 class Phase(Enum):
@@ -181,6 +222,8 @@ def evaluate_exploration_v36(
     """
     リスクレベルを考慮した成果評価。
 
+    v1.1: マークアップファイルのみの場合は要件を緩和。
+
     Args:
         result: 探索結果
         intent: IMPLEMENT, MODIFY, INVESTIGATE, QUESTION
@@ -193,6 +236,19 @@ def evaluate_exploration_v36(
     missing = []
     tools_used = set(result.tools_used)
     reqs = get_dynamic_requirements(risk_level, intent)
+
+    # v1.1: マークアップコンテキストの判定
+    markup_context = is_markup_context(result.files_analyzed)
+
+    # v1.1: マークアップの場合は要件を緩和
+    if markup_context:
+        reqs = {
+            "symbols_identified": 0,  # シンボル不要
+            "entry_points": 0,
+            "files_analyzed": 1,
+            "existing_patterns": 0,
+            "required_slot_evidence": [],
+        }
 
     # 基本チェック
     if len(result.symbols_identified) < reqs["symbols_identified"]:
@@ -207,14 +263,20 @@ def evaluate_exploration_v36(
     if len(result.existing_patterns) < reqs.get("existing_patterns", 0):
         missing.append(f"existing_patterns: {len(result.existing_patterns)}/{reqs.get('existing_patterns', 0)}")
 
-    # 必須ツールチェック
-    required_tools = {"find_definitions", "find_references"}
+    # v1.1: 必須ツールチェック（マークアップの場合は緩和）
+    if markup_context:
+        # マークアップの場合: search_text があればOK
+        required_tools = {"search_text"}
+    else:
+        # ロジックファイルの場合: 従来通り
+        required_tools = {"find_definitions", "find_references"}
+
     if not required_tools.issubset(tools_used):
         missing_tools = required_tools - tools_used
         missing.append(f"required_tools: missing {missing_tools}")
 
-    # v3.6: スロット証拠チェック
-    if query_frame and reqs.get("required_slot_evidence"):
+    # v3.6: スロット証拠チェック（マークアップの場合はスキップ）
+    if not markup_context and query_frame and reqs.get("required_slot_evidence"):
         for slot in reqs["required_slot_evidence"]:
             if slot not in query_frame.slot_evidence:
                 missing.append(f"slot_evidence: {slot} not evidenced")
@@ -848,6 +910,7 @@ class SessionState:
         - risk_level と QueryFrame を考慮した動的成果条件
         - confidence はサーバー側で算出（LLM の自己申告は無視）
         - 成果物の相互整合性チェック
+        - v1.1: マークアップコンテキストでのリスクレベル再評価
 
         Returns: {"success": bool, "next_phase": str, "message": str}
         """
@@ -858,11 +921,18 @@ class SessionState:
                 "message": f"Cannot submit exploration in phase {self.phase.name}",
             }
 
+        # v1.1: マークアップコンテキストの場合、リスクレベルを再評価
+        # trigger_condition欠損によるHIGHリスクを緩和
+        effective_risk_level = self.risk_level
+        markup_context = is_markup_context(result.files_analyzed)
+        if markup_context and self.risk_level == "HIGH":
+            effective_risk_level = "LOW"
+
         # v3.6: リスクレベルを考慮した成果評価
         confidence, missing = evaluate_exploration_v36(
             result,
             self.intent,
-            self.risk_level,
+            effective_risk_level,
             self.query_frame,
         )
 
@@ -890,28 +960,38 @@ class SessionState:
             "evaluated_confidence": confidence,
             "missing_requirements": missing,
             "consistency_errors": consistency_errors,
-            "risk_level": self.risk_level,  # v3.6
+            "risk_level": self.risk_level,
+            "effective_risk_level": effective_risk_level,  # v1.1
+            "markup_context": markup_context,  # v1.1
             "timestamp": datetime.now().isoformat(),
         })
 
         # v3.6: HYPOTHESISスロットが残っていればREADYに進めない
-        hypothesis_block = self._check_hypothesis_slots()
-        if hypothesis_block:
-            missing.extend(hypothesis_block)
-            confidence = "low"
+        # v1.1: マークアップコンテキストの場合はHYPOTHESISチェックをスキップ
+        hypothesis_block = []
+        if not markup_context:
+            hypothesis_block = self._check_hypothesis_slots()
+            if hypothesis_block:
+                missing.extend(hypothesis_block)
+                confidence = "low"
 
         # IMPLEMENT/MODIFY は最低成果条件を満たさないと READY に進めない
         can_proceed = confidence == "high" and not consistency_errors and not hypothesis_block
 
         if can_proceed:
             self.phase = Phase.READY
-            return {
+            response = {
                 "success": True,
                 "next_phase": Phase.READY.name,
                 "evaluated_confidence": confidence,
-                "risk_level": self.risk_level,
+                "risk_level": effective_risk_level,
                 "message": "Exploration sufficient. Ready for implementation.",
             }
+            # v1.1: マークアップコンテキストの場合は明示
+            if markup_context:
+                response["markup_context"] = True
+                response["relaxed_requirements"] = "find_definitions/find_references not required for markup files"
+            return response
         else:
             self.phase = Phase.SEMANTIC
             response = {
@@ -919,7 +999,7 @@ class SessionState:
                 "next_phase": Phase.SEMANTIC.name,
                 "evaluated_confidence": confidence,
                 "missing_requirements": missing,
-                "risk_level": self.risk_level,
+                "risk_level": effective_risk_level,
                 "message": "Exploration insufficient. Use semantic_search to gather more context.",
                 "hint": "Use semantic_search, then submit_semantic with hypotheses and semantic_reason.",
             }

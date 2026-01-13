@@ -1,41 +1,41 @@
 # Code Intelligence MCP Server v1.0
 
-Cursor IDE のようなコードインテリジェンス機能をオープンソースツールで実現する MCP サーバー。
+An MCP server that provides Cursor IDE-like code intelligence capabilities using open source tools.
 
-## 概要
+## Overview
 
-同じ Opus 4.5 モデルでも、呼び出し元によって挙動が異なる：
+Even with the same Opus 4.5 model, behavior differs depending on the caller:
 
-| 呼び出し元 | 挙動 |
-|-----------|------|
-| **Cursor** | コードベース全体を理解した上で修正する |
-| **Claude Code** | 修正箇所だけを見て修正する傾向がある |
+| Caller | Behavior |
+|--------|----------|
+| **Cursor** | Modifies code after understanding the entire codebase |
+| **Claude Code** | Tends to modify only the specific location |
 
-この MCP サーバーは、Claude Code に「コードベースを理解させる」ための仕組みを提供する。
-
----
-
-## 設計思想
-
-```
-LLM に判断をさせない。守らせるのではなく、守らないと進めない設計。
-そして、失敗から学ぶ仕組みを持つ。
-```
-
-| 原則 | 実装 |
-|------|------|
-| フェーズ強制 | ツール使用制限（EXPLORATION で semantic_search 禁止等） |
-| サーバー評価 | confidence はサーバーが算出、LLM の自己申告を排除 |
-| 構造化入力 | Quote 検証による幻覚防止 |
-| Embedding 検証 | NL→Symbol の関連性をベクトル類似度で客観評価 |
-| Write 制限 | 探索済みファイルのみ許可 |
-| 改善サイクル | DecisionLog + OutcomeLog + agreements による学習 |
-| 自動失敗検出 | /code 開始時に前回失敗を自動判定・記録 |
-| プロジェクト分離 | 各プロジェクトごとに独立した学習データ |
+This MCP server provides mechanisms to make Claude Code "understand the codebase".
 
 ---
 
-## アーキテクチャ
+## Design Philosophy
+
+```
+Don't let the LLM decide. Design so it can't proceed without compliance.
+And have a mechanism to learn from failures.
+```
+
+| Principle | Implementation |
+|-----------|----------------|
+| Phase Enforcement | Tool usage restrictions (semantic_search forbidden in EXPLORATION, etc.) |
+| Server Evaluation | Confidence calculated by server, eliminating LLM self-reporting |
+| Structured Input | Hallucination prevention via Quote verification |
+| Embedding Verification | Objective evaluation of NL→Symbol relevance via vector similarity |
+| Write Restriction | Only explored files allowed |
+| Improvement Cycle | Learning via DecisionLog + OutcomeLog + agreements |
+| Automatic Failure Detection | Auto-detect and record previous failures at /code start |
+| Project Isolation | Independent learning data for each project |
+
+---
+
+## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -44,137 +44,137 @@ LLM に判断をさせない。守らせるのではなく、守らないと進�
                                │
                                ▼
                     ┌─────────────────┐
-                    │   code-intel    │  ← 統合 MCP サーバー
-                    │ (オーケストレータ) │
+                    │   code-intel    │  ← Unified MCP Server
+                    │  (orchestrator) │
                     └─────────────────┘
                                │
                ┌───────────────┼───────────────┐
                ▼               ▼               ▼
         ┌─────────────┐ ┌─────────────┐ ┌─────────────┐
         │ ChromaDB    │ │ ripgrep     │ │ ctags       │
-        │ (map/forest)│ │ (検索)      │ │ (シンボル)   │
+        │ (map/forest)│ │ (search)    │ │ (symbols)   │
         └─────────────┘ └─────────────┘ └─────────────┘
                │
                ▼
     ┌───────────────────┐
-    │ Project/.code-intel│  ← プロジェクト固有
+    │ Project/.code-intel│  ← Project-specific
     │ ├─ config.json     │
-    │ ├─ chroma/         │  ← ChromaDB データ
+    │ ├─ chroma/         │  ← ChromaDB data
     │ ├─ agreements/     │
     │ ├─ logs/           │  ← DecisionLog, OutcomeLog
     │ └─ sync_state.json │
     └───────────────────┘
 ```
 
-### 森と地図（Forest/Map）
+### Forest and Map
 
-| 名称 | コレクション | 役割 | データの性質 |
-|------|-------------|------|-------------|
-| **森 (Forest)** | forest | ソースコード全体の意味検索 | 生データ・HYPOTHESIS |
-| **地図 (Map)** | map | 過去の成功ペア・合意事項 | 確定データ・FACT |
+| Name | Collection | Role | Data Nature |
+|------|------------|------|-------------|
+| **Forest** | forest | Semantic search of entire source code | Raw data / HYPOTHESIS |
+| **Map** | map | Past success pairs / agreements | Confirmed data / FACT |
 
-**Short-circuit Logic**: 地図でスコア ≥ 0.7 → 森の探索をスキップ
+**Short-circuit Logic**: Map score ≥ 0.7 → Skip Forest exploration
 
 ---
 
-## フェーズゲート
+## Phase Gates
 
 ```
 EXPLORATION → SEMANTIC → VERIFICATION → READY
      ↓           ↓           ↓           ↓
-  code-intel  semantic    検証       実装許可
-   ツール      search     (確定)
-             (仮説)
+  code-intel  semantic    verify      implementation
+   tools      search    (confirm)      allowed
+             (hypothesis)
 ```
 
-| フェーズ | 許可 | 禁止 |
-|----------|------|------|
-| EXPLORATION | code-intel ツール | semantic_search |
+| Phase | Allowed | Forbidden |
+|-------|---------|-----------|
+| EXPLORATION | code-intel tools | semantic_search |
 | SEMANTIC | semantic_search | code-intel |
-| VERIFICATION | code-intel ツール | semantic_search |
-| READY | すべて | - |
+| VERIFICATION | code-intel tools | semantic_search |
+| READY | all | - |
 
 ---
 
-## ツール一覧
+## Tool List
 
-### コードインテリジェンス
+### Code Intelligence
 
-| ツール | 用途 |
-|--------|------|
-| `query` | 自然言語でのインテリジェントクエリ |
-| `find_definitions` | シンボル定義検索 (ctags) |
-| `find_references` | シンボル参照検索 (ripgrep) |
-| `search_text` | テキスト検索 (ripgrep) |
-| `analyze_structure` | コード構造解析 (tree-sitter) |
-| `get_symbols` | シンボル一覧取得 |
-| `sync_index` | ソースコードを ChromaDB にインデックス |
-| `semantic_search` | 地図/森の統合ベクトル検索 |
+| Tool | Purpose |
+|------|---------|
+| `query` | Intelligent query in natural language |
+| `find_definitions` | Symbol definition search (ctags) |
+| `find_references` | Symbol reference search (ripgrep) |
+| `search_text` | Text search (ripgrep) |
+| `analyze_structure` | Code structure analysis (tree-sitter) |
+| `get_symbols` | Get symbol list |
+| `sync_index` | Index source code to ChromaDB |
+| `semantic_search` | Unified vector search of map/forest |
 
-### セッション管理
+### Session Management
 
-| ツール | 用途 |
-|--------|------|
-| `start_session` | セッション開始 |
-| `set_query_frame` | QueryFrame 設定（Quote 検証） |
-| `get_session_status` | 現在のフェーズ・状態を確認 |
-| `submit_understanding` | EXPLORATION 完了 |
-| `validate_symbol_relevance` | Embedding 検証 |
-| `submit_semantic` | SEMANTIC 完了 |
-| `submit_verification` | VERIFICATION 完了 |
-| `check_write_target` | Write 可否確認 |
-| `add_explored_files` | 探索済みファイル追加 |
-| `revert_to_exploration` | EXPLORATION に戻る |
+| Tool | Purpose |
+|------|---------|
+| `start_session` | Start session |
+| `set_query_frame` | Set QueryFrame (Quote verification) |
+| `get_session_status` | Check current phase/status |
+| `submit_understanding` | Complete EXPLORATION |
+| `validate_symbol_relevance` | Embedding verification |
+| `submit_semantic` | Complete SEMANTIC |
+| `submit_verification` | Complete VERIFICATION |
+| `check_write_target` | Check write permission |
+| `add_explored_files` | Add explored files |
+| `revert_to_exploration` | Return to EXPLORATION |
 
-### 改善サイクル
+### Improvement Cycle
 
-| ツール | 用途 |
-|--------|------|
-| `record_outcome` | 結果記録（自動/手動） |
-| `get_outcome_stats` | 統計取得 |
+| Tool | Purpose |
+|------|---------|
+| `record_outcome` | Record outcome (auto/manual) |
+| `get_outcome_stats` | Get statistics |
 
 ---
 
-## セットアップ
+## Setup
 
-### Step 1: MCP サーバーのセットアップ（1回のみ）
+### Step 1: MCP Server Setup (once only)
 
 ```bash
-# リポジトリをクローン
+# Clone repository
 git clone https://github.com/tech-spoke/llm-helper.git
 cd llm-helper
 
-# サーバーをセットアップ（venv、依存関係）
+# Setup server (venv, dependencies)
 ./setup.sh
 ```
 
-### Step 2: プロジェクトの初期化（プロジェクトごと）
+### Step 2: Project Initialization (per project)
 
 ```bash
-# 対象プロジェクトを初期化（プロジェクト全体をインデックス）
+# Initialize target project (index entire project)
 ./init-project.sh /path/to/your-project
 
-# オプション: 特定ディレクトリのみをインデックス
+# Option: Index only specific directories
 ./init-project.sh /path/to/your-project --include=src,packages
 
-# オプション: 追加の除外パターンを指定
+# Option: Specify additional exclude patterns
 ./init-project.sh /path/to/your-project --exclude=tests,docs,*.log
 ```
 
-これにより以下が作成されます：
+This creates:
 
 ```
 your-project/
 └── .code-intel/
-    ├── config.json       ← 設定
-    ├── chroma/           ← ChromaDB データ（自動生成）
-    ├── agreements/       ← 合意事項ディレクトリ
+    ├── config.json       ← Configuration
+    ├── chroma/           ← ChromaDB data (auto-generated)
+    ├── agreements/       ← Agreements directory
     └── logs/             ← DecisionLog, OutcomeLog
 ```
 
-### Step 3: .mcp.json の設定
+### Step 3: Configure .mcp.json
 
-`init-project.sh` が出力する設定を `.mcp.json` に追加：
+Add the configuration output by `init-project.sh` to `.mcp.json`:
 
 ```json
 {
@@ -189,82 +189,82 @@ your-project/
 }
 ```
 
-### Step 4: スキルの設定（任意）
+### Step 4: Setup Skills (optional)
 
 ```bash
 mkdir -p /path/to/your-project/.claude/commands
 cp /path/to/llm-helper/.claude/commands/*.md /path/to/your-project/.claude/commands/
 ```
 
-### Step 5: Claude Code を再起動
+### Step 5: Restart Claude Code
 
-MCP サーバーを読み込むために再起動。初回セッション開始時に自動的にインデックスが構築されます。
-
----
-
-## 利用方法
-
-### /code スキルを使う（推奨）
-
-```
-/code AuthServiceのlogin関数でパスワードが空のときエラーが出ないバグを直して
-```
-
-スキルが自動的に：
-1. 失敗チェック（前回失敗を自動検出・記録）
-2. Intent 判定
-3. セッション開始（自動同期）
-4. QueryFrame 抽出・検証
-5. EXPLORATION（find_definitions, find_references 等）
-6. シンボル検証（Embedding）
-7. 必要に応じて SEMANTIC
-8. VERIFICATION（仮説検証）
-9. READY（実装）
-
-### 直接ツールを呼び出す
-
-```
-# テキスト検索
-mcp__code-intel__search_text でパターン "Router" を検索して
-
-# 定義検索
-mcp__code-intel__find_definitions で "SessionState" の定義を探して
-
-# 意味検索
-mcp__code-intel__semantic_search でクエリ "ログイン機能" を検索して
-```
+Restart to load the MCP server. Index is automatically built on first session start.
 
 ---
 
-## 改善サイクル
+## Usage
 
-### 2つのログ
+### Using /code skill (recommended)
 
-| ログ | ファイル | トリガー |
+```
+/code Fix the bug in AuthService's login function where no error is shown when password is empty
+```
+
+The skill automatically:
+1. Failure check (auto-detect and record previous failures)
+2. Intent determination
+3. Session start (auto-sync)
+4. QueryFrame extraction and verification
+5. EXPLORATION (find_definitions, find_references, etc.)
+6. Symbol verification (Embedding)
+7. SEMANTIC if needed
+8. VERIFICATION (hypothesis verification)
+9. READY (implementation)
+
+### Direct tool invocation
+
+```
+# Text search
+Search for pattern "Router" with mcp__code-intel__search_text
+
+# Definition search
+Find definition of "SessionState" with mcp__code-intel__find_definitions
+
+# Semantic search
+Search for query "login functionality" with mcp__code-intel__semantic_search
+```
+
+---
+
+## Improvement Cycle
+
+### Two Logs
+
+| Log | File | Trigger |
+|-----|------|---------|
+| DecisionLog | `.code-intel/logs/decisions.jsonl` | On query execution (auto) |
+| OutcomeLog | `.code-intel/logs/outcomes.jsonl` | On failure detection (auto) or manual |
+
+### Automatic Failure Detection
+
+At `/code` start, automatically determines if current request indicates "previous failure":
+- Detects patterns like "redo", "doesn't work", "wrong", etc.
+- Automatically records failure to OutcomeLog
+- No need to manually call `/outcome`
+
+---
+
+## Dependencies
+
+### System Tools
+
+| Tool | Required | Purpose |
 |------|----------|---------|
-| DecisionLog | `.code-intel/logs/decisions.jsonl` | query 実行時（自動） |
-| OutcomeLog | `.code-intel/logs/outcomes.jsonl` | 失敗検出時（自動）または手動 |
-
-### 自動失敗検出
-
-`/code` 開始時に、今回のリクエストが「前回の失敗」を示しているか自動判定：
-- 「やり直して」「動かない」「違う」等のパターンを検出
-- 自動で OutcomeLog に failure を記録
-- `/outcome` 手動呼び出し不要
-
----
-
-## 依存関係
-
-### システムツール
-
-| ツール | 必須 | 用途 |
-|--------|------|------|
 | ripgrep (rg) | Yes | search_text, find_references |
 | universal-ctags | Yes | find_definitions, get_symbols |
-| Python 3.10+ | Yes | サーバー本体 |
+| Python 3.10+ | Yes | Server |
 
-### Python パッケージ
+### Python Packages
 
 ```
 mcp>=1.0.0
@@ -278,54 +278,56 @@ pytest>=7.0.0
 
 ---
 
-## プロジェクト構造
+## Project Structure
 
-### MCP サーバー（llm-helper/）
+### MCP Server (llm-helper/)
 
 ```
 llm-helper/
-├── code_intel_server.py    ← MCP サーバー本体
-├── tools/                  ← ツール実装
-│   ├── session.py          ← セッション管理
+├── code_intel_server.py    ← MCP server main
+├── tools/                  ← Tool implementations
+│   ├── session.py          ← Session management
 │   ├── query_frame.py      ← QueryFrame
-│   ├── router.py           ← クエリルーティング
-│   ├── chromadb_manager.py ← ChromaDB 管理
-│   ├── ast_chunker.py      ← AST チャンキング
-│   ├── sync_state.py       ← 同期状態管理
-│   ├── outcome_log.py      ← 改善サイクルログ
+│   ├── router.py           ← Query routing
+│   ├── chromadb_manager.py ← ChromaDB management
+│   ├── ast_chunker.py      ← AST chunking
+│   ├── sync_state.py       ← Sync state management
+│   ├── outcome_log.py      ← Improvement cycle log
 │   └── ...
-├── setup.sh                ← サーバーセットアップ
-├── init-project.sh         ← プロジェクト初期化
-└── .claude/commands/       ← スキル定義
+├── setup.sh                ← Server setup
+├── init-project.sh         ← Project initialization
+└── .claude/commands/       ← Skill definitions
     └── code.md
 ```
 
-### 対象プロジェクト
+### Target Project
 
 ```
 your-project/
-├── .mcp.json               ← MCP 設定（手動設定）
-├── .code-intel/            ← Code Intel データ（自動生成）
+├── .mcp.json               ← MCP config (manual setup)
+├── .code-intel/            ← Code Intel data (auto-generated)
 │   ├── config.json
-│   ├── chroma/             ← ChromaDB データ
-│   ├── agreements/         ← 成功ペア
+│   ├── chroma/             ← ChromaDB data
+│   ├── agreements/         ← Success pairs
 │   ├── logs/               ← DecisionLog, OutcomeLog
 │   └── sync_state.json
-├── .claude/commands/       ← スキル（任意コピー）
-└── src/                    ← あなたのソースコード
+├── .claude/commands/       ← Skills (optional copy)
+└── src/                    ← Your source code
 ```
 
 ---
 
-## ドキュメント
+## Documentation
 
-| ドキュメント | 内容 |
-|-------------|------|
-| [DESIGN_v1.0.md](docs/DESIGN_v1.0.md) | 全体設計 |
-| [INTERNALS_v1.0.md](docs/INTERNALS_v1.0.md) | 内部動作詳細 |
+| Document | Content |
+|----------|---------|
+| [DESIGN_v1.0.md](docs/en/DESIGN_v1.0.md) | Overall design |
+| [INTERNALS_v1.0.md](docs/en/INTERNALS_v1.0.md) | Internal details |
+| [DESIGN_v1.0.md (Japanese)](docs/ja/DESIGN_v1.0.md) | Overall design (Japanese) |
+| [INTERNALS_v1.0.md (Japanese)](docs/ja/INTERNALS_v1.0.md) | Internal details (Japanese) |
 
 ---
 
-## ライセンス
+## License
 
 MIT

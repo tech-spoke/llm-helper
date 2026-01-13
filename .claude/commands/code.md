@@ -160,7 +160,7 @@ mcp__code-intel__set_query_frame
 
 **やること:**
 1. `investigation_guidance` のヒントに従ってツールを使用
-2. **必須**: `find_definitions` と `find_references` を使用すること
+2. **通常**: `find_definitions` と `find_references` を使用すること
 3. 発見した情報でスロットを更新
 4. 十分な情報が集まったら `submit_understanding` を呼ぶ
 
@@ -168,12 +168,45 @@ mcp__code-intel__set_query_frame
 | ツール | 説明 |
 |--------|------|
 | query | 汎用クエリ（最初にこれ） |
-| find_definitions | シンボル定義検索 **（必須）** |
-| find_references | 参照検索 **（必須）** |
+| find_definitions | シンボル定義検索 |
+| find_references | 参照検索 |
 | search_text | テキスト検索 |
 | analyze_structure | 構造解析 |
 
-**フェーズ完了:**
+### マークアップコンテキスト緩和（v1.1）
+
+**純粋なマークアップファイルのみを対象とする場合、要件が緩和される:**
+
+| 対象ファイル | 緩和 |
+|-------------|------|
+| `.html`, `.htm` | ✅ 緩和適用 |
+| `.css`, `.scss`, `.sass`, `.less` | ✅ 緩和適用 |
+| `.xml`, `.svg`, `.md` | ✅ 緩和適用 |
+| `.blade.php`, `.vue`, `.jsx`, `.tsx`, `.svelte` | ❌ 緩和なし（ロジック結合） |
+| `.py`, `.js`, `.ts`, `.php` 等 | ❌ 緩和なし |
+
+**緩和時の要件:**
+- `find_definitions` / `find_references` は**不要**
+- `search_text` のみで OK
+- `symbols_identified` は 0 でも OK
+- `trigger_condition` 欠損でも HIGH リスクにならない
+
+**例: CSS修正タスク**
+```
+mcp__code-intel__submit_understanding
+  symbols_identified: []           # 不要
+  entry_points: []                 # 不要
+  existing_patterns: []            # 不要
+  files_analyzed: ["styles.css"]   # 1ファイル以上
+  tools_used: ["search_text"]      # これだけでOK
+  notes: "margin-left: 8px を削除"
+```
+
+**注意:** 1ファイルでもロジック系（.js, .py等）が含まれる場合は通常要件が適用される。
+
+---
+
+**フェーズ完了（通常）:**
 ```
 mcp__code-intel__submit_understanding
   symbols_identified: ["AuthService", "UserRepository", "LoginController"]
@@ -183,7 +216,7 @@ mcp__code-intel__submit_understanding
   notes: "追加のメモ"
 ```
 
-**最低要件（IMPLEMENT/MODIFY）:**
+**最低要件（IMPLEMENT/MODIFY、ロジック系）:**
 - symbols_identified: 3個以上（重複なし）
 - entry_points: 1個以上（symbols に紐付き）
 - files_analyzed: 2個以上（重複なし）
