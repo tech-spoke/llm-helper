@@ -1,42 +1,20 @@
 #!/usr/bin/env python3
 """
-Code Intelligence MCP Server
+Code Intelligence MCP Server v1.0
 
 Provides Cursor-like code intelligence capabilities using open source tools:
 - Repomix: Pack entire repositories for LLM consumption
 - ripgrep: Fast text search
 - tree-sitter: Code structure analysis
 - ctags: Symbol definitions and references
+- ChromaDB: Semantic search (Forest/Map architecture)
 
-v3.9: ChromaDB-based semantic search (devrag 置換)
-- ChromaDBManager: AST チャンキング + ベクトル検索
-- sync_index: ソースコードの増分同期
-- semantic_search: 地図/森の統合検索（Short-circuit対応）
-- Agreement 自動生成と map インデックス
-
-v3.6: QueryFrame-based natural language handling
-- QueryFrame: 自然文を構造化（target_feature, trigger_condition, etc.）
-- QueryDecomposer: LLMが抽出 → サーバーが検証
-- risk_level: 動的成果条件（HIGH/MEDIUM/LOW）
-- slot_source: FACT/HYPOTHESIS の区別
-- NL→シンボル整合性検証
-
-v3.5: Outcome Log for improvement cycle
-- record_outcome: Records session outcomes (success/failure)
-- DecisionLog に session_id を追加
-- /outcome スキルで人間トリガーの記録
-
-v3.4: 抜け穴を塞ぐ
-- 成果物の相互整合性チェック（量だけでなく意味的整合性）
-- SEMANTIC 突入理由を missing_requirements に紐付け
-- READY での Write 対象を探索済みファイルに制限
-
-v3.3: LLM に判断をさせない設計
-- confidence はサーバー側で算出（LLM の自己申告を廃止）
-- evidence は構造化必須
-- devrag_reason は Enum のみ許可
-
-v3.2: Phase-gated execution to ensure proper tool usage order.
+Key Features:
+- Phase-gated execution: EXPLORATION → SEMANTIC → VERIFICATION → READY
+- Server-side confidence calculation (no LLM self-reporting)
+- QueryFrame for structured natural language processing
+- Forest/Map architecture for semantic search
+- Improvement cycle with DecisionLog + OutcomeLog
 """
 
 import asyncio
@@ -54,23 +32,23 @@ from tools.ctags_tool import find_definitions, find_references, get_symbols
 from tools.router import Router, QuestionCategory, UnifiedResult, DecisionLog, FallbackDecision
 from tools.session import (
     SessionManager, SessionState, Phase,
-    ExplorationResult, SemanticResult, VerificationResult, DevragReason,
+    ExplorationResult, SemanticResult, VerificationResult, SemanticReason,
     VerificationEvidence, VerifiedHypothesis,
-    Hypothesis,  # v3.5
+    Hypothesis,
     IntentReclassificationRequired,
-    InvalidSemanticReason, WriteTargetBlocked,  # v3.4
+    InvalidSemanticReason, WriteTargetBlocked,
 )
-from tools.outcome_log import (  # v3.5, v3.10
+from tools.outcome_log import (
     OutcomeLog, OutcomeAnalysis, record_outcome,
     get_outcomes_for_session, get_failure_stats,
-    record_decision, get_decision_for_session,  # v3.10
-    get_session_analysis, get_improvement_insights,  # v3.10
+    record_decision, get_decision_for_session,
+    get_session_analysis, get_improvement_insights,
 )
-from tools.query_frame import (  # v3.6
+from tools.query_frame import (
     QueryFrame, QueryDecomposer, SlotSource, SlotEvidence,
     validate_slot, assess_risk_level, generate_investigation_guidance,
 )
-from tools.chromadb_manager import (  # v3.9
+from tools.chromadb_manager import (
     ChromaDBManager, SearchResult, SearchHit,
     CHROMADB_AVAILABLE,
 )
@@ -81,7 +59,7 @@ router = Router()
 server = Server("code-intel")
 session_manager = SessionManager()
 
-# v3.9: ChromaDB manager cache (per project)
+# ChromaDB manager cache (per project)
 _chromadb_managers: dict[str, ChromaDBManager] = {}
 
 
@@ -250,68 +228,29 @@ async def execute_tool_step(tool: str, params: dict, context: dict) -> dict:
     elif tool == "get_symbols":
         return await get_symbols(path=path)
 
-    elif tool == "devrag_search":
-        # v3: Use enhanced query if bootstrap is available
+    elif tool == "semantic_search":
+        # Use ChromaDB for semantic search
         question = context.get("question", "")
-        enhanced_query = router.bootstrap.get_enhanced_query(path, question)
-        return await execute_devrag_search(enhanced_query, path)
-
-    return {"error": f"Unknown tool: {tool}"}
-
-
-async def execute_devrag_search(query: str, path: str) -> dict:
-    """
-    Execute semantic search using ChromaDB (v3.9) or fallback to devrag CLI.
-
-    v3.9: Uses internal ChromaDB for vector search.
-    Falls back to devrag CLI if ChromaDB is not available.
-    """
-    # v3.9: Try ChromaDB first
-    if CHROMADB_AVAILABLE:
-        try:
-            manager = get_chromadb_manager(path)
-            result = manager.search(query)
-
-            return {
-                "source": result.source,
-                "results": [h.to_dict() for h in result.hits],
-                "skip_forest": result.skip_forest,
-                "confidence": result.confidence,
-                "engine": "chromadb",
-            }
-        except Exception as e:
-            # ChromaDB failed, fall back to devrag
-            pass
-
-    # Fallback: devrag CLI (legacy)
-    try:
-        process = await asyncio.create_subprocess_exec(
-            "devrag", "search", query,
-            "--path", path,
-            "--format", "json",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await process.communicate()
-
-        if process.returncode == 0:
-            result = json.loads(stdout.decode())
-            result["engine"] = "devrag"
-            return result
+        if CHROMADB_AVAILABLE:
+            try:
+                manager = get_chromadb_manager(path)
+                result = manager.search(question)
+                return {
+                    "source": result.source,
+                    "results": [h.to_dict() for h in result.hits],
+                    "skip_forest": result.skip_forest,
+                    "confidence": result.confidence,
+                    "engine": "chromadb",
+                }
+            except Exception as e:
+                return {"error": f"Semantic search failed: {str(e)}"}
         else:
             return {
-                "error": f"devrag search failed: {stderr.decode()}",
-                "note": "devrag may not be configured for this project"
+                "error": "chromadb_not_available",
+                "message": "chromadb is not installed. Install with: pip install chromadb",
             }
 
-    except FileNotFoundError:
-        return {
-            "error": "No search engine available",
-            "note": "Install chromadb or devrag. ChromaDB recommended.",
-            "chromadb_available": CHROMADB_AVAILABLE,
-        }
-    except Exception as e:
-        return {"error": f"Semantic search failed: {str(e)}"}
+    return {"error": f"Unknown tool: {tool}"}
 
 
 @server.list_tools()
@@ -569,12 +508,10 @@ async def list_tools() -> list[Tool]:
                 "required": ["question"],
             },
         ),
-        # v3.2: Session management tools for phase-gated execution
-        # v3.6: Updated with QueryFrame support
+        # Session management tools for phase-gated execution
         Tool(
             name="start_session",
             description="Start a new code implementation session with phase-gated execution. "
-                        "v3.8: Added repo_path for project-specific agreements. "
                         "After calling this, extract QueryFrame using the prompt, then call set_query_frame.",
             inputSchema={
                 "type": "object",
@@ -590,17 +527,16 @@ async def list_tools() -> list[Tool]:
                     },
                     "repo_path": {
                         "type": "string",
-                        "description": "v3.8: Project root path for agreements and learned_pairs (default: '.')",
+                        "description": "Project root path for agreements and learned_pairs (default: '.')",
                         "default": ".",
                     },
                 },
                 "required": ["intent", "query"],
             },
         ),
-        # v3.6: Set QueryFrame from LLM extraction
         Tool(
             name="set_query_frame",
-            description="v3.6: Set the QueryFrame for the current session. "
+            description="Set the QueryFrame for the current session. "
                         "LLM extracts slots using the prompt from start_session, "
                         "server validates and creates QueryFrame. "
                         "Each slot must have 'value' and 'quote' (original text from query).",
@@ -653,9 +589,9 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="submit_understanding",
             description="Submit exploration results to complete Phase 1 (EXPLORATION). "
-                        "v3.3: Confidence is calculated by SERVER, not from LLM input. "
+                        "Confidence is calculated by SERVER, not from LLM input. "
                         "Server evaluates results (symbols, entry_points, tools_used) "
-                        "and determines if SEMANTIC (devrag) is needed or can proceed to READY.",
+                        "and determines if SEMANTIC phase is needed or can proceed to READY.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -689,9 +625,8 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="submit_semantic",
-            description="Submit devrag results to complete Phase 2 (SEMANTIC). "
-                        "Required after using devrag. Must include hypotheses and reason. "
-                        "v3.5: hypotheses now include confidence for improvement analysis.",
+            description="Submit semantic search results to complete Phase 2 (SEMANTIC). "
+                        "Required after using semantic_search. Must include hypotheses and reason.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -715,7 +650,7 @@ async def list_tools() -> list[Tool]:
                         },
                         "description": "List of hypotheses with confidence levels",
                     },
-                    "devrag_reason": {
+                    "semantic_reason": {
                         "type": "string",
                         "enum": [
                             "no_definition_found",
@@ -729,16 +664,16 @@ async def list_tools() -> list[Tool]:
                     "search_queries": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Queries used for devrag search",
+                        "description": "Queries used for semantic search",
                     },
                 },
-                "required": ["hypotheses", "devrag_reason"],
+                "required": ["hypotheses", "semantic_reason"],
             },
         ),
         Tool(
             name="submit_verification",
             description="Submit verification results to complete Phase 3 (VERIFICATION). "
-                        "v3.3: Evidence must be STRUCTURED with tool, target, and result. "
+                        "Evidence must be STRUCTURED with tool, target, and result. "
                         "This prevents 'fake' verification claims.",
             inputSchema={
                 "type": "object",
@@ -792,10 +727,9 @@ async def list_tools() -> list[Tool]:
                 "required": ["verified"],
             },
         ),
-        # v3.4: Write target validation
         Tool(
             name="check_write_target",
-            description="v3.4: Check if a file can be written to in READY phase. "
+            description="Check if a file can be written to in READY phase. "
                         "Files must have been explored (in files_analyzed or verification evidence). "
                         "Prevents writing to unexplored code.",
             inputSchema={
@@ -814,10 +748,9 @@ async def list_tools() -> list[Tool]:
                 "required": ["file_path"],
             },
         ),
-        # v3.10: Recovery from check_write_target block
         Tool(
             name="add_explored_files",
-            description="v3.10: Add files/directories to explored list in READY phase. "
+            description="Add files/directories to explored list in READY phase. "
                         "Use when check_write_target blocks a write to an unexplored location. "
                         "Lightweight recovery without reverting to EXPLORATION phase.",
             inputSchema={
@@ -834,7 +767,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="revert_to_exploration",
-            description="v3.10: Revert from any phase back to EXPLORATION phase. "
+            description="Revert from any phase back to EXPLORATION phase. "
                         "Use when additional exploration is needed after reaching READY phase. "
                         "Previous exploration results are kept by default for incremental exploration.",
             inputSchema={
@@ -848,12 +781,10 @@ async def list_tools() -> list[Tool]:
                 },
             },
         ),
-        # v3.5: Outcome logging for improvement cycle
-        # v3.10: Extended schema for auto-failure detection
         Tool(
             name="record_outcome",
-            description="v3.5/v3.10: Record session outcome (success/failure/partial) for improvement analysis. "
-                        "v3.10: Also called automatically by /code when failure is detected. "
+            description="Record session outcome (success/failure/partial) for improvement analysis. "
+                        "Also called automatically by /code when failure is detected. "
                         "Observer only: records, does not intervene or change behavior.",
             inputSchema={
                 "type": "object",
@@ -870,12 +801,12 @@ async def list_tools() -> list[Tool]:
                     "phase_at_outcome": {
                         "type": "string",
                         "enum": ["EXPLORATION", "SEMANTIC", "VERIFICATION", "READY"],
-                        "description": "v3.10: Phase at outcome (optional, auto-detected from session if available)",
+                        "description": "Phase at outcome (optional, auto-detected from session if available)",
                     },
                     "intent": {
                         "type": "string",
                         "enum": ["IMPLEMENT", "MODIFY", "INVESTIGATE", "QUESTION"],
-                        "description": "v3.10: Intent type (optional, auto-detected from session if available)",
+                        "description": "Intent type (optional, auto-detected from session if available)",
                     },
                     "analysis": {
                         "type": "object",
@@ -916,17 +847,16 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="get_outcome_stats",
-            description="v3.5: Get statistics about session outcomes for improvement analysis. "
-                        "Shows breakdown by intent, phase, devrag usage, and confidence.",
+            description="Get statistics about session outcomes for improvement analysis. "
+                        "Shows breakdown by intent, phase, semantic search usage, and confidence.",
             inputSchema={
                 "type": "object",
                 "properties": {},
             },
         ),
-        # v3.7: LLM委譲による関連性判定
         Tool(
             name="validate_symbol_relevance",
-            description="v3.7: Validate relevance between natural language term and code symbols. "
+            description="Validate relevance between natural language term and code symbols. "
                         "Returns a validation prompt for LLM to determine relevance with code_evidence. "
                         "LLM must explain WHY symbols are related using code evidence (method names, comments, etc.).",
             inputSchema={
@@ -947,7 +877,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="confirm_symbol_relevance",
-            description="v3.8: Confirm symbol relevance after LLM validation. "
+            description="Confirm symbol relevance after LLM validation. "
                         "Updates mapped_symbols confidence based on embedding similarity and LLM's code_evidence. "
                         "Call this after validate_symbol_relevance with LLM's response.",
             inputSchema={
@@ -970,10 +900,9 @@ async def list_tools() -> list[Tool]:
                 "required": ["relevant_symbols", "code_evidence"],
             },
         ),
-        # v3.9: ChromaDB-based semantic search tools
         Tool(
             name="sync_index",
-            description="v3.9: Sync source code to ChromaDB index. "
+            description="Sync source code to ChromaDB index. "
                         "Uses AST-based chunking with fingerprint-based incremental sync. "
                         "Run this after code changes or at session start.",
             inputSchema={
@@ -998,7 +927,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="semantic_search",
-            description="v3.9: Semantic search using ChromaDB. "
+            description="Semantic search using ChromaDB. "
                         "Searches map (agreements) first, then forest (code) if needed. "
                         "Short-circuits if map has high-confidence match (≥0.7).",
             inputSchema={
@@ -1066,21 +995,19 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
     result = None
 
-    # v3.2: Session management tools (no phase check needed)
-    # v3.6: Updated with QueryFrame support
-    # v3.9: ChromaDB integration
+    # Session management tools (no phase check needed)
     if name == "start_session":
         intent = arguments["intent"]
         query = arguments["query"]
-        repo_path = arguments.get("repo_path", ".")  # v3.8: プロジェクトパス
+        repo_path = arguments.get("repo_path", ".")
 
         session = session_manager.create_session(
             intent=intent,
             query=query,
-            repo_path=repo_path,  # v3.8
+            repo_path=repo_path,
         )
 
-        # v3.6: Get extraction prompt for QueryFrame
+        # Get extraction prompt for QueryFrame
         extraction_prompt = QueryDecomposer.get_extraction_prompt(query)
 
         result = {
@@ -1257,21 +1184,21 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         if session is None:
             result = {"error": "no_active_session", "message": "No active session."}
         else:
-            # v3.3: devrag_reason を文字列から DevragReason Enum に変換
-            reason_str = arguments.get("devrag_reason")
-            devrag_reason = None
+            # semantic_reason を文字列から SemanticReason Enum に変換
+            reason_str = arguments.get("semantic_reason")
+            semantic_reason = None
             if reason_str:
                 try:
-                    devrag_reason = DevragReason(reason_str)
+                    semantic_reason = SemanticReason(reason_str)
                 except ValueError:
                     result = {
-                        "error": "invalid_devrag_reason",
-                        "message": f"Invalid devrag_reason: '{reason_str}'",
-                        "valid_reasons": [r.value for r in DevragReason],
+                        "error": "invalid_semantic_reason",
+                        "message": f"Invalid semantic_reason: '{reason_str}'",
+                        "valid_reasons": [r.value for r in SemanticReason],
                     }
                     return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
-            # v3.5: hypotheses を Hypothesis オブジェクトに変換
+            # hypotheses を Hypothesis オブジェクトに変換
             hypotheses_raw = arguments.get("hypotheses", [])
             hypotheses = []
             for h in hypotheses_raw:
@@ -1286,7 +1213,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
             semantic = SemanticResult(
                 hypotheses=hypotheses,
-                devrag_reason=devrag_reason,
+                semantic_reason=semantic_reason,
                 search_queries=arguments.get("search_queries", []),
             )
             result = session.submit_semantic(semantic)
@@ -1364,17 +1291,17 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         # Get session context (prefer session data, fallback to arguments)
         phase_at_outcome = "UNKNOWN"
         intent = "UNKNOWN"
-        devrag_used = False
+        semantic_used = False
         confidence_was = ""
 
         if session:
             phase_at_outcome = session.phase.name
             intent = session.intent
-            devrag_used = session.semantic is not None
+            semantic_used = session.semantic is not None
             if session.exploration:
                 confidence_was = session.exploration._evaluated_confidence
 
-        # v3.10: Allow explicit override (for cases where session is not in memory)
+        # Allow explicit override (for cases where session is not in memory)
         if "phase_at_outcome" in arguments:
             phase_at_outcome = arguments["phase_at_outcome"]
         if "intent" in arguments:
@@ -1396,7 +1323,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             outcome=arguments["outcome"],
             phase_at_outcome=phase_at_outcome,
             intent=intent,
-            devrag_used=devrag_used,
+            semantic_used=semantic_used,
             confidence_was=confidence_was,
             analysis=analysis,
             trigger_message=arguments.get("trigger_message", ""),
@@ -1404,7 +1331,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
         result = record_outcome(outcome_log)
 
-        # v3.8: Cache successful pairs + Generate agreements
+        # Cache successful pairs + Generate agreements
         if arguments["outcome"] == "success" and session and session.query_frame:
             try:
                 from tools.learned_pairs import cache_successful_pair
@@ -1425,11 +1352,11 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                             similarity=sym.confidence,
                             code_evidence=sym.evidence.result_summary if sym.evidence else None,
                             session_id=session_id,
-                            project_root=repo_path,  # v3.8: repo_path を渡す
+                            project_root=repo_path,
                         )
                         cached_count += 1
 
-                        # 2. v3.8: agreements/ に Markdown を生成
+                        # agreements/ に Markdown を生成
                         agreement_data = AgreementData(
                             nl_term=qf.target_feature,
                             symbol=sym.name,
@@ -1454,7 +1381,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                     result["agreement_files"] = agreement_files
                     result["cache_note"] = f"{cached_count} pairs cached, {len(agreement_files)} agreement(s) generated"
 
-                    # 3. v3.9: ChromaDB map に追加
+                    # ChromaDB map に追加
                     if CHROMADB_AVAILABLE:
                         try:
                             chromadb_manager = get_chromadb_manager(repo_path)
@@ -1482,12 +1409,10 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
     elif name == "get_outcome_stats":
-        # v3.5: Get outcome statistics
         result = get_failure_stats()
         return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
     elif name == "validate_symbol_relevance":
-        # v3.7: LLM委譲 + Embedding検証のハイブリッド
         target_feature = arguments["target_feature"]
         symbols = arguments["symbols_identified"]
 
@@ -1520,7 +1445,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             },
         }
 
-        # v3.7: Check learned pairs cache first
+        # Check learned pairs cache first
         try:
             from tools.learned_pairs import find_cached_matches
             cached_matches = find_cached_matches(target_feature, symbols)
@@ -1532,7 +1457,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         except Exception as e:
             result["cache_status"] = f"unavailable: {str(e)}"
 
-        # v3.7: Embedding-based suggestions (if available)
+        # Embedding-based suggestions (if available)
         try:
             from tools.embedding import get_embedding_validator, is_embedding_available
             if is_embedding_available():
@@ -1549,7 +1474,6 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
     elif name == "confirm_symbol_relevance":
-        # v3.8: LLM検証結果を反映して mapped_symbols の confidence を更新
         session = session_manager.get_active_session()
         if session is None:
             result = {"error": "no_active_session", "message": "No active session."}
@@ -1614,7 +1538,6 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
     elif name == "sync_index":
-        # v3.9: Sync source code to ChromaDB
         session = session_manager.get_active_session()
         path = arguments.get("path") or (session.repo_path if session else ".")
         force = arguments.get("force", False)
@@ -1649,7 +1572,6 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
     elif name == "semantic_search":
-        # v3.9: Semantic search using ChromaDB
         session = session_manager.get_active_session()
         query = arguments["query"]
         path = arguments.get("path") or (session.repo_path if session else ".")
@@ -1686,7 +1608,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
         return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
-    # v3.2: Check phase access for other tools
+    # Check phase access for other tools
     phase_error = check_phase_access(name)
     if phase_error:
         return [TextContent(type="text", text=json.dumps(phase_error, indent=2, ensure_ascii=False))]
@@ -1774,11 +1696,10 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     else:
         result = {"error": f"Unknown tool: {name}"}
 
-    # v3.2: Record tool call in session
-    # v3.5: Add result_detail for improvement analysis
+    # Record tool call in session
     if session is not None and result is not None:
         result_summary = ""
-        result_detail = {}  # v3.5
+        result_detail = {}
 
         if isinstance(result, dict):
             if "error" in result:

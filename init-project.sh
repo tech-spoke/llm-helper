@@ -7,33 +7,42 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 usage() {
     echo "Usage: $0 <project-path> [options]"
     echo ""
-    echo "Initialize a project for Code Intel MCP Server v3.9"
+    echo "Initialize a project for Code Intel MCP Server v1.0"
     echo ""
     echo "Arguments:"
     echo "  project-path    Path to the target project (required)"
     echo ""
     echo "Options:"
-    echo "  --src-dirs      Source directories to index (default: src,lib,app)"
+    echo "  --include       Directories/files to index (default: entire project)"
     echo "                  Comma-separated, relative to project root"
+    echo "                  Supports: directories, files, glob patterns"
+    echo "  --exclude       Additional directories/files to exclude"
+    echo "                  Comma-separated, added to default exclusions"
     echo "  --sync-ttl      Hours between auto-sync (default: 1)"
     echo "  --help          Show this help message"
     echo ""
     echo "Examples:"
     echo "  $0 /path/to/my-project"
-    echo "  $0 /path/to/my-project --src-dirs=src,packages,modules"
-    echo "  $0 .   # Initialize current directory"
+    echo "  $0 /path/to/my-project --include=src,lib"
+    echo "  $0 /path/to/my-project --exclude=tests,docs,*.log"
+    echo "  $0 /path/to/my-project --include=app/src --exclude=app/src/vendor"
     exit 1
 }
 
 # Parse arguments
 PROJECT_PATH=""
-SRC_DIRS="src,lib,app"
+INCLUDE_DIRS=""
+EXCLUDE_DIRS=""
 SYNC_TTL_HOURS="1"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --src-dirs=*)
-            SRC_DIRS="${1#*=}"
+        --include=*)
+            INCLUDE_DIRS="${1#*=}"
+            shift
+            ;;
+        --exclude=*)
+            EXCLUDE_DIRS="${1#*=}"
             shift
             ;;
         --sync-ttl=*)
@@ -71,7 +80,7 @@ PROJECT_PATH="$(cd "$PROJECT_PATH" 2>/dev/null && pwd)" || {
     exit 1
 }
 
-echo "=== Code Intel Project Initialization v3.9 ==="
+echo "=== Code Intel Project Initialization v1.0 ==="
 echo ""
 echo "Project: $PROJECT_PATH"
 echo "MCP Server: $SCRIPT_DIR"
@@ -85,30 +94,76 @@ echo "  ✓ .code-intel/"
 echo "  ✓ .code-intel/agreements/"
 echo "  ✓ .code-intel/chroma/"
 
-# Convert comma-separated dirs to JSON array
-IFS=',' read -ra DIRS <<< "$SRC_DIRS"
-DIRS_JSON=""
-for dir in "${DIRS[@]}"; do
-    dir=$(echo "$dir" | xargs)  # trim whitespace
-    if [ -n "$DIRS_JSON" ]; then
-        DIRS_JSON="$DIRS_JSON, "
+# Process --include (default to "." for entire project)
+if [ -z "$INCLUDE_DIRS" ]; then
+    INCLUDE_DIRS="."
+fi
+
+# Convert comma-separated include dirs to JSON array
+IFS=',' read -ra INCL_ARRAY <<< "$INCLUDE_DIRS"
+INCL_JSON=""
+for item in "${INCL_ARRAY[@]}"; do
+    item=$(echo "$item" | xargs)  # trim whitespace
+    if [ -n "$INCL_JSON" ]; then
+        INCL_JSON="$INCL_JSON, "
     fi
-    DIRS_JSON="$DIRS_JSON\"$dir\""
+    INCL_JSON="$INCL_JSON\"$item\""
 done
 
-# Generate v3.9 config.json
+# Default exclude patterns
+DEFAULT_EXCLUDES=(
+    "**/node_modules/**"
+    "**/__pycache__/**"
+    "**/venv/**"
+    "**/vendor/**"
+    "**/.git/**"
+    "**/.code-intel/**"
+)
+
+# Process --exclude and merge with defaults
+declare -a FINAL_EXCLUDES=("${DEFAULT_EXCLUDES[@]}")
+
+if [ -n "$EXCLUDE_DIRS" ]; then
+    IFS=',' read -ra EXCL_ARRAY <<< "$EXCLUDE_DIRS"
+    for item in "${EXCL_ARRAY[@]}"; do
+        item=$(echo "$item" | xargs)  # trim whitespace
+        # Convert to glob pattern if needed
+        if [[ "$item" == *"*"* ]]; then
+            # Already a glob pattern, use as-is but ensure ** prefix
+            if [[ "$item" != "**/"* ]]; then
+                item="**/$item"
+            fi
+        elif [ -d "$PROJECT_PATH/$item" ]; then
+            # Directory: add /** suffix
+            item="**/$item/**"
+        elif [ -f "$PROJECT_PATH/$item" ]; then
+            # File: add **/ prefix
+            item="**/$item"
+        else
+            # Assume it's a pattern/path, add ** prefix and suffix
+            item="**/$item/**"
+        fi
+        FINAL_EXCLUDES+=("$item")
+    done
+fi
+
+# Convert exclude array to JSON
+EXCL_JSON=""
+for pattern in "${FINAL_EXCLUDES[@]}"; do
+    if [ -n "$EXCL_JSON" ]; then
+        EXCL_JSON="$EXCL_JSON,"
+    fi
+    EXCL_JSON="$EXCL_JSON
+    \"$pattern\""
+done
+
+# Generate config.json
 cat > "$PROJECT_PATH/.code-intel/config.json" << EOF
 {
-  "version": "3.9",
+  "version": "1.0",
   "embedding_model": "multilingual-e5-small",
-  "source_dirs": [$DIRS_JSON],
-  "exclude_patterns": [
-    "**/node_modules/**",
-    "**/__pycache__/**",
-    "**/venv/**",
-    "**/vendor/**",
-    "**/.git/**",
-    "**/.code-intel/**"
+  "source_dirs": [$INCL_JSON],
+  "exclude_patterns": [$EXCL_JSON
   ],
   "chunk_strategy": "ast",
   "chunk_max_tokens": 512,
@@ -123,62 +178,21 @@ cat > "$PROJECT_PATH/.code-intel/config.json" << EOF
   }
 }
 EOF
-echo "  ✓ .code-intel/config.json (v3.9)"
+echo "  ✓ .code-intel/config.json"
 
-# Backward compatibility: keep devrag configs if they exist
-if [ ! -f "$PROJECT_PATH/.code-intel/devrag-forest.json" ]; then
-    # Generate devrag-forest.json for legacy fallback
-    PATTERNS=""
-    for dir in "${DIRS[@]}"; do
-        dir=$(echo "$dir" | xargs)
-        if [ -n "$PATTERNS" ]; then
-            PATTERNS="$PATTERNS, "
-        fi
-        PATTERNS="$PATTERNS\"../$dir\""
-    done
-
-    cat > "$PROJECT_PATH/.code-intel/devrag-forest.json" << EOF
-{
-  "document_patterns": [$PATTERNS],
-  "db_path": "./vectors-forest.db",
-  "chunk_size": 500,
-  "search_top_k": 5,
-  "compute": {
-    "device": "auto",
-    "fallback_to_cpu": true
-  },
-  "model": {
-    "name": "multilingual-e5-small",
-    "dimensions": 384
-  }
-}
-EOF
-    echo "  ✓ .code-intel/devrag-forest.json (legacy fallback)"
-fi
-
-if [ ! -f "$PROJECT_PATH/.code-intel/devrag-map.json" ]; then
-    cat > "$PROJECT_PATH/.code-intel/devrag-map.json" << 'EOF'
-{
-  "document_patterns": ["./agreements"],
-  "db_path": "./vectors-map.db",
-  "chunk_size": 300,
-  "search_top_k": 10,
-  "compute": {
-    "device": "auto",
-    "fallback_to_cpu": true
-  },
-  "model": {
-    "name": "multilingual-e5-small",
-    "dimensions": 384
-  }
-}
-EOF
-    echo "  ✓ .code-intel/devrag-map.json (legacy fallback)"
+# Show configured paths
+echo ""
+echo "Index configuration:"
+echo "  Include: $INCLUDE_DIRS"
+if [ -n "$EXCLUDE_DIRS" ]; then
+    echo "  Exclude: $EXCLUDE_DIRS (+ defaults)"
+else
+    echo "  Exclude: (defaults only)"
 fi
 
 # Update .gitignore
 GITIGNORE_ENTRIES="
-# Code Intel MCP Server v3.9
+# Code Intel MCP Server
 .code-intel/vectors-*.db
 .code-intel/chroma/
 .code-intel/sync_state.json
@@ -208,15 +222,14 @@ echo ""
 echo "Project structure:"
 echo "  $PROJECT_PATH/"
 echo "  └── .code-intel/"
-echo "      ├── config.json          (v3.9 configuration)"
-echo "      ├── agreements/          (learned NL→Symbol pairs)"
+echo "      ├── config.json          (configuration)"
+echo "      ├── agreements/          (learned NL->Symbol pairs)"
 echo "      ├── chroma/              (ChromaDB vector database)"
-echo "      ├── sync_state.json      (incremental sync state)"
-echo "      └── devrag-*.json        (legacy fallback configs)"
+echo "      └── sync_state.json      (incremental sync state)"
 echo ""
 echo "=== Next Steps ==="
 echo ""
-echo "1. Install chromadb (required for v3.9):"
+echo "1. Install chromadb (required):"
 echo ""
 echo "   pip install chromadb"
 echo ""
@@ -244,13 +257,13 @@ echo "   cp $SCRIPT_DIR/.claude/commands/*.md $PROJECT_PATH/.claude/commands/"
 echo ""
 echo "4. Restart Claude Code to load the MCP server."
 echo ""
-echo "=== v3.9 New Features ==="
+echo "=== Features ==="
 echo ""
-echo "• ChromaDB-based semantic search (replaces devrag)"
+echo "• ChromaDB-based semantic search"
 echo "• AST-based chunking for PHP, Python, JS, Blade, etc."
 echo "• Fingerprint-based incremental sync (SHA256)"
 echo "• Auto-sync on session start (configurable)"
-echo "• Short-circuit: map hits ≥0.7 skip forest search"
+echo "• Short-circuit: map hits >=0.7 skip forest search"
 echo ""
 echo "Use 'sync_index' tool to manually trigger re-indexing."
 echo "Use 'semantic_search' tool for map/forest vector search."

@@ -1,28 +1,11 @@
 """
 Session State Management for Phase-Gated Execution.
 
-v3.6: 自然文対応とQueryFrame統合
-- QueryFrame: 自然文を構造化したスロット
-- slot_source: FACT/HYPOTHESIS の区別
-- risk_level による動的成果条件
-- NL→シンボル整合性検証
-
-v3.4: 抜け穴を塞ぐ
-- 成果物の相互整合性チェック（量だけでなく意味的整合性）
-- SEMANTIC 突入理由を missing_requirements に紐付け
-- READY での Write 対象を探索済みファイルに制限
-
-v3.3: LLM に判断をさせない設計
-- confidence はサーバー側で算出（LLM の自己申告を廃止）
-- 最低成果条件を満たさないと READY に進めない
-- evidence は構造化（裏取りしたフリを防止）
-- Intent 再評価フックを追加
-
-v3.2: Phase management
-1. EXPLORATION - code-intel tools (required)
-2. SEMANTIC - devrag (if exploration insufficient)
-3. VERIFICATION - re-verify devrag hypotheses with code-intel
-4. READY - implementation allowed
+v1.0: Code Intelligence MCP Server
+- Phase-gated execution: EXPLORATION → SEMANTIC → VERIFICATION → READY
+- Server-side confidence calculation (no LLM self-reporting)
+- QueryFrame for structured natural language processing
+- ChromaDB-based semantic search (Forest/Map architecture)
 """
 
 from dataclasses import dataclass, field
@@ -34,14 +17,14 @@ from typing import Literal
 class Phase(Enum):
     """Execution phases in order."""
     EXPLORATION = auto()      # Phase 1: code-intel required
-    SEMANTIC = auto()         # Phase 2: devrag allowed (if needed)
-    VERIFICATION = auto()     # Phase 3: verify devrag hypotheses
+    SEMANTIC = auto()         # Phase 2: semantic search allowed (if needed)
+    VERIFICATION = auto()     # Phase 3: verify semantic hypotheses
     READY = auto()            # Phase 4: implementation allowed
 
 
-class DevragReason(Enum):
+class SemanticReason(Enum):
     """
-    v3.3: Reasons for using devrag (semantic search).
+    Reasons for entering SEMANTIC phase (semantic search).
 
     Must be one of these - no free text allowed.
     """
@@ -53,22 +36,22 @@ class DevragReason(Enum):
 
 
 class IntentReclassificationRequired(Exception):
-    """v3.3: Raised when Intent needs to be re-evaluated before Write."""
+    """Raised when Intent needs to be re-evaluated before Write."""
     pass
 
 
 class InvalidSemanticReason(Exception):
-    """v3.4: Raised when devrag_reason doesn't match missing_requirements."""
+    """Raised when semantic_reason doesn't match missing_requirements."""
     pass
 
 
 class WriteTargetBlocked(Exception):
-    """v3.4: Raised when Write target was not explored."""
+    """Raised when Write target was not explored."""
     pass
 
 
 # =============================================================================
-# v3.3: Exploration Evaluation (Server-side confidence calculation)
+# Exploration Evaluation (Server-side confidence calculation)
 # =============================================================================
 
 # Minimum requirements for EXPLORATION to be considered "high" confidence
@@ -91,7 +74,7 @@ STRICT_EXPLORATION_REQUIREMENTS = {
 
 def evaluate_exploration(result: "ExplorationResult", intent: str) -> tuple[str, list[str]]:
     """
-    v3.3: サーバー側で confidence を算出する。
+    サーバー側で confidence を算出する。
 
     LLM の自己申告ではなく、成果物から機械的に判定。
 
@@ -132,7 +115,7 @@ def evaluate_exploration(result: "ExplorationResult", intent: str) -> tuple[str,
 
 def can_proceed_to_ready(result: "ExplorationResult", intent: str) -> tuple[bool, list[str]]:
     """
-    v3.3: IMPLEMENT/MODIFY は最低成果条件を満たさないと READY に進めない。
+    IMPLEMENT/MODIFY は最低成果条件を満たさないと READY に進めない。
 
     Returns:
         (can_proceed, missing_requirements)
@@ -146,12 +129,12 @@ def can_proceed_to_ready(result: "ExplorationResult", intent: str) -> tuple[bool
 
 
 # =============================================================================
-# v3.6: Dynamic Exploration Requirements based on risk_level
+# Dynamic Exploration Requirements based on risk_level
 # =============================================================================
 
 def get_dynamic_requirements(risk_level: str, intent: str) -> dict:
     """
-    v3.6: リスクレベルに応じた成果条件を返す。
+    リスクレベルに応じた成果条件を返す。
 
     HIGH リスクでは条件を厳しく、LOW では緩く。
     """
@@ -196,7 +179,7 @@ def evaluate_exploration_v36(
     query_frame: "QueryFrame | None" = None,
 ) -> tuple[str, list[str]]:
     """
-    v3.6: リスクレベルを考慮した成果評価。
+    リスクレベルを考慮した成果評価。
 
     Args:
         result: 探索結果
@@ -241,12 +224,12 @@ def evaluate_exploration_v36(
 
 
 # =============================================================================
-# v3.4: Exploration Consistency Check (量だけでなく意味的整合性)
+# Exploration Consistency Check (量だけでなく意味的整合性)
 # =============================================================================
 
 def validate_exploration_consistency(result: "ExplorationResult") -> list[str]:
     """
-    v3.4: 成果物の相互整合性をチェック。
+    成果物の相互整合性をチェック。
 
     LLM が「形式的には条件を満たすが意味のない探索」をすることを防ぐ。
 
@@ -284,28 +267,28 @@ def validate_exploration_consistency(result: "ExplorationResult") -> list[str]:
 
 
 # =============================================================================
-# v3.4: SEMANTIC Reason Validation (探索失敗の種類に対応)
+# SEMANTIC Reason Validation (探索失敗の種類に対応)
 # =============================================================================
 
-# missing_requirements のキーに対応する許可される devrag_reason
-DEVRAG_ALLOWED_REASONS_BY_MISSING = {
+# missing_requirements のキーに対応する許可される semantic_reason
+SEMANTIC_ALLOWED_REASONS_BY_MISSING = {
     "symbols_identified": {
-        DevragReason.NO_DEFINITION_FOUND,
-        DevragReason.ARCHITECTURE_UNKNOWN,
+        SemanticReason.NO_DEFINITION_FOUND,
+        SemanticReason.ARCHITECTURE_UNKNOWN,
     },
     "entry_points": {
-        DevragReason.NO_DEFINITION_FOUND,
-        DevragReason.NO_REFERENCE_FOUND,
+        SemanticReason.NO_DEFINITION_FOUND,
+        SemanticReason.NO_REFERENCE_FOUND,
     },
     "existing_patterns": {
-        DevragReason.NO_SIMILAR_IMPLEMENTATION,
-        DevragReason.ARCHITECTURE_UNKNOWN,
+        SemanticReason.NO_SIMILAR_IMPLEMENTATION,
+        SemanticReason.ARCHITECTURE_UNKNOWN,
     },
     "files_analyzed": {
-        DevragReason.CONTEXT_FRAGMENTED,
-        DevragReason.ARCHITECTURE_UNKNOWN,
+        SemanticReason.CONTEXT_FRAGMENTED,
+        SemanticReason.ARCHITECTURE_UNKNOWN,
     },
-    # required_tools: ツール未使用は devrag の理由にはならない（ツールを使えば済む）
+    # required_tools: ツール未使用は semantic の理由にはならない（ツールを使えば済む）
     # ただし使っても見つからない場合は他の理由が適用される
     "required_tools": set(),
 }
@@ -313,10 +296,10 @@ DEVRAG_ALLOWED_REASONS_BY_MISSING = {
 
 def validate_semantic_reason(
     missing_requirements: list[str],
-    devrag_reason: DevragReason,
+    semantic_reason: SemanticReason,
 ) -> tuple[bool, str]:
     """
-    v3.4: devrag_reason が missing_requirements に対応しているかチェック。
+    semantic_reason が missing_requirements に対応しているかチェック。
 
     「探索をサボる口実として SEMANTIC に逃げる」ことを防ぐ。
 
@@ -328,19 +311,19 @@ def validate_semantic_reason(
         return False, "No missing requirements but entered SEMANTIC phase"
 
     # missing_requirements から許可される reason を収集
-    allowed_reasons: set[DevragReason] = set()
+    allowed_reasons: set[SemanticReason] = set()
     for missing in missing_requirements:
         # "symbols_identified: 1/3" → "symbols_identified"
         key = missing.split(":")[0].strip()
-        allowed_reasons |= DEVRAG_ALLOWED_REASONS_BY_MISSING.get(key, set())
+        allowed_reasons |= SEMANTIC_ALLOWED_REASONS_BY_MISSING.get(key, set())
 
     # CONTEXT_FRAGMENTED と ARCHITECTURE_UNKNOWN は汎用的に許可
-    allowed_reasons.add(DevragReason.CONTEXT_FRAGMENTED)
-    allowed_reasons.add(DevragReason.ARCHITECTURE_UNKNOWN)
+    allowed_reasons.add(SemanticReason.CONTEXT_FRAGMENTED)
+    allowed_reasons.add(SemanticReason.ARCHITECTURE_UNKNOWN)
 
-    if devrag_reason not in allowed_reasons:
+    if semantic_reason not in allowed_reasons:
         return False, (
-            f"devrag_reason '{devrag_reason.value}' is not allowed for missing: {missing_requirements}. "
+            f"semantic_reason '{semantic_reason.value}' is not allowed for missing: {missing_requirements}. "
             f"Allowed reasons: {[r.value for r in allowed_reasons]}"
         )
 
@@ -348,7 +331,7 @@ def validate_semantic_reason(
 
 
 # =============================================================================
-# v3.4: Write Target Validation (探索済み範囲に制限)
+# Write Target Validation (探索済み範囲に制限)
 # =============================================================================
 
 def validate_write_target(
@@ -357,7 +340,7 @@ def validate_write_target(
     allow_new_files: bool = True,
 ) -> tuple[bool, str]:
     """
-    v3.4: Write 対象が探索済みかチェック。
+    Write 対象が探索済みかチェック。
 
     「見てないコードを書くな」を物理化。
 
@@ -415,7 +398,7 @@ class ExplorationResult:
     """
     Phase 1 output: what was learned from code-intel.
 
-    v3.3: confidence フィールドを削除。サーバー側で算出する。
+    confidence はサーバー側で算出する（LLM の自己申告は不可）。
     """
     symbols_identified: list[str] = field(default_factory=list)
     entry_points: list[str] = field(default_factory=list)
@@ -444,7 +427,7 @@ class ExplorationResult:
 @dataclass
 class Hypothesis:
     """
-    v3.5: 構造化された仮説。
+    構造化された仮説。
 
     改善サイクルで「低 confidence の仮説は失敗しやすい」等の分析が可能。
     """
@@ -461,19 +444,18 @@ class Hypothesis:
 @dataclass
 class SemanticResult:
     """
-    Phase 2 output: hypotheses from devrag.
+    Phase 2 output: hypotheses from semantic search.
 
-    v3.3: devrag_reason は DevragReason Enum のみ許可。
-    v3.5: hypotheses は Hypothesis オブジェクトのリスト（confidence 付き）。
+    semantic_reason は SemanticReason Enum のみ許可。
     """
     hypotheses: list[Hypothesis] = field(default_factory=list)
-    devrag_reason: DevragReason | None = None
+    semantic_reason: SemanticReason | None = None
     search_queries: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
             "hypotheses": [h.to_dict() for h in self.hypotheses],
-            "devrag_reason": self.devrag_reason.value if self.devrag_reason else None,
+            "semantic_reason": self.semantic_reason.value if self.semantic_reason else None,
             "search_queries": self.search_queries,
         }
 
@@ -481,7 +463,7 @@ class SemanticResult:
 @dataclass
 class VerificationEvidence:
     """
-    v3.3: 構造化された evidence。
+    構造化された evidence。
 
     裏取りに使用したツール・対象・結果を必須化。
     """
@@ -502,7 +484,7 @@ class VerificationEvidence:
 @dataclass
 class VerifiedHypothesis:
     """
-    v3.3: 検証済み仮説。
+    検証済み仮説。
 
     evidence を構造化することで「裏取りしたフリ」を防止。
     """
@@ -523,7 +505,7 @@ class VerificationResult:
     """
     Phase 3 output: verified hypotheses.
 
-    v3.3: verified は VerifiedHypothesis のリスト。
+    verified は VerifiedHypothesis のリスト。
     """
     verified: list[VerifiedHypothesis] = field(default_factory=list)
     all_confirmed: bool = False
@@ -536,7 +518,7 @@ class VerificationResult:
 
 
 # =============================================================================
-# v3.3: Valid tools for verification evidence
+# Valid tools for verification evidence
 # =============================================================================
 
 VALID_VERIFICATION_TOOLS = {
@@ -550,7 +532,7 @@ VALID_VERIFICATION_TOOLS = {
 
 def validate_verification_evidence(evidence: VerificationEvidence) -> tuple[bool, str]:
     """
-    v3.3: evidence が有効かチェック。
+    evidence が有効かチェック。
 
     Returns:
         (is_valid, error_message)
@@ -576,23 +558,12 @@ class SessionState:
     """
     Manages the state of a code implementation session.
 
-    v3.8 changes:
-    - Added repo_path for project-specific paths
-    - Added map_results and forest_results for devrag dual search
-    - Added map_hit flag for short-circuit logic
-
-    v3.6 changes:
-    - Added query_frame for natural language structuring
-    - Added risk_level for dynamic requirements
-    - Added NL→symbol mapping validation
-
-    v3.5 changes:
-    - Added decision_log for Outcome Log matching
-
-    v3.3 changes:
-    - confidence is server-calculated
-    - Strict requirements for IMPLEMENT/MODIFY
-    - Intent re-evaluation before Write
+    Features:
+    - Phase-gated execution (EXPLORATION → SEMANTIC → VERIFICATION → READY)
+    - Server-side confidence calculation
+    - QueryFrame for natural language structuring
+    - Forest/Map dual search results
+    - Write target validation
 
     Enforces phase-gated execution:
     - Tools are restricted based on current phase
@@ -623,7 +594,7 @@ class SessionState:
     semantic: SemanticResult | None = None
     verification: VerificationResult | None = None
 
-    # v3.8: Devrag dual search results
+    # Semantic search results (Forest/Map architecture)
     map_results: list[dict] = field(default_factory=list)  # 地図検索結果
     forest_results: list[dict] = field(default_factory=list)  # 森検索結果
     map_hit: bool = False  # 地図でヒットしたか（Short-circuit用）
@@ -637,12 +608,12 @@ class SessionState:
         tool: str,
         params: dict,
         result_summary: str,
-        result_detail: dict | None = None,  # v3.5: 詳細結果
+        result_detail: dict | None = None,
     ) -> None:
         """
         Record a tool call for tracking.
 
-        v3.5: result_detail を追加。改善サイクルでの分析用。
+        result_detail: 改善サイクルでの分析用。
         """
         record = {
             "tool": tool,
@@ -658,12 +629,12 @@ class SessionState:
 
     def get_allowed_tools(self) -> list[str]:
         """
-        v3.3: Get tools allowed in current phase.
+        Get tools allowed in current phase.
 
         Semantic Search Rule をコードで実装。
         """
         if self.phase == Phase.EXPLORATION:
-            # devrag は明示的に除外
+            # semantic_search は明示的に除外
             return [
                 "query", "search_text", "find_definitions",
                 "find_references", "analyze_structure", "get_symbols",
@@ -672,12 +643,12 @@ class SessionState:
             ]
         elif self.phase == Phase.SEMANTIC:
             return [
-                "devrag_search",
+                "semantic_search",
                 "submit_semantic",
                 "search_text", "find_definitions", "find_references",
             ]
         elif self.phase == Phase.VERIFICATION:
-            # devrag は明示的に除外
+            # semantic_search は明示的に除外
             return [
                 "query", "search_text", "find_definitions",
                 "find_references", "analyze_structure",
@@ -697,23 +668,23 @@ class SessionState:
     def get_blocked_reason(self, tool: str) -> str:
         """Get reason why a tool is blocked."""
         if self.phase == Phase.EXPLORATION:
-            if tool == "devrag_search":
+            if tool == "semantic_search":
                 return (
-                    "devrag is not allowed in EXPLORATION phase. "
+                    "semantic_search is not allowed in EXPLORATION phase. "
                     "First use code-intel tools (query, find_definitions, find_references). "
-                    "Then call submit_understanding. Server will evaluate if devrag is needed."
+                    "Then call submit_understanding. Server will evaluate if semantic search is needed."
                 )
         elif self.phase == Phase.VERIFICATION:
-            if tool == "devrag_search":
+            if tool == "semantic_search":
                 return (
-                    "devrag is not allowed in VERIFICATION phase. "
-                    "Use code-intel tools to verify hypotheses from devrag."
+                    "semantic_search is not allowed in VERIFICATION phase. "
+                    "Use code-intel tools to verify hypotheses from semantic search."
                 )
         return f"Tool '{tool}' is not allowed in phase {self.phase.name}"
 
     def check_intent_before_write(self) -> None:
         """
-        v3.3: READY フェーズで Write が要求された場合、Intent を確認。
+        READY フェーズで Write が要求された場合、Intent を確認。
 
         INVESTIGATE のまま Write しようとしたら例外。
         """
@@ -725,7 +696,7 @@ class SessionState:
 
     def check_write_target(self, file_path: str, allow_new_files: bool = True) -> dict:
         """
-        v3.4: Write 対象が探索済みかチェック。
+        Write 対象が探索済みかチェック。
 
         「見てないコードを書くな」を物理化。
 
@@ -779,7 +750,7 @@ class SessionState:
 
     def add_explored_files(self, files: list[str]) -> dict:
         """
-        v3.10: READYフェーズで探索済みファイルを追加登録。
+        READYフェーズで探索済みファイルを追加登録。
 
         check_write_target でブロックされた場合の軽量な復帰手段。
         新しいディレクトリやファイルを探索済みとして追加できる。
@@ -821,7 +792,7 @@ class SessionState:
 
     def revert_to_exploration(self, keep_results: bool = True) -> dict:
         """
-        v3.10: EXPLORATIONフェーズに戻る。
+        EXPLORATIONフェーズに戻る。
 
         check_write_target でブロックされた場合や、
         追加の探索が必要な場合に使用。
@@ -873,9 +844,10 @@ class SessionState:
         """
         Submit exploration results and determine next phase.
 
-        v3.6: risk_level と QueryFrame を考慮した動的成果条件。
-        v3.3: confidence はサーバー側で算出。LLM の自己申告は無視。
-        v3.4: 成果物の相互整合性チェックを追加。
+        Features:
+        - risk_level と QueryFrame を考慮した動的成果条件
+        - confidence はサーバー側で算出（LLM の自己申告は無視）
+        - 成果物の相互整合性チェック
 
         Returns: {"success": bool, "next_phase": str, "message": str}
         """
@@ -948,8 +920,8 @@ class SessionState:
                 "evaluated_confidence": confidence,
                 "missing_requirements": missing,
                 "risk_level": self.risk_level,
-                "message": "Exploration insufficient. Use devrag to gather more context.",
-                "hint": "Use devrag_search, then submit_semantic with hypotheses and devrag_reason.",
+                "message": "Exploration insufficient. Use semantic_search to gather more context.",
+                "hint": "Use semantic_search, then submit_semantic with hypotheses and semantic_reason.",
             }
             if consistency_errors:
                 response["consistency_errors"] = consistency_errors
@@ -961,7 +933,7 @@ class SessionState:
 
     def _validate_nl_symbol_mapping(self, result: ExplorationResult) -> list[str]:
         """
-        v3.6: NL用語とシンボルの整合性チェック。
+        NL用語とシンボルの整合性チェック。
 
         target_feature に対応するシンボルが見つかっているか検証。
         """
@@ -987,7 +959,7 @@ class SessionState:
 
     def _check_hypothesis_slots(self) -> list[str]:
         """
-        v3.6: HYPOTHESISスロットが残っていないかチェック。
+        HYPOTHESISスロットが残っていないかチェック。
 
         HYPOTHESISはVERIFICATION必須。
         """
@@ -1000,10 +972,10 @@ class SessionState:
 
     def submit_semantic(self, result: SemanticResult) -> dict:
         """
-        Submit semantic (devrag) results and move to verification.
+        Submit semantic search results and move to verification.
 
-        v3.3: devrag_reason は DevragReason Enum のみ許可。
-        v3.4: devrag_reason が missing_requirements に対応しているかチェック。
+        semantic_reason は SemanticReason Enum のみ許可。
+        semantic_reason が missing_requirements に対応しているかチェック。
 
         Returns: {"success": bool, "next_phase": str, "message": str}
         """
@@ -1014,28 +986,28 @@ class SessionState:
                 "message": f"Cannot submit semantic in phase {self.phase.name}",
             }
 
-        # v3.3: devrag_reason は Enum 必須
-        if result.devrag_reason is None:
+        # semantic_reason は Enum 必須
+        if result.semantic_reason is None:
             return {
                 "success": False,
                 "next_phase": self.phase.name,
-                "message": "devrag_reason is required (must be DevragReason enum).",
-                "valid_reasons": [r.value for r in DevragReason],
+                "message": "semantic_reason is required (must be SemanticReason enum).",
+                "valid_reasons": [r.value for r in SemanticReason],
             }
 
-        if not isinstance(result.devrag_reason, DevragReason):
+        if not isinstance(result.semantic_reason, SemanticReason):
             return {
                 "success": False,
                 "next_phase": self.phase.name,
-                "message": f"devrag_reason must be DevragReason enum, got: {type(result.devrag_reason)}",
-                "valid_reasons": [r.value for r in DevragReason],
+                "message": f"semantic_reason must be SemanticReason enum, got: {type(result.semantic_reason)}",
+                "valid_reasons": [r.value for r in SemanticReason],
             }
 
-        # v3.4: devrag_reason が missing_requirements に対応しているかチェック
+        # semantic_reason が missing_requirements に対応しているかチェック
         if self.exploration and self.exploration._missing_requirements:
             is_valid, error = validate_semantic_reason(
                 self.exploration._missing_requirements,
-                result.devrag_reason,
+                result.semantic_reason,
             )
             if not is_valid:
                 return {
@@ -1043,14 +1015,14 @@ class SessionState:
                     "next_phase": self.phase.name,
                     "message": error,
                     "missing_requirements": self.exploration._missing_requirements,
-                    "hint": "Choose a devrag_reason that matches why exploration failed.",
+                    "hint": "Choose a semantic_reason that matches why exploration failed.",
                 }
 
         if not result.hypotheses:
             return {
                 "success": False,
                 "next_phase": self.phase.name,
-                "message": "At least one hypothesis is required from devrag results.",
+                "message": "At least one hypothesis is required from semantic search results.",
             }
 
         self.semantic = result
@@ -1075,7 +1047,7 @@ class SessionState:
         """
         Submit verification results and move to ready.
 
-        v3.3: evidence は構造化必須。
+        evidence は構造化必須。
 
         Returns: {"success": bool, "next_phase": str, "message": str}
         """
@@ -1153,9 +1125,9 @@ class SessionState:
             "query": self.query,
             "created_at": self.created_at,
             "current_phase": self.phase.name,
-            "decision_log": self.decision_log,  # v3.5
-            "query_frame": self.query_frame.to_dict() if self.query_frame else None,  # v3.6
-            "risk_level": self.risk_level,  # v3.6
+            "decision_log": self.decision_log,
+            "query_frame": self.query_frame.to_dict() if self.query_frame else None,
+            "risk_level": self.risk_level,
             "exploration": self.exploration.to_dict() if self.exploration else None,
             "semantic": self.semantic.to_dict() if self.semantic else None,
             "verification": self.verification.to_dict() if self.verification else None,
@@ -1185,12 +1157,12 @@ class SessionManager:
         intent: str,
         query: str,
         session_id: str | None = None,
-        repo_path: str = ".",  # v3.8: プロジェクトパス
+        repo_path: str = ".",
     ) -> SessionState:
         """
         Create a new session.
 
-        v3.8: repo_path を追加。agreements と learned_pairs の保存先を指定。
+        repo_path: agreements と learned_pairs の保存先を指定。
         """
         if session_id is None:
             session_id = f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"

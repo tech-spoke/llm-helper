@@ -169,7 +169,7 @@ def submit_semantic(self, ...) -> dict:
     SEMANTIC フェーズ完了
 
     処理:
-    1. devrag_reason の妥当性チェック（validate_semantic_reason）
+    1. semantic_reason の妥当性チェック（validate_semantic_reason）
     2. 仮説の記録
     3. VERIFICATION へ遷移
     """
@@ -852,7 +852,7 @@ def record_outcome(outcome_log: OutcomeLog) -> dict:
     - outcome (success/failure/partial)
     - phase_at_outcome
     - intent
-    - devrag_used
+    - semantic_used
     - analysis
     - trigger_message
     """

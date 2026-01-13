@@ -1,9 +1,6 @@
 """
 Improvement Cycle Logs - Records decisions and outcomes for analysis.
 
-v3.10: Added DecisionLog persistence
-v3.5: Added OutcomeLog for matching with Decision Log.
-
 Design principles:
 - Observer only: Records, does not intervene
 - Append-only: Never modifies past records
@@ -14,9 +11,9 @@ Log files:
 - outcomes.jsonl: Human-triggered via /outcome skill
 
 Improvement cycle:
-1. Session starts → DecisionLog recorded automatically
+1. Session starts -> DecisionLog recorded automatically
 2. Session ends (success/failure)
-3. Human calls /outcome → OutcomeLog recorded
+3. Human calls /outcome -> OutcomeLog recorded
 4. Analysis matches DecisionLog + OutcomeLog by session_id
 """
 
@@ -63,7 +60,7 @@ class OutcomeLog:
 
     # Optional fields (with defaults)
     timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
-    devrag_used: bool = False
+    semantic_used: bool = False
     confidence_was: str = ""  # "high" or "low"
     analysis: OutcomeAnalysis | None = None
     trigger_message: str = ""  # The message that triggered /outcome
@@ -76,7 +73,7 @@ class OutcomeLog:
             "outcome": self.outcome,
             "phase_at_outcome": self.phase_at_outcome,
             "intent": self.intent,
-            "devrag_used": self.devrag_used,
+            "semantic_used": self.semantic_used,
             "confidence_was": self.confidence_was,
             "trigger_message": self.trigger_message,
         }
@@ -179,7 +176,7 @@ def get_failure_stats() -> dict:
     Returns breakdown by:
     - intent type
     - phase at failure
-    - devrag usage
+    - semantic search usage
     - confidence level
     """
     outcomes = get_recent_outcomes(limit=1000)
@@ -189,7 +186,7 @@ def get_failure_stats() -> dict:
         "by_outcome": {"success": 0, "failure": 0, "partial": 0},
         "by_intent": {},
         "by_phase": {},
-        "devrag_correlation": {"with_devrag": {"success": 0, "failure": 0}, "without_devrag": {"success": 0, "failure": 0}},
+        "semantic_correlation": {"with_semantic": {"success": 0, "failure": 0}, "without_semantic": {"success": 0, "failure": 0}},
         "confidence_correlation": {"high": {"success": 0, "failure": 0}, "low": {"success": 0, "failure": 0}},
     }
 
@@ -197,7 +194,7 @@ def get_failure_stats() -> dict:
         outcome = o.get("outcome", "unknown")
         intent = o.get("intent", "unknown")
         phase = o.get("phase_at_outcome", "unknown")
-        devrag = o.get("devrag_used", False)
+        semantic = o.get("semantic_used", False)
         confidence = o.get("confidence_was", "unknown")
 
         # Count by outcome
@@ -216,10 +213,10 @@ def get_failure_stats() -> dict:
         if outcome in stats["by_phase"][phase]:
             stats["by_phase"][phase][outcome] += 1
 
-        # Devrag correlation
-        devrag_key = "with_devrag" if devrag else "without_devrag"
+        # Semantic search correlation
+        semantic_key = "with_semantic" if semantic else "without_semantic"
         if outcome in ("success", "failure"):
-            stats["devrag_correlation"][devrag_key][outcome] += 1
+            stats["semantic_correlation"][semantic_key][outcome] += 1
 
         # Confidence correlation
         if confidence in ("high", "low") and outcome in ("success", "failure"):
@@ -229,7 +226,7 @@ def get_failure_stats() -> dict:
 
 
 # ============================================================================
-# Decision Log Functions (v3.10)
+# Decision Log Functions
 # ============================================================================
 
 def record_decision(decision_log: dict) -> dict:

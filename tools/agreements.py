@@ -1,11 +1,10 @@
 """
-Agreements Manager for v3.8.
+Agreements Manager.
 
-v3.8: 成功した NL→Symbol ペアを Markdown 形式で保存し、
-devrag-map で検索可能にする。
+成功した NL->Symbol ペアを Markdown 形式で保存し、
+ChromaDB Map コレクションで検索可能にする。
 """
 
-import asyncio
 import re
 from dataclasses import dataclass
 from datetime import datetime
@@ -46,7 +45,7 @@ def generate_agreement_markdown(data: AgreementData) -> str:
     """
     合意事項の Markdown を生成。
 
-    devrag-map がインデックス化できる形式で出力。
+    ChromaDB Map コレクションがインデックス化できる形式で出力。
     """
     symbol_normalized = EmbeddingValidator.split_camel_case(data.symbol)
 
@@ -124,7 +123,7 @@ class AgreementsManager:
     合意事項（agreements/）の管理。
 
     - Markdown ファイルの生成・保存
-    - devrag-map との同期
+    - ChromaDB Map コレクションとの同期
     """
 
     AGREEMENTS_DIR = ".code-intel/agreements"
@@ -200,58 +199,6 @@ class AgreementsManager:
             filepath.unlink()
             return True
         return False
-
-    async def trigger_devrag_sync(self) -> dict:
-        """
-        devrag-map の再インデックスをトリガー。
-
-        Returns:
-            sync 結果
-        """
-        config_path = self.project_root / "devrag-map.json"
-
-        if not config_path.exists():
-            return {
-                "success": False,
-                "error": "devrag-map.json not found",
-                "hint": "Run setup.sh to generate config files",
-            }
-
-        try:
-            process = await asyncio.create_subprocess_exec(
-                "devrag",
-                "--config", str(config_path),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(),
-                timeout=30.0,
-            )
-
-            return {
-                "success": process.returncode == 0,
-                "stdout": stdout.decode() if stdout else "",
-                "stderr": stderr.decode() if stderr else "",
-            }
-
-        except asyncio.TimeoutError:
-            return {
-                "success": False,
-                "error": "devrag sync timed out (30s)",
-            }
-        except FileNotFoundError:
-            return {
-                "success": False,
-                "error": "devrag command not found",
-                "hint": "Install devrag: https://github.com/tomohiro-owada/devrag",
-            }
-        except Exception as e:
-            return {
-                "success": False,
-                "error": str(e),
-            }
-
 
 # シングルトンインスタンス
 _manager_instance: Optional[AgreementsManager] = None

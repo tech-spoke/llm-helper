@@ -257,11 +257,11 @@ mcp__code-intel__submit_semantic
     {"text": "AuthService は Controller から直接呼ばれている", "confidence": "high"},
     {"text": "JWT トークンを使用している", "confidence": "medium"}
   ]
-  devrag_reason: "no_similar_implementation"
+  semantic_reason: "no_similar_implementation"
   search_queries: ["authentication flow"]
 ```
 
-**devrag_reason の対応表:**
+**semantic_reason の対応表:**
 | missing | 許可される reason |
 |---------|------------------|
 | symbols_identified | no_definition_found, architecture_unknown |

@@ -226,7 +226,7 @@ class EmbeddingValidator:
                 f"find_references で '{symbol}' の使用箇所を確認し、本当に関連するか検証",
                 "関連性を証明するコード片（コメント、命名規則）を見つける",
             ],
-            "fallback": "事実検索で見つからない場合は submit_semantic で DEVRAG を使用",
+            "fallback": "事実検索で見つからない場合は submit_semantic で意味検索を使用",
         }
 
     @staticmethod

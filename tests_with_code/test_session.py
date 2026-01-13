@@ -4,7 +4,7 @@ Tests for tools/session.py
 Tests cover:
 - Phase transitions (EXPLORATION -> SEMANTIC -> VERIFICATION -> READY)
 - Validation functions (consistency, semantic reason, write target)
-- v3.10 recovery features (add_explored_files, revert_to_exploration)
+- Recovery features (add_explored_files, revert_to_exploration)
 """
 
 import pytest
@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tools.session import (
     Phase,
-    DevragReason,
+    SemanticReason,
     SessionState,
     SessionManager,
     ExplorationResult,
@@ -181,7 +181,7 @@ class TestValidateSemanticReason:
         """Valid reason for missing symbols should pass."""
         is_valid, error = validate_semantic_reason(
             missing_requirements=["symbols_identified: 1/3"],
-            devrag_reason=DevragReason.NO_DEFINITION_FOUND,
+            semantic_reason=SemanticReason.NO_DEFINITION_FOUND,
         )
         assert is_valid is True
         assert error == ""
@@ -190,7 +190,7 @@ class TestValidateSemanticReason:
         """ARCHITECTURE_UNKNOWN should always be valid."""
         is_valid, error = validate_semantic_reason(
             missing_requirements=["symbols_identified: 1/3"],
-            devrag_reason=DevragReason.ARCHITECTURE_UNKNOWN,
+            semantic_reason=SemanticReason.ARCHITECTURE_UNKNOWN,
         )
         assert is_valid is True
 
@@ -198,7 +198,7 @@ class TestValidateSemanticReason:
         """CONTEXT_FRAGMENTED should always be valid."""
         is_valid, error = validate_semantic_reason(
             missing_requirements=["files_analyzed: 1/2"],
-            devrag_reason=DevragReason.CONTEXT_FRAGMENTED,
+            semantic_reason=SemanticReason.CONTEXT_FRAGMENTED,
         )
         assert is_valid is True
 
@@ -206,7 +206,7 @@ class TestValidateSemanticReason:
         """No missing requirements should fail."""
         is_valid, error = validate_semantic_reason(
             missing_requirements=[],
-            devrag_reason=DevragReason.NO_DEFINITION_FOUND,
+            semantic_reason=SemanticReason.NO_DEFINITION_FOUND,
         )
         assert is_valid is False
         assert "No missing requirements" in error
@@ -291,7 +291,7 @@ class TestSessionState:
         allowed = session.get_allowed_tools()
         assert "find_definitions" in allowed
         assert "find_references" in allowed
-        assert "devrag_search" not in allowed
+        assert "semantic_search" not in allowed
 
     def test_allowed_tools_in_ready(self):
         """READY phase should allow all tools."""
@@ -447,7 +447,7 @@ class TestRevertToExploration:
         )
         session.semantic = SemanticResult(
             hypotheses=[Hypothesis(text="Test hypothesis")],
-            devrag_reason=DevragReason.ARCHITECTURE_UNKNOWN,
+            semantic_reason=SemanticReason.ARCHITECTURE_UNKNOWN,
         )
 
         result = session.revert_to_exploration(keep_results=True)
@@ -469,7 +469,7 @@ class TestRevertToExploration:
         )
         session.semantic = SemanticResult(
             hypotheses=[Hypothesis(text="Test hypothesis")],
-            devrag_reason=DevragReason.ARCHITECTURE_UNKNOWN,
+            semantic_reason=SemanticReason.ARCHITECTURE_UNKNOWN,
         )
 
         result = session.revert_to_exploration(keep_results=False)

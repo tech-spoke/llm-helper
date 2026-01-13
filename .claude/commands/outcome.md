@@ -51,7 +51,7 @@ mcp__code-intel__get_session_status
 
 1. **failure_point**: どのフェーズで問題が起きたか
    - EXPLORATION: 探索不足
-   - SEMANTIC: devrag の仮説が間違い
+   - SEMANTIC: 意味検索の仮説が間違い
    - VERIFICATION: 検証が不十分
    - READY: 実装ミス
 

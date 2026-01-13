@@ -1,8 +1,8 @@
 """
-Tool Router v3.7 - Pure slot-based routing.
+Tool Router - Pure slot-based routing.
 
-v3.7 changes:
-- QueryClassifier REMOVED (no more regex patterns)
+Router responsibilities:
+- QueryClassifier REMOVED (no regex patterns)
 - Routing based purely on Intent + missing_slots
 - Router is "traffic controller", not "decision maker"
 - risk_level determines exploration strictness
@@ -43,7 +43,7 @@ def requires_code_understanding(intent: IntentType) -> bool:
 
 
 # =============================================================================
-# v3.7: Slot-to-Tool Mapping (Primary Routing Mechanism)
+# Slot-to-Tool Mapping (Primary Routing Mechanism)
 # =============================================================================
 
 SLOT_TO_TOOLS: dict[str, list[str]] = {
@@ -59,16 +59,16 @@ SLOT_TO_TOOLS_PURPOSE: dict[str, str] = {
     "search_text": "Search for specific text patterns",
     "get_symbols": "List symbols to identify target feature",
     "analyze_structure": "Analyze code structure",
-    "devrag_search": "Semantic search (SEMANTIC phase only)",
+    "semantic_search": "Semantic search (SEMANTIC phase only)",
 }
 
 
 def select_tools_from_missing_slots(missing_slots: list[str]) -> list[str]:
     """
-    v3.7: Select tools based on missing slots only.
+    Select tools based on missing slots only.
 
     No regex patterns, no category matching.
-    Pure slot → tool mapping.
+    Pure slot to tool mapping.
     """
     tools = []
     for slot in missing_slots:
@@ -87,7 +87,7 @@ def select_tools_from_missing_slots(missing_slots: list[str]) -> list[str]:
 
 def calculate_risk_level(missing_slots: list[str]) -> str:
     """
-    v3.7: Calculate risk level from missing slot count.
+    Calculate risk level from missing slot count.
 
     No ambiguity detection, no pattern matching.
     Pure count-based logic.
@@ -137,10 +137,10 @@ class FallbackDecision:
 @dataclass
 class DecisionLog:
     """
-    v3.7: Simplified decision log.
+    Simplified decision log.
 
-    Removed: categories, pattern_match_count, ambiguous, confidence
-    Added: Pure slot-based fields
+    Pure slot-based fields:
+    - No categories, pattern_match_count, ambiguous, confidence
     """
     query: str
     timestamp: str
@@ -183,7 +183,7 @@ class ExecutionPlan:
 @dataclass
 class RoutingDecision:
     """
-    v3.7: Pure slot-based routing decision.
+    Pure slot-based routing decision.
 
     Router's job:
     - What tools to use (from missing_slots)
@@ -198,14 +198,14 @@ class RoutingDecision:
 
 
 # =============================================================================
-# Router (v3.7 - No QueryClassifier)
+# Router
 # =============================================================================
 
 class Router:
     """
-    v3.7: Pure slot-based router.
+    Pure slot-based router.
 
-    Changes from v3.6:
+    Responsibilities:
     - QueryClassifier REMOVED
     - No regex pattern matching
     - Intent comes from LLM (not inferred)
@@ -222,7 +222,7 @@ class Router:
         context: dict | None = None,
     ) -> ExecutionPlan:
         """
-        v3.7: Create execution plan from QueryFrame + Intent.
+        Create execution plan from QueryFrame + Intent.
 
         Args:
             query_frame: Structured query from QueryDecomposer
@@ -244,7 +244,7 @@ class Router:
         required_phases = get_required_phases(intent_type)
         req_code_understanding = requires_code_understanding(intent_type)
 
-        # v3.7: Pure slot-based tool selection
+        # Pure slot-based tool selection
         missing_slots = query_frame.get_missing_slots()
         risk_level = calculate_risk_level(missing_slots)
         tools = select_tools_from_missing_slots(missing_slots)
@@ -312,7 +312,7 @@ class Router:
         intent: str,
     ) -> RoutingDecision:
         """
-        v3.7: Create routing decision from QueryFrame.
+        Create routing decision from QueryFrame.
 
         Pure "traffic controller" logic.
         """
@@ -340,7 +340,7 @@ class Router:
 
 
 # =============================================================================
-# Backward Compatibility (Deprecated, will be removed in v3.8)
+# Backward Compatibility (Deprecated)
 # =============================================================================
 
 class QuestionCategory(Enum):

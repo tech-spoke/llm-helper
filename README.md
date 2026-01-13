@@ -151,11 +151,14 @@ cd llm-helper
 ### Step 2: プロジェクトの初期化（プロジェクトごと）
 
 ```bash
-# 対象プロジェクトを初期化
+# 対象プロジェクトを初期化（プロジェクト全体をインデックス）
 ./init-project.sh /path/to/your-project
 
-# オプション: ソースディレクトリを指定
-./init-project.sh /path/to/your-project --src-dirs=src,packages,modules
+# オプション: 特定ディレクトリのみをインデックス
+./init-project.sh /path/to/your-project --include=src,packages
+
+# オプション: 追加の除外パターンを指定
+./init-project.sh /path/to/your-project --exclude=tests,docs,*.log
 ```
 
 これにより以下が作成されます：
