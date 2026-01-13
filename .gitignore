@@ -35,11 +35,10 @@ vectors.db
 # Models (downloaded/generated)
 models/
 
-# v3.8: devrag vector databases
-vectors-forest.db
-.code-intel/vectors-map.db
-
-# Code Intel MCP Server v3.9
+# Code Intel MCP Server v1.0
 .code-intel/
 config.json
+
+# Old documentation (archived)
+docs/old/
 
