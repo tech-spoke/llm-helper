@@ -1,5 +1,7 @@
 # Code Intelligence MCP Server v1.0 Internal Documentation
 
+> **For v1.1 additions, see the [v1.1 Additional Modules](#v11-additional-modules) section.**
+
 This document explains the internal workings of the system at a level that other AIs can understand.
 
 ---
@@ -992,4 +994,193 @@ def get_improvement_insights(limit: int = 100) -> dict:
                  │        └─→ blocked → [add_explored_files] or [revert_to_exploration]
                  │
                  └─→ [Implementation complete]
+```
+
+---
+
+## v1.1 Additional Modules
+
+### context_provider.py
+
+`tools/context_provider.py`
+
+#### Overview
+
+ContextProvider automatically provides design documents and project rules at session start.
+
+#### Class Structure
+
+```python
+@dataclass
+class DocSummary:
+    """Design document summary"""
+    file: str           # Filename
+    path: str           # Full path
+    summary: str        # Summary (LLM-generated or manual)
+    extra_notes: str    # Manual additions
+    content_hash: str   # SHA256 (for change detection)
+
+@dataclass
+class EssentialContext:
+    """Essential context"""
+    design_docs: list[DocSummary]
+    design_docs_source: str
+    project_rules_source: str
+    project_rules_summary: str
+    project_rules_extra_notes: str
+    last_synced: str
+
+class ContextProvider:
+    def load_context(self) -> EssentialContext | None:
+        """Load context from context.yml"""
+
+    def check_docs_changed(self) -> list[dict]:
+        """Detect changes in source documents"""
+
+    def generate_initial_context(self) -> dict:
+        """Generate initial context.yml structure (auto-detect)"""
+
+    def update_summaries(
+        self,
+        summaries: list[DocSummary],
+        project_rules_summary: str
+    ) -> None:
+        """Update summaries (preserves extra_notes)"""
+```
+
+#### Auto-Detection Paths
+
+```python
+# Design documents
+design_dirs = [
+    "docs/設計資料/アーキテクチャ",
+    "docs/architecture",
+    "docs/design",
+    "docs",
+]
+
+# Project rules
+rules_files = [
+    ".claude/CLAUDE.md",
+    "CLAUDE.md",
+    ".cursor/rules.md",
+    "CONTRIBUTING.md",
+]
+```
+
+---
+
+### impact_analyzer.py
+
+`tools/impact_analyzer.py`
+
+#### Overview
+
+ImpactAnalyzer analyzes the impact of target file changes and identifies files that need verification.
+
+#### Class Structure
+
+```python
+@dataclass
+class ImpactAnalysisResult:
+    """Impact analysis result"""
+    mode: str                    # "standard" | "relaxed_markup"
+    depth: str                   # "direct_only"
+    reason: str                  # Reason for relaxation
+    static_references: dict      # callers, type_hints
+    naming_convention_matches: dict  # tests, factories, seeders
+    inference_hint: str | None   # Inference hint for LLM
+    confirmation_required: dict  # must_verify, should_verify
+
+class ImpactAnalyzer:
+    async def analyze(
+        self,
+        target_files: list[str],
+        change_description: str = ""
+    ) -> ImpactAnalysisResult:
+        """Execute impact analysis"""
+```
+
+#### Markup Relaxation
+
+```python
+# Relaxation targets (pure markup)
+RELAXED_MARKUP_EXTENSIONS = {
+    ".html", ".htm", ".css", ".scss", ".md", ".markdown"
+}
+
+# No relaxation (contains logic)
+LOGIC_MARKUP_EXTENSIONS = {
+    ".blade.php", ".vue", ".jsx", ".tsx"
+}
+```
+
+#### Direct Reference Detection
+
+```python
+async def _find_static_references(
+    self,
+    target_file: str,
+    base_name: str
+) -> dict:
+    """
+    Detect direct references
+
+    Process:
+    1. Search symbol references with find_references
+    2. Identify type hints using heuristics
+    3. Classify into callers and type_hints
+    """
+```
+
+#### Naming Convention Matching
+
+```python
+async def _find_naming_convention_matches(
+    self,
+    base_name: str
+) -> NamingConventionMatches:
+    """
+    Match files by naming convention
+
+    Patterns:
+    - tests: *{base_name}*Test.*, test_*{base_name}*.*
+    - factories: *{base_name}Factory.*
+    - seeders: *{base_name}Seeder.*
+    """
+```
+
+---
+
+### v1.1 Data Flow
+
+```
+[start_session]
+        │
+        ├─→ [ContextProvider.load_context()]
+        │        │
+        │        └─→ [Add essential_context to response]
+        │
+        └─→ [Continue existing flow]
+
+[After VERIFICATION complete]
+        │
+        ▼
+[IMPACT ANALYSIS]
+        │
+        ├─→ [analyze_impact]
+        │        │
+        │        ├─→ [Check markup relaxation]
+        │        │        │
+        │        │        └─→ All relaxation targets → [relaxed_markup mode]
+        │        │
+        │        ├─→ [Detect direct references with find_references]
+        │        │
+        │        ├─→ [Naming convention matching]
+        │        │
+        │        └─→ [Generate confirmation_required]
+        │
+        └─→ [LLM declares verified_files]
+                 │
+                 └─→ [Transition to READY]
 ```

@@ -1,5 +1,7 @@
 # Code Intelligence MCP Server v1.0 内部動作ドキュメント
 
+> **v1.1 での追加機能については [v1.1 追加モジュール](#v11-追加モジュール) セクションを参照してください。**
+
 このドキュメントは、システムの内部動作を他のAIが理解できるレベルで詳細に説明します。
 
 ---
@@ -992,4 +994,193 @@ def get_improvement_insights(limit: int = 100) -> dict:
                  │        └─→ blocked → [add_explored_files] or [revert_to_exploration]
                  │
                  └─→ [実装完了]
+```
+
+---
+
+## v1.1 追加モジュール
+
+### context_provider.py
+
+`tools/context_provider.py`
+
+#### 概要
+
+ContextProvider は、セッション開始時に設計ドキュメントとプロジェクトルールを自動提供します。
+
+#### クラス構造
+
+```python
+@dataclass
+class DocSummary:
+    """設計ドキュメントの要約"""
+    file: str           # ファイル名
+    path: str           # フルパス
+    summary: str        # 要約（LLM生成または手動）
+    extra_notes: str    # 手動追記
+    content_hash: str   # SHA256（変更検知用）
+
+@dataclass
+class EssentialContext:
+    """必須コンテキスト"""
+    design_docs: list[DocSummary]
+    design_docs_source: str
+    project_rules_source: str
+    project_rules_summary: str
+    project_rules_extra_notes: str
+    last_synced: str
+
+class ContextProvider:
+    def load_context(self) -> EssentialContext | None:
+        """context.yml からコンテキストを読み込む"""
+
+    def check_docs_changed(self) -> list[dict]:
+        """ソースドキュメントの変更を検出"""
+
+    def generate_initial_context(self) -> dict:
+        """初期 context.yml 構造を生成（自動検出）"""
+
+    def update_summaries(
+        self,
+        summaries: list[DocSummary],
+        project_rules_summary: str
+    ) -> None:
+        """要約を更新（extra_notes は保持）"""
+```
+
+#### 自動検出パス
+
+```python
+# 設計ドキュメント
+design_dirs = [
+    "docs/設計資料/アーキテクチャ",
+    "docs/architecture",
+    "docs/design",
+    "docs",
+]
+
+# プロジェクトルール
+rules_files = [
+    ".claude/CLAUDE.md",
+    "CLAUDE.md",
+    ".cursor/rules.md",
+    "CONTRIBUTING.md",
+]
+```
+
+---
+
+### impact_analyzer.py
+
+`tools/impact_analyzer.py`
+
+#### 概要
+
+ImpactAnalyzer は、変更対象ファイルの影響範囲を分析し、確認が必要なファイルを特定します。
+
+#### クラス構造
+
+```python
+@dataclass
+class ImpactAnalysisResult:
+    """影響分析結果"""
+    mode: str                    # "standard" | "relaxed_markup"
+    depth: str                   # "direct_only"
+    reason: str                  # 緩和時の理由
+    static_references: dict      # callers, type_hints
+    naming_convention_matches: dict  # tests, factories, seeders
+    inference_hint: str | None   # LLM への推論ヒント
+    confirmation_required: dict  # must_verify, should_verify
+
+class ImpactAnalyzer:
+    async def analyze(
+        self,
+        target_files: list[str],
+        change_description: str = ""
+    ) -> ImpactAnalysisResult:
+        """影響分析を実行"""
+```
+
+#### マークアップ緩和
+
+```python
+# 緩和対象（純粋なマークアップ）
+RELAXED_MARKUP_EXTENSIONS = {
+    ".html", ".htm", ".css", ".scss", ".md", ".markdown"
+}
+
+# 緩和なし（ロジック含有）
+LOGIC_MARKUP_EXTENSIONS = {
+    ".blade.php", ".vue", ".jsx", ".tsx"
+}
+```
+
+#### 直接参照検出
+
+```python
+async def _find_static_references(
+    self,
+    target_file: str,
+    base_name: str
+) -> dict:
+    """
+    直接参照を検出
+
+    処理:
+    1. find_references でシンボル参照を検索
+    2. 型ヒントを heuristic で判定
+    3. callers と type_hints に分類
+    """
+```
+
+#### 命名規則マッチング
+
+```python
+async def _find_naming_convention_matches(
+    self,
+    base_name: str
+) -> NamingConventionMatches:
+    """
+    命名規則でファイルをマッチング
+
+    パターン:
+    - tests: *{base_name}*Test.*, test_*{base_name}*.*
+    - factories: *{base_name}Factory.*
+    - seeders: *{base_name}Seeder.*
+    """
+```
+
+---
+
+### v1.1 データフロー
+
+```
+[start_session]
+        │
+        ├─→ [ContextProvider.load_context()]
+        │        │
+        │        └─→ [essential_context をレスポンスに追加]
+        │
+        └─→ [既存フロー続行]
+
+[VERIFICATION 完了後]
+        │
+        ▼
+[IMPACT ANALYSIS]
+        │
+        ├─→ [analyze_impact]
+        │        │
+        │        ├─→ [マークアップ緩和チェック]
+        │        │        │
+        │        │        └─→ 全て緩和対象 → [relaxed_markup モード]
+        │        │
+        │        ├─→ [find_references で直接参照検出]
+        │        │
+        │        ├─→ [命名規則マッチング]
+        │        │
+        │        └─→ [confirmation_required 生成]
+        │
+        └─→ [LLM が verified_files を宣言]
+                 │
+                 └─→ [READY へ移行]
 ```
