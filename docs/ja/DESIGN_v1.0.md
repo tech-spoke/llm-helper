@@ -1,5 +1,7 @@
 # Code Intelligence MCP Server v1.0 設計ドキュメント
 
+> **v1.1 での追加機能については [v1.1 追加機能](#v11-追加機能) セクションを参照してください。**
+
 ## 概要
 
 Code Intelligence MCP Server は、LLM（Large Language Model）がコードベースを正確に理解し、安全に実装を行うためのガードレールを提供するシステムです。
@@ -331,3 +333,134 @@ python code_intel_server.py
   "sync_on_start": true
 }
 ```
+
+---
+
+## v1.1 追加機能
+
+v1.1 では以下の機能が追加されました。
+
+### 必須コンテキストの自動提供
+
+セッション開始時に、設計ドキュメントとプロジェクトルールを自動的にLLMに提供します。
+
+**目的:**
+- LLMがCLAUDE.md等のルールを読むのをサボる問題を解決
+- 設計ドキュメントの無視を防止
+
+**設定ファイル:**
+
+```yaml
+# .code-intel/context.yml
+
+essential_docs:
+  source: "docs/設計資料/アーキテクチャ"
+  summaries:
+    - file: "全体アーキテクチャ.md"
+      path: "docs/設計資料/アーキテクチャ/全体アーキテクチャ.md"
+      summary: |
+        3層レイヤード構成。ビジネスロジックは Service 層に集約。
+      extra_notes: |
+        # 手動追記（自動要約で漏れた暗黙知を補完）
+
+project_rules:
+  source: ".claude/CLAUDE.md"
+  summary: |
+    DO:
+    - Service 層でビジネスロジックを実装
+    DON'T:
+    - Controller に複雑なロジックを書かない
+  extra_notes: ""
+```
+
+**start_session レスポンス:**
+
+```json
+{
+  "success": true,
+  "session_id": "abc123",
+  "essential_context": {
+    "design_docs": {
+      "source": "docs/architecture",
+      "summaries": [...]
+    },
+    "project_rules": {
+      "source": "CLAUDE.md",
+      "summary": "DO:\n- ...\nDON'T:\n- ..."
+    }
+  }
+}
+```
+
+### 影響範囲分析（IMPACT ANALYSIS）
+
+READY フェーズ移行前に、変更の影響範囲を分析し、確認を強制します。
+
+**追加フェーズ:**
+
+```
+EXPLORATION → SEMANTIC → VERIFICATION → IMPACT ANALYSIS → READY
+                                              ↑
+                                         v1.1 で追加
+```
+
+**新ツール `analyze_impact`:**
+
+```
+mcp__code-intel__analyze_impact
+  target_files: ["app/Models/Product.php"]
+  change_description: "price フィールドの型を変更"
+```
+
+**レスポンス:**
+
+```json
+{
+  "impact_analysis": {
+    "mode": "standard",
+    "depth": "direct_only",
+    "static_references": {
+      "callers": [
+        {"file": "app/Services/CartService.php", "line": 45}
+      ]
+    },
+    "naming_convention_matches": {
+      "tests": ["tests/Feature/ProductTest.php"],
+      "factories": ["database/factories/ProductFactory.php"]
+    }
+  },
+  "confirmation_required": {
+    "must_verify": ["app/Services/CartService.php"],
+    "should_verify": ["tests/Feature/ProductTest.php"]
+  }
+}
+```
+
+**LLM の応答義務:**
+
+```json
+{
+  "verified_files": [
+    {"file": "...", "status": "will_modify | no_change_needed | not_affected", "reason": "..."}
+  ]
+}
+```
+
+### マークアップ緩和
+
+純粋なマークアップファイル（.html, .css, .md）のみを対象とする場合、影響分析が緩和されます。
+
+| 拡張子 | 緩和 |
+|--------|------|
+| `.html`, `.htm`, `.css`, `.scss`, `.md` | ✅ 緩和適用 |
+| `.blade.php`, `.vue`, `.jsx`, `.tsx` | ❌ 緩和なし（ロジック結合） |
+
+### 間接参照の扱い
+
+- ツールは**直接参照のみ**を検出（1段階）
+- 間接参照（2段階以上）は LLM の判断に委ねる
+- 必要に応じて `find_references` で追加調査可能
+
+**設計理由:**
+- 再帰的な全探索はノイズが多い
+- 直接参照を確認した時点で、LLM は追加調査の必要性を判断できる

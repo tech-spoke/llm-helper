@@ -1,5 +1,7 @@
 # Code Intelligence MCP Server v1.0 Design Document
 
+> **For v1.1 additions, see the [v1.1 Additions](#v11-additions) section.**
+
 ## Overview
 
 Code Intelligence MCP Server provides guardrails for LLMs (Large Language Models) to accurately understand codebases and safely implement changes.
@@ -335,3 +337,134 @@ python code_intel_server.py
   "sync_on_start": true
 }
 ```
+
+---
+
+## v1.1 Additions
+
+v1.1 introduces the following features.
+
+### Essential Context Auto-Provision
+
+At session start, automatically provides design documents and project rules to the LLM.
+
+**Purpose:**
+- Solve the problem of LLMs skipping CLAUDE.md rules
+- Prevent ignoring design documentation
+
+**Configuration File:**
+
+```yaml
+# .code-intel/context.yml
+
+essential_docs:
+  source: "docs/architecture"
+  summaries:
+    - file: "overview.md"
+      path: "docs/architecture/overview.md"
+      summary: |
+        3-layer architecture. Business logic centralized in Service layer.
+      extra_notes: |
+        # Manual additions (supplement implicit knowledge missed by auto-summary)
+
+project_rules:
+  source: "CLAUDE.md"
+  summary: |
+    DO:
+    - Implement business logic in Service layer
+    DON'T:
+    - Don't write complex logic in Controller
+  extra_notes: ""
+```
+
+**start_session Response:**
+
+```json
+{
+  "success": true,
+  "session_id": "abc123",
+  "essential_context": {
+    "design_docs": {
+      "source": "docs/architecture",
+      "summaries": [...]
+    },
+    "project_rules": {
+      "source": "CLAUDE.md",
+      "summary": "DO:\n- ...\nDON'T:\n- ..."
+    }
+  }
+}
+```
+
+### Impact Analysis (IMPACT ANALYSIS Phase)
+
+Before transitioning to READY phase, analyzes the impact of changes and enforces verification.
+
+**Additional Phase:**
+
+```
+EXPLORATION → SEMANTIC → VERIFICATION → IMPACT ANALYSIS → READY
+                                              ↑
+                                        Added in v1.1
+```
+
+**New Tool `analyze_impact`:**
+
+```
+mcp__code-intel__analyze_impact
+  target_files: ["app/Models/Product.php"]
+  change_description: "Change price field type"
+```
+
+**Response:**
+
+```json
+{
+  "impact_analysis": {
+    "mode": "standard",
+    "depth": "direct_only",
+    "static_references": {
+      "callers": [
+        {"file": "app/Services/CartService.php", "line": 45}
+      ]
+    },
+    "naming_convention_matches": {
+      "tests": ["tests/Feature/ProductTest.php"],
+      "factories": ["database/factories/ProductFactory.php"]
+    }
+  },
+  "confirmation_required": {
+    "must_verify": ["app/Services/CartService.php"],
+    "should_verify": ["tests/Feature/ProductTest.php"]
+  }
+}
+```
+
+**LLM Response Obligation:**
+
+```json
+{
+  "verified_files": [
+    {"file": "...", "status": "will_modify | no_change_needed | not_affected", "reason": "..."}
+  ]
+}
+```
+
+### Markup Relaxation
+
+When targeting only pure markup files (.html, .css, .md), impact analysis is relaxed.
+
+| Extension | Relaxation |
+|-----------|------------|
+| `.html`, `.htm`, `.css`, `.scss`, `.md` | ✅ Relaxation applied |
+| `.blade.php`, `.vue`, `.jsx`, `.tsx` | ❌ No relaxation (logic coupled) |
+
+### Indirect Reference Handling
+
+- Tool detects **direct references only** (1 level)
+- Indirect references (2+ levels) are left to LLM judgment
+- LLM can use `find_references` for additional investigation if needed
+
+**Design Rationale:**
+- Recursive full exploration creates too much noise
+- After checking direct references, LLM can judge if additional investigation is needed

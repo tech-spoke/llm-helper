@@ -1,4 +1,4 @@
-# Code Intelligence MCP Server v1.0
+# Code Intelligence MCP Server v1.1
 
 An MCP server that provides Cursor IDE-like code intelligence capabilities using open source tools.
 
@@ -32,6 +32,8 @@ And have a mechanism to learn from failures.
 | Improvement Cycle | Learning via DecisionLog + OutcomeLog + agreements |
 | Automatic Failure Detection | Auto-detect and record previous failures at /code start |
 | Project Isolation | Independent learning data for each project |
+| Essential Context (v1.1) | Auto-provide design docs and project rules at session start |
+| Impact Analysis (v1.1) | Enforce impact verification before READY phase |
 
 ---
 
@@ -80,10 +82,10 @@ And have a mechanism to learn from failures.
 ## Phase Gates
 
 ```
-EXPLORATION → SEMANTIC → VERIFICATION → READY
-     ↓           ↓           ↓           ↓
-  code-intel  semantic    verify      implementation
-   tools      search    (confirm)      allowed
+EXPLORATION → SEMANTIC → VERIFICATION → IMPACT ANALYSIS → READY
+     ↓           ↓           ↓               ↓               ↓
+  code-intel  semantic    verify         analyze_impact   implementation
+   tools      search    (confirm)        (v1.1)           allowed
              (hypothesis)
 ```
 
@@ -92,6 +94,7 @@ EXPLORATION → SEMANTIC → VERIFICATION → READY
 | EXPLORATION | code-intel tools | semantic_search |
 | SEMANTIC | semantic_search | code-intel |
 | VERIFICATION | code-intel tools | semantic_search |
+| IMPACT ANALYSIS | analyze_impact, code-intel | semantic_search |
 | READY | all | - |
 
 ---
@@ -110,6 +113,7 @@ EXPLORATION → SEMANTIC → VERIFICATION → READY
 | `get_symbols` | Get symbol list |
 | `sync_index` | Index source code to ChromaDB |
 | `semantic_search` | Unified vector search of map/forest |
+| `analyze_impact` | Analyze impact of changes (v1.1) |
 
 ### Session Management
 
@@ -213,13 +217,14 @@ Restart to load the MCP server. Index is automatically built on first session st
 The skill automatically:
 1. Failure check (auto-detect and record previous failures)
 2. Intent determination
-3. Session start (auto-sync)
+3. Session start (auto-sync, essential context)
 4. QueryFrame extraction and verification
 5. EXPLORATION (find_definitions, find_references, etc.)
 6. Symbol verification (Embedding)
 7. SEMANTIC if needed
 8. VERIFICATION (hypothesis verification)
-9. READY (implementation)
+9. IMPACT ANALYSIS (v1.1 - analyze affected files)
+10. READY (implementation)
 
 ### Direct tool invocation
 
@@ -273,6 +278,7 @@ tree-sitter>=0.21.0
 tree-sitter-languages>=1.10.0
 sentence-transformers>=2.2.0
 scikit-learn>=1.0.0
+PyYAML>=6.0.0
 pytest>=7.0.0
 ```
 
@@ -293,6 +299,8 @@ llm-helper/
 │   ├── ast_chunker.py      ← AST chunking
 │   ├── sync_state.py       ← Sync state management
 │   ├── outcome_log.py      ← Improvement cycle log
+│   ├── context_provider.py ← Essential context (v1.1)
+│   ├── impact_analyzer.py  ← Impact analysis (v1.1)
 │   └── ...
 ├── setup.sh                ← Server setup
 ├── init-project.sh         ← Project initialization
@@ -307,6 +315,7 @@ your-project/
 ├── .mcp.json               ← MCP config (manual setup)
 ├── .code-intel/            ← Code Intel data (auto-generated)
 │   ├── config.json
+│   ├── context.yml         ← Essential context config (v1.1)
 │   ├── chroma/             ← ChromaDB data
 │   ├── agreements/         ← Success pairs
 │   ├── logs/               ← DecisionLog, OutcomeLog
