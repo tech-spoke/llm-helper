@@ -60,7 +60,8 @@ class Phase(Enum):
     EXPLORATION = auto()      # Phase 1: code-intel required
     SEMANTIC = auto()         # Phase 2: semantic search allowed (if needed)
     VERIFICATION = auto()     # Phase 3: verify semantic hypotheses
-    READY = auto()            # Phase 4: implementation allowed
+    IMPACT_ANALYSIS = auto()  # Phase 4: analyze impact before implementation (v1.1)
+    READY = auto()            # Phase 5: implementation allowed
 
 
 class SemanticReason(Enum):
@@ -580,6 +581,46 @@ class VerificationResult:
 
 
 # =============================================================================
+# v1.1: Impact Analysis Result
+# =============================================================================
+
+@dataclass
+class VerifiedFile:
+    """A file that was verified during impact analysis."""
+    file: str
+    status: str  # will_modify, no_change_needed, not_affected
+    reason: str | None = None
+
+    def to_dict(self) -> dict:
+        return {
+            "file": self.file,
+            "status": self.status,
+            "reason": self.reason,
+        }
+
+
+@dataclass
+class ImpactAnalysisResult:
+    """Result of impact analysis phase."""
+    target_files: list[str] = field(default_factory=list)
+    must_verify: list[str] = field(default_factory=list)
+    should_verify: list[str] = field(default_factory=list)
+    verified_files: list[VerifiedFile] = field(default_factory=list)
+    inferred_from_rules: list[str] = field(default_factory=list)
+    mode: str = "standard"  # standard or relaxed_markup
+
+    def to_dict(self) -> dict:
+        return {
+            "target_files": self.target_files,
+            "must_verify": self.must_verify,
+            "should_verify": self.should_verify,
+            "verified_files": [v.to_dict() for v in self.verified_files],
+            "inferred_from_rules": self.inferred_from_rules,
+            "mode": self.mode,
+        }
+
+
+# =============================================================================
 # Valid tools for verification evidence
 # =============================================================================
 
@@ -655,6 +696,7 @@ class SessionState:
     exploration: ExplorationResult | None = None
     semantic: SemanticResult | None = None
     verification: VerificationResult | None = None
+    impact_analysis: ImpactAnalysisResult | None = None  # v1.1
 
     # Semantic search results (Forest/Map architecture)
     map_results: list[dict] = field(default_factory=list)  # 地図検索結果
@@ -715,6 +757,14 @@ class SessionState:
                 "query", "search_text", "find_definitions",
                 "find_references", "analyze_structure",
                 "submit_verification",
+            ]
+        elif self.phase == Phase.IMPACT_ANALYSIS:
+            # v1.1: analyze_impact と探索ツールを許可
+            return [
+                "analyze_impact",
+                "submit_impact_analysis",
+                "query", "search_text", "find_definitions",
+                "find_references", "analyze_structure",
             ]
         elif self.phase == Phase.READY:
             return ["*"]
@@ -975,17 +1025,19 @@ class SessionState:
                 missing.extend(hypothesis_block)
                 confidence = "low"
 
-        # IMPLEMENT/MODIFY は最低成果条件を満たさないと READY に進めない
+        # IMPLEMENT/MODIFY は最低成果条件を満たさないと IMPACT_ANALYSIS に進めない
         can_proceed = confidence == "high" and not consistency_errors and not hypothesis_block
 
         if can_proceed:
-            self.phase = Phase.READY
+            # v1.1: READY ではなく IMPACT_ANALYSIS へ
+            self.phase = Phase.IMPACT_ANALYSIS
             response = {
                 "success": True,
-                "next_phase": Phase.READY.name,
+                "next_phase": Phase.IMPACT_ANALYSIS.name,
                 "evaluated_confidence": confidence,
                 "risk_level": effective_risk_level,
-                "message": "Exploration sufficient. Ready for implementation.",
+                "message": "Exploration sufficient. Proceed to impact analysis before implementation.",
+                "next_step": "Call analyze_impact with target files, then submit_impact_analysis with verified_files.",
             }
             # v1.1: マークアップコンテキストの場合は明示
             if markup_context:
@@ -1165,23 +1217,142 @@ class SessionState:
             "timestamp": datetime.now().isoformat(),
         })
 
-        self.phase = Phase.READY
+        # v1.1: READY ではなく IMPACT_ANALYSIS へ
+        self.phase = Phase.IMPACT_ANALYSIS
 
         rejected = [v for v in result.verified if v.status == "rejected"]
         if rejected:
             return {
                 "success": True,
-                "next_phase": Phase.READY.name,
-                "message": "Verification complete with some rejected hypotheses.",
+                "next_phase": Phase.IMPACT_ANALYSIS.name,
+                "message": "Verification complete. Proceed to impact analysis.",
                 "warning": f"{len(rejected)} hypotheses were rejected. Do NOT implement based on rejected hypotheses.",
                 "rejected": [r.to_dict() for r in rejected],
+                "next_step": "Call analyze_impact with target files, then submit_impact_analysis with verified_files.",
             }
 
         return {
             "success": True,
-            "next_phase": Phase.READY.name,
-            "message": "All hypotheses verified. Ready for implementation.",
+            "next_phase": Phase.IMPACT_ANALYSIS.name,
+            "message": "All hypotheses verified. Proceed to impact analysis before implementation.",
+            "next_step": "Call analyze_impact with target files, then submit_impact_analysis with verified_files.",
         }
+
+    def set_impact_analysis_context(
+        self,
+        target_files: list[str],
+        must_verify: list[str],
+        should_verify: list[str],
+        mode: str = "standard",
+    ) -> None:
+        """
+        v1.1: Store analyze_impact result for validation in submit_impact_analysis.
+
+        Called by analyze_impact tool handler.
+        """
+        self.impact_analysis = ImpactAnalysisResult(
+            target_files=target_files,
+            must_verify=must_verify,
+            should_verify=should_verify,
+            mode=mode,
+        )
+
+    def submit_impact_analysis(
+        self,
+        verified_files: list[dict],
+        inferred_from_rules: list[str] | None = None,
+    ) -> dict:
+        """
+        v1.1: Submit impact analysis results and move to READY.
+
+        Validates that all must_verify files have responses.
+
+        Returns: {"success": bool, "next_phase": str, "message": str}
+        """
+        if self.phase != Phase.IMPACT_ANALYSIS:
+            return {
+                "success": False,
+                "next_phase": self.phase.name,
+                "message": f"Cannot submit impact analysis in phase {self.phase.name}",
+            }
+
+        if self.impact_analysis is None:
+            return {
+                "success": False,
+                "next_phase": self.phase.name,
+                "message": "Must call analyze_impact before submit_impact_analysis.",
+            }
+
+        # Convert verified_files to VerifiedFile objects
+        verified = []
+        for vf in verified_files:
+            verified.append(VerifiedFile(
+                file=vf["file"],
+                status=vf["status"],
+                reason=vf.get("reason"),
+            ))
+
+        # Validate: all must_verify files must have a response
+        verified_paths = {v.file for v in verified}
+        missing_must_verify = []
+        for must_file in self.impact_analysis.must_verify:
+            if must_file not in verified_paths:
+                missing_must_verify.append(must_file)
+
+        if missing_must_verify:
+            return {
+                "success": False,
+                "next_phase": self.phase.name,
+                "message": "Not all must_verify files have been verified.",
+                "missing_must_verify": missing_must_verify,
+                "hint": "Provide status for all must_verify files before proceeding.",
+            }
+
+        # Validate: status != will_modify requires reason
+        missing_reasons = []
+        for v in verified:
+            if v.status != "will_modify" and not v.reason:
+                missing_reasons.append(v.file)
+
+        if missing_reasons:
+            return {
+                "success": False,
+                "next_phase": self.phase.name,
+                "message": "Files with status != will_modify require a reason.",
+                "missing_reasons": missing_reasons,
+            }
+
+        # Update impact_analysis result
+        self.impact_analysis.verified_files = verified
+        self.impact_analysis.inferred_from_rules = inferred_from_rules or []
+
+        # Record phase transition
+        self.phase_history.append({
+            "from": Phase.IMPACT_ANALYSIS.name,
+            "result": self.impact_analysis.to_dict(),
+            "timestamp": datetime.now().isoformat(),
+        })
+
+        self.phase = Phase.READY
+
+        # Check for should_verify warnings
+        should_verify_missing = []
+        for should_file in self.impact_analysis.should_verify:
+            if should_file not in verified_paths:
+                should_verify_missing.append(should_file)
+
+        response = {
+            "success": True,
+            "next_phase": Phase.READY.name,
+            "message": "Impact analysis complete. Ready for implementation.",
+            "verified_count": len(verified),
+            "will_modify": [v.file for v in verified if v.status == "will_modify"],
+        }
+
+        if should_verify_missing:
+            response["warning"] = f"Some should_verify files were not verified: {should_verify_missing}"
+
+        return response
 
     def get_status(self) -> dict:
         """Get current session status."""

@@ -51,7 +51,7 @@ from tools.query_frame import (
     QueryFrame, QueryDecomposer, SlotSource, SlotEvidence,
     validate_slot, assess_risk_level, generate_investigation_guidance,
 )
-from tools.context_provider import ContextProvider
+from tools.context_provider import ContextProvider, get_summary_prompts
 from tools.impact_analyzer import analyze_impact
 from tools.chromadb_manager import (
     ChromaDBManager, SearchResult, SearchHit,
@@ -957,6 +957,76 @@ async def list_tools() -> list[Tool]:
                 "required": ["target_files"],
             },
         ),
+        # v1.1: Update context tool (save LLM-generated summaries)
+        Tool(
+            name="update_context",
+            description="Save LLM-generated summaries to context.yml. "
+                        "Call this after sync_index returns context_update_required with documents to summarize. "
+                        "Pass the generated summaries for each document.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "design_doc_summaries": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "path": {"type": "string", "description": "Document path"},
+                                "file": {"type": "string", "description": "Filename"},
+                                "summary": {"type": "string", "description": "Generated summary"},
+                            },
+                            "required": ["path", "summary"],
+                        },
+                        "description": "Summaries for design documents",
+                    },
+                    "project_rules_summary": {
+                        "type": "string",
+                        "description": "Generated summary for project rules (DO/DON'T format)",
+                    },
+                },
+            },
+        ),
+        # v1.1: Submit impact analysis results
+        Tool(
+            name="submit_impact_analysis",
+            description="Submit impact analysis verification results to complete IMPACT_ANALYSIS phase. "
+                        "Validates that all must_verify files have responses with status and reason. "
+                        "Must be called after analyze_impact before proceeding to READY phase.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "verified_files": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "file": {
+                                    "type": "string",
+                                    "description": "File path that was verified",
+                                },
+                                "status": {
+                                    "type": "string",
+                                    "enum": ["will_modify", "no_change_needed", "not_affected"],
+                                    "description": "Verification status for this file",
+                                },
+                                "reason": {
+                                    "type": "string",
+                                    "description": "Reason for status (required when status != will_modify)",
+                                },
+                            },
+                            "required": ["file", "status"],
+                        },
+                        "description": "List of verified files with status and reason",
+                    },
+                    "inferred_from_rules": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Additional files inferred from project_rules naming conventions",
+                    },
+                },
+                "required": ["verified_files"],
+            },
+        ),
     ]
 
 
@@ -1052,6 +1122,59 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                     chromadb_info["auto_sync"] = sync_result.to_dict()
 
                 result["chromadb"] = chromadb_info
+
+                # v1.1: Check for essential docs that need summarization
+                try:
+                    context_provider = ContextProvider(repo_path)
+
+                    # If context.yml doesn't exist, generate initial structure
+                    if not context_provider.context_file.exists():
+                        initial_config = context_provider.generate_initial_context()
+                        if initial_config:
+                            context_provider.save_context(initial_config)
+                            result["context_initialized"] = {
+                                "message": "Created initial context.yml with detected sources",
+                                "sources": initial_config,
+                            }
+
+                    doc_changes = context_provider.check_docs_changed()
+                    if doc_changes:
+                        prompts = get_summary_prompts()
+                        docs_to_summarize = []
+
+                        for change in doc_changes:
+                            change_path = Path(repo_path) / change["path"]
+                            if change_path.exists():
+                                try:
+                                    content = change_path.read_text(encoding="utf-8")
+                                    if change["type"] == "essential_doc":
+                                        docs_to_summarize.append({
+                                            "type": "design_doc",
+                                            "path": change["path"],
+                                            "file": change_path.name,
+                                            "content": content,
+                                            "prompt": prompts["design_doc"].format(document_content=content),
+                                        })
+                                    elif change["type"] == "project_rules":
+                                        docs_to_summarize.append({
+                                            "type": "project_rules",
+                                            "path": change["path"],
+                                            "content": content,
+                                            "prompt": prompts["project_rules"].format(document_content=content),
+                                        })
+                                except Exception:
+                                    pass
+
+                        if docs_to_summarize:
+                            result["context_update_required"] = {
+                                "documents": docs_to_summarize,
+                                "instruction": (
+                                    "Generate summaries for the documents above using the provided prompts, "
+                                    "then call update_context tool with the generated summaries."
+                                ),
+                            }
+                except Exception:
+                    pass  # Non-critical, don't fail session start
                 result["v39_features"] = {
                     "semantic_search": "Use semantic_search for map/forest vector search",
                     "sync_index": "Use sync_index to manually trigger re-indexing",
@@ -1576,18 +1699,56 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                     map_result = manager.sync_map()
                     result["map_sync"] = map_result.to_dict()
 
-                # v1.1: Check for essential docs changes
+                # v1.1: Check for essential docs changes and provide content for LLM summary generation
                 try:
                     context_provider = ContextProvider(path)
+
+                    # If context.yml doesn't exist, generate initial structure
+                    if not context_provider.context_file.exists():
+                        initial_config = context_provider.generate_initial_context()
+                        if initial_config:
+                            context_provider.save_context(initial_config)
+                            result["context_initialized"] = {
+                                "message": "Created initial context.yml with detected sources",
+                                "sources": initial_config,
+                            }
+
                     doc_changes = context_provider.check_docs_changed()
                     if doc_changes:
-                        result["essential_context"] = {
-                            "changes_detected": doc_changes,
-                            "hint": (
-                                "Essential documents have changed since last sync. "
-                                "Consider regenerating summaries with LLM or update context.yml manually."
-                            ),
-                        }
+                        prompts = get_summary_prompts()
+                        docs_to_summarize = []
+
+                        for change in doc_changes:
+                            change_path = Path(path) / change["path"]
+                            if change_path.exists():
+                                try:
+                                    content = change_path.read_text(encoding="utf-8")
+                                    if change["type"] == "essential_doc":
+                                        docs_to_summarize.append({
+                                            "type": "design_doc",
+                                            "path": change["path"],
+                                            "file": change_path.name,
+                                            "content": content,
+                                            "prompt": prompts["design_doc"].format(document_content=content),
+                                        })
+                                    elif change["type"] == "project_rules":
+                                        docs_to_summarize.append({
+                                            "type": "project_rules",
+                                            "path": change["path"],
+                                            "content": content,
+                                            "prompt": prompts["project_rules"].format(document_content=content),
+                                        })
+                                except Exception:
+                                    pass
+
+                        if docs_to_summarize:
+                            result["context_update_required"] = {
+                                "documents": docs_to_summarize,
+                                "instruction": (
+                                    "Generate summaries for the documents above using the provided prompts, "
+                                    "then call update_context tool with the generated summaries."
+                                ),
+                            }
                 except Exception:
                     pass  # Non-critical, don't fail sync
 
@@ -1653,6 +1814,16 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 result["session_id"] = session.session_id
                 result["current_phase"] = session.phase.name
 
+                # v1.1: Store impact analysis context in session for validation
+                confirmation = result.get("confirmation_required", {})
+                impact = result.get("impact_analysis", {})
+                session.set_impact_analysis_context(
+                    target_files=target_files,
+                    must_verify=confirmation.get("must_verify", []),
+                    should_verify=confirmation.get("should_verify", []),
+                    mode=impact.get("mode", "standard"),
+                )
+
                 # Add essential_context hint if project_rules exists
                 if session.query_frame:
                     result["query_frame"] = {
@@ -1661,17 +1832,89 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
             # Add guidance for LLM
             result["next_steps"] = {
-                "action": "verify_impact",
+                "action": "submit_impact_analysis",
                 "instructions": (
                     "1. Review must_verify files and check if changes affect them\n"
                     "2. Review should_verify files (tests, factories, seeders)\n"
                     "3. Use project_rules to infer additional related files\n"
-                    "4. Declare verified_files with status and reason for each"
+                    "4. Call submit_impact_analysis with verified_files and inferred_from_rules"
                 ),
             }
 
         except Exception as e:
             result = {"error": str(e)}
+
+        return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+
+    elif name == "update_context":
+        # v1.1: Save LLM-generated summaries to context.yml
+        session = session_manager.get_active_session()
+        path = session.repo_path if session else "."
+
+        design_doc_summaries = arguments.get("design_doc_summaries", [])
+        project_rules_summary = arguments.get("project_rules_summary", "")
+
+        try:
+            from tools.context_provider import DocSummary
+            import hashlib
+
+            context_provider = ContextProvider(path)
+
+            # Convert to DocSummary objects and calculate content_hash
+            summaries = []
+            for s in design_doc_summaries:
+                doc_path = Path(path) / s["path"]
+                content_hash = ""
+                if doc_path.exists():
+                    content_hash = hashlib.sha256(doc_path.read_bytes()).hexdigest()[:16]
+
+                summaries.append(DocSummary(
+                    file=s.get("file", doc_path.name),
+                    path=s["path"],
+                    summary=s["summary"],
+                    content_hash=content_hash,
+                ))
+
+            # Calculate hash for project_rules source
+            config = context_provider.get_context_config() or {}
+            project_rules = config.get("project_rules", {})
+            if project_rules_summary and project_rules.get("source"):
+                rules_path = Path(path) / project_rules["source"]
+                if rules_path.exists():
+                    project_rules["content_hash"] = hashlib.sha256(rules_path.read_bytes()).hexdigest()[:16]
+                    config["project_rules"] = project_rules
+                    context_provider.save_context(config)
+
+            # Update summaries (preserves extra_notes)
+            context_provider.update_summaries(summaries, project_rules_summary)
+
+            result = {
+                "success": True,
+                "updated": {
+                    "design_docs": len(summaries),
+                    "project_rules": bool(project_rules_summary),
+                },
+                "message": "Context summaries updated in .code-intel/context.yml",
+            }
+
+        except Exception as e:
+            result = {"error": str(e)}
+
+        return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+
+    elif name == "submit_impact_analysis":
+        # v1.1: Submit impact analysis results to proceed to READY phase
+        session = session_manager.get_active_session()
+        if session is None:
+            result = {"error": "no_active_session", "message": "No active session."}
+        else:
+            verified_files = arguments.get("verified_files", [])
+            inferred_from_rules = arguments.get("inferred_from_rules", [])
+
+            result = session.submit_impact_analysis(
+                verified_files=verified_files,
+                inferred_from_rules=inferred_from_rules,
+            )
 
         return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 

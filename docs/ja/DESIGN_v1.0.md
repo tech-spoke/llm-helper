@@ -66,12 +66,13 @@ Code Intelligence MCP Server は、LLM（Large Language Model）がコードベ�
 
 ## フェーズゲート
 
-LLM の実装プロセスを4つのフェーズに分割し、各フェーズの完了をサーバーが検証します。
+LLM の実装プロセスを5つのフェーズに分割し、各フェーズの完了をサーバーが検証します。
 
 ```
-EXPLORATION → SEMANTIC → VERIFICATION → READY
-    │            │            │           │
-    │            │            │           └─ 実装許可
+EXPLORATION → SEMANTIC → VERIFICATION → IMPACT_ANALYSIS → READY
+    │            │            │               │              │
+    │            │            │               │              └─ 実装許可
+    │            │            │               └─ v1.1: 影響検証
     │            │            └─ 仮説検証
     │            └─ セマンティック検索
     └─ コード探索
@@ -84,6 +85,7 @@ EXPLORATION → SEMANTIC → VERIFICATION → READY
 | EXPLORATION | コードベース理解 | query, find_definitions, find_references, search_text, analyze_structure |
 | SEMANTIC | 不足情報の補完 | semantic_search (ChromaDB) |
 | VERIFICATION | 仮説の検証 | 探索ツール全般 |
+| IMPACT_ANALYSIS | v1.1: 変更影響の検証 | analyze_impact, submit_impact_analysis |
 | READY | 実装許可 | check_write_target, add_explored_files |
 
 ### フェーズ遷移条件
@@ -235,6 +237,7 @@ Step 8: READY
 | submit_understanding | EXPLORATION完了 |
 | submit_semantic | SEMANTIC完了 |
 | submit_verification | VERIFICATION完了 |
+| submit_impact_analysis | v1.1: IMPACT_ANALYSIS完了 |
 
 ### 検証・制御
 
@@ -350,35 +353,24 @@ cp /path/to/llm-helper/.claude/commands/*.md /path/to/your-project/.claude/comma
 
 MCP サーバーを読み込むために再起動。インデックスは最初のセッション開始時に自動構築されます。
 
-### Step 6: 必須コンテキストの設定（v1.1、オプション）
+### Step 6: 必須コンテキスト（v1.1、自動）
 
-`.code-intel/context.yml` を作成して、セッション開始時に設計ドキュメントとプロジェクトルールを LLM に提供。
+設計ドキュメントとプロジェクトルールは**自動検出・自動要約**されます。
 
-**最小テンプレート（コピーして編集）:**
+**動作の流れ:**
+1. 初回 `sync_index` 時、サーバーが設計ドキュメントとプロジェクトルールを自動検出
+2. 検出したソースで `.code-intel/context.yml` を作成
+3. ドキュメント内容 + プロンプトを LLM に返す
+4. LLM が要約を生成し、`update_context` ツールで保存
+5. 以降の同期では変更を検出し、必要に応じて要約を再生成
 
-```yaml
-# .code-intel/context.yml
+**自動検出パス:**
+- 設計ドキュメント: `docs/architecture/`, `docs/design/`, `docs/`
+- プロジェクトルール: `CLAUDE.md`, `.claude/CLAUDE.md`, `CONTRIBUTING.md`
 
-essential_docs:
-  source: "docs/architecture"      # ← 設計ドキュメントのディレクトリ
-  summaries:
-    - file: "overview.md"
-      path: "docs/architecture/overview.md"
-      summary: |
-        ここにドキュメントの要約を書く。
-        セッション開始時に LLM に提供される。
+**手動カスタマイズ（任意）:**
 
-project_rules:
-  source: "CLAUDE.md"              # ← ルールファイル
-  summary: |
-    DO:
-    - プロジェクトルールをここに書く
-
-    DON'T:
-    - 避けるべきことをここに書く
-```
-
-**全フィールドの例（オプション含む）:**
+`.code-intel/context.yml` を編集して `extra_notes` を追加:
 
 ```yaml
 essential_docs:
@@ -386,40 +378,10 @@ essential_docs:
   summaries:
     - file: "overview.md"
       path: "docs/architecture/overview.md"
-      summary: |
-        3層アーキテクチャ（Controller/Service/Repository）。
-        ビジネスロジックは Service 層に集約。
+      summary: "..."                     # ← LLM が自動生成
       extra_notes: |                     # ← 任意: 暗黙知を追加
         - 例外: 単純な CRUD は Service 層をバイパス可
-      # content_hash: "..."              # ← 自動生成、書かない
-
-project_rules:
-  source: "CLAUDE.md"
-  summary: |
-    DO:
-    - Service 層でビジネスロジックを実装
-    - 全機能にテストを書く
-
-    DON'T:
-    - Controller に複雑なロジックを書かない
-    - コードレビューをスキップしない
-  extra_notes: ""                        # ← 任意
-  # content_hash: "..."                  # ← 自動生成、書かない
-
-# last_synced: "..."                     # ← 自動生成、書かない
 ```
-
-| フィールド | 必須 | 説明 |
-|-----------|------|------|
-| `source` | Yes | ソースファイル/ディレクトリのパス |
-| `summary` | Yes | LLM に提供する要約 |
-| `extra_notes` | No | 追加の暗黙知 |
-| `content_hash` | No | 自動生成（変更検知用） |
-| `last_synced` | No | 自動生成（タイムスタンプ） |
-
-**自動検出:** `context.yml` が存在しない場合、サーバーは一般的なパターンを検出:
-- 設計ドキュメント: `docs/architecture/`, `docs/design/`, `docs/`
-- プロジェクトルール: `CLAUDE.md`, `.claude/CLAUDE.md`, `CONTRIBUTING.md`
 
 ### 必要な外部ツール
 

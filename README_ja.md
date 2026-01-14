@@ -204,35 +204,24 @@ cp /path/to/llm-helper/.claude/commands/*.md /path/to/your-project/.claude/comma
 
 MCP サーバーを読み込むために再起動。初回セッション開始時に自動的にインデックスが構築されます。
 
-### Step 6: 必須コンテキストの設定（v1.1、任意）
+### Step 6: 必須コンテキスト（v1.1、自動）
 
-`.code-intel/context.yml` を作成して、セッション開始時に設計ドキュメントとプロジェクトルールを LLM に提供。
+設計ドキュメントとプロジェクトルールは**自動検出・自動要約**されます。
 
-**最小テンプレート（コピーして編集）:**
+**動作の流れ:**
+1. 初回 `sync_index` 時、サーバーが設計ドキュメントとプロジェクトルールを自動検出
+2. 検出したソースで `.code-intel/context.yml` を作成
+3. ドキュメント内容 + プロンプトを LLM に返す
+4. LLM が要約を生成し、`update_context` ツールで保存
+5. 以降の同期では変更を検出し、必要に応じて要約を再生成
 
-```yaml
-# .code-intel/context.yml
+**自動検出パス:**
+- 設計ドキュメント: `docs/architecture/`, `docs/design/`, `docs/`
+- プロジェクトルール: `CLAUDE.md`, `.claude/CLAUDE.md`, `CONTRIBUTING.md`
 
-essential_docs:
-  source: "docs/architecture"      # ← 設計ドキュメントのディレクトリ
-  summaries:
-    - file: "overview.md"
-      path: "docs/architecture/overview.md"
-      summary: |
-        ここにドキュメントの要約を書く。
-        セッション開始時に LLM に提供される。
+**手動カスタマイズ（任意）:**
 
-project_rules:
-  source: "CLAUDE.md"              # ← ルールファイル
-  summary: |
-    DO:
-    - プロジェクトルールをここに書く
-
-    DON'T:
-    - 避けるべきことをここに書く
-```
-
-**全フィールドの例（オプション含む）:**
+`.code-intel/context.yml` を編集して `extra_notes`（ソースドキュメントにない暗黙知）を追加できます：
 
 ```yaml
 essential_docs:
@@ -240,40 +229,64 @@ essential_docs:
   summaries:
     - file: "overview.md"
       path: "docs/architecture/overview.md"
-      summary: |
-        3層アーキテクチャ（Controller/Service/Repository）。
-        ビジネスロジックは Service 層に集約。
+      summary: "..."                     # ← LLM が自動生成
       extra_notes: |                     # ← 任意: 暗黙知を追加
         - 例外: 単純な CRUD は Service 層をバイパス可
-      # content_hash: "..."              # ← 自動生成、書かない
 
 project_rules:
   source: "CLAUDE.md"
-  summary: |
-    DO:
-    - Service 層でビジネスロジックを実装
-    - 全機能にテストを書く
-
-    DON'T:
-    - Controller に複雑なロジックを書かない
-    - コードレビューをスキップしない
-  extra_notes: ""                        # ← 任意
-  # content_hash: "..."                  # ← 自動生成、書かない
-
-# last_synced: "..."                     # ← 自動生成、書かない
+  summary: "..."                         # ← LLM が自動生成
+  extra_notes: |                         # ← 任意: 暗黙知を追加
+    - /old 配下のレガシーコードはこのルールを無視してよい
 ```
 
-| フィールド | 必須 | 説明 |
-|-----------|------|------|
-| `source` | Yes | ソースファイル/ディレクトリのパス |
-| `summary` | Yes | LLM に提供する要約 |
-| `extra_notes` | No | 追加の暗黙知 |
-| `content_hash` | No | 自動生成（変更検知用） |
-| `last_synced` | No | 自動生成（タイムスタンプ） |
+| フィールド | 説明 |
+|-----------|------|
+| `source` | 自動検出されたソースパス |
+| `summary` | LLM が自動生成 |
+| `extra_notes` | 手動追加（再生成時も保持される） |
+| `content_hash` | 変更検知用（自動生成） |
 
-**自動検出:** `context.yml` が存在しない場合、サーバーは一般的なパターンを検出：
-- 設計ドキュメント: `docs/architecture/`, `docs/design/`, `docs/`
-- プロジェクトルール: `CLAUDE.md`, `.claude/CLAUDE.md`, `CONTRIBUTING.md`
+---
+
+## アップグレード（v1.0 → v1.1）
+
+既存の v1.0 で初期化されたプロジェクトがある場合、以下の手順でアップグレードします：
+
+### Step 1: llm-helper サーバーを更新
+
+```bash
+cd /path/to/llm-helper
+git pull
+./setup.sh  # 依存関係を更新
+```
+
+### Step 2: スキルを更新（プロジェクトにコピーしている場合）
+
+```bash
+cp /path/to/llm-helper/.claude/commands/*.md /path/to/your-project/.claude/commands/
+```
+
+### Step 3: Claude Code を再起動
+
+MCP サーバーを再読み込みするために再起動。
+
+### 変更点
+
+| 項目 | v1.0 | v1.1 |
+|------|------|------|
+| フェーズ数 | 4 | 5（IMPACT_ANALYSIS 追加） |
+| context.yml | なし | 自動生成 |
+| 設計ドキュメント要約 | なし | セッション開始時に自動提供 |
+| プロジェクトルール | CLAUDE.md を手動参照 | セッション開始時に自動提供 |
+
+### 変更不要なもの
+
+- `.code-intel/config.json` - 互換性あり、変更不要
+- `.code-intel/chroma/` - 既存のインデックスはそのまま動作
+- `.mcp.json` - 変更不要
+
+`context.yml` は次回のセッション開始時に自動作成されます。
 
 ---
 

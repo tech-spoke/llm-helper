@@ -118,23 +118,41 @@ mcp__code-intel__start_session
 {
   "success": true,
   "session_id": "abc123",
-  "essential_context": {
-    "design_docs": {
-      "source": "docs/architecture",
-      "summaries": [{"file": "overview.md", "summary": "..."}]
-    },
-    "project_rules": {
-      "source": "CLAUDE.md",
-      "summary": "DO:\n- ...\nDON'T:\n- ..."
-    }
+  "chromadb": {
+    "needs_sync": true
   },
-  "query_frame": {
-    "status": "pending",
-    "extraction_prompt": "Extract slots from the following query...",
-    "next_step": "Extract slots from query using the prompt, then call set_query_frame."
-  }
+  "essential_context": {
+    "design_docs": {...},
+    "project_rules": {...}
+  },
+  "context_update_required": {...},
+  "query_frame": {...}
 }
 ```
+
+### Step 2.1: Context Update (if needed)
+
+**If `context_update_required` is present in start_session response:**
+
+The response contains documents that need summaries. Generate summaries using the provided prompts, then call:
+
+```
+mcp__code-intel__update_context
+  design_doc_summaries: [
+    {"path": "docs/architecture/overview.md", "file": "overview.md", "summary": "generated summary..."}
+  ]
+  project_rules_summary: "DO:\n- ...\nDON'T:\n- ..."
+```
+
+### Step 2.2: ChromaDB Sync (if needed)
+
+**If `chromadb.needs_sync` is true, sync the index:**
+
+```
+mcp__code-intel__sync_index
+```
+
+**Note:** If sync_index also returns `context_update_required`, follow the same process as Step 2.1.
 
 ### Essential Context (v1.1)
 
@@ -391,10 +409,10 @@ mcp__code-intel__analyze_impact
 
 ### Verification Requirements
 
-**LLM must declare verification results:**
-```json
-{
-  "verified_files": [
+**Call submit_impact_analysis to proceed to READY:**
+```
+mcp__code-intel__submit_impact_analysis
+  verified_files: [
     {
       "file": "app/Services/CartService.php",
       "status": "will_modify",
@@ -405,11 +423,8 @@ mcp__code-intel__analyze_impact
       "status": "no_change_needed",
       "reason": "Test uses mock data, not affected by type change"
     }
-  ],
-  "inferred_from_rules": [
-    "Added ProductResource.php based on project_rules naming convention"
   ]
-}
+  inferred_from_rules: ["Added ProductResource.php based on project_rules naming convention"]
 ```
 
 **Status values:**
@@ -419,7 +434,7 @@ mcp__code-intel__analyze_impact
 | no_change_needed | Checked, no changes required |
 | not_affected | Not affected by changes |
 
-**Validation:**
+**Validation (server-enforced):**
 - All `must_verify` files must have a response
 - `status != will_modify` requires `reason`
 - Missing responses block transition to READY
