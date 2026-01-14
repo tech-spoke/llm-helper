@@ -2,7 +2,7 @@
 
 **Version:** Draft v1.03
 **Date:** 2025-01-14
-**Status:** 検討中
+**Status:** 実装済み
 **Base Version:** Code Intelligence MCP Server v1.0
 
 ---

@@ -1,4 +1,4 @@
-# /code - コード実装エージェント v1.0
+# /code - コード実装エージェント v1.1
 
 あなたはコード実装エージェントです。ユーザーの指示を理解し、コードベースを調査した上で実装・修正を行います。
 
@@ -11,7 +11,7 @@ Step 0: 失敗チェック（自動失敗検出）
     ↓
 Step 1: Intent判定
     ↓
-Step 2: セッション開始
+Step 2: セッション開始（+ 必須コンテキスト）
     ↓
 Step 3: QueryFrame設定
     ↓
@@ -23,7 +23,9 @@ Step 6: SEMANTIC（必要時のみ）
     ↓
 Step 7: VERIFICATION（必要時のみ）
     ↓
-Step 8: READY（実装許可）
+Step 8: IMPACT ANALYSIS（v1.1）
+    ↓
+Step 9: READY（実装許可）
 ```
 
 ---
@@ -116,6 +118,16 @@ mcp__code-intel__start_session
 {
   "success": true,
   "session_id": "abc123",
+  "essential_context": {
+    "design_docs": {
+      "source": "docs/architecture",
+      "summaries": [{"file": "overview.md", "summary": "..."}]
+    },
+    "project_rules": {
+      "source": "CLAUDE.md",
+      "summary": "DO:\n- ...\nDON'T:\n- ..."
+    }
+  },
   "query_frame": {
     "status": "pending",
     "extraction_prompt": "以下のクエリからスロットを抽出...",
@@ -123,6 +135,15 @@ mcp__code-intel__start_session
   }
 }
 ```
+
+### 必須コンテキスト（v1.1）
+
+**`essential_context` が存在する場合、作業前に確認すること:**
+
+1. **design_docs**: 従うべきアーキテクチャ決定と制約
+2. **project_rules**: プロジェクト規約の DO/DON'T ルール
+
+**重要:** これらの要約はソースドキュメントから自動生成されます。実装前にプロジェクトの規約を理解するために活用してください。
 
 ---
 
@@ -329,7 +350,105 @@ mcp__code-intel__submit_verification
 
 ---
 
-## Step 8: READY フェーズ（実装許可）
+## Step 8: IMPACT ANALYSIS（v1.1）
+
+**目的:** 実装前に変更の影響範囲を分析し、影響を受けるファイルを確認する
+
+**いつ実行:** VERIFICATION後（または SEMANTIC が不要な場合は EXPLORATION 後）、READY 前
+
+**analyze_impact を呼び出す:**
+```
+mcp__code-intel__analyze_impact
+  target_files: ["app/Models/Product.php"]
+  change_description: "price フィールドの型を変更"
+```
+
+**レスポンス:**
+```json
+{
+  "impact_analysis": {
+    "mode": "standard",
+    "depth": "direct_only",
+    "static_references": {
+      "callers": [
+        {"file": "app/Services/CartService.php", "line": 45, "context": "$product->price"}
+      ],
+      "type_hints": []
+    },
+    "naming_convention_matches": {
+      "tests": ["tests/Feature/ProductTest.php"],
+      "factories": ["database/factories/ProductFactory.php"]
+    },
+    "inference_hint": "project_rules に基づき、関連する Resource/Policy を確認"
+  },
+  "confirmation_required": {
+    "must_verify": ["app/Services/CartService.php"],
+    "should_verify": ["tests/Feature/ProductTest.php", "database/factories/ProductFactory.php"],
+    "indirect_note": "間接参照が必要な場合は find_references で追加調査"
+  }
+}
+```
+
+### 検証要件
+
+**LLM は検証結果を宣言する必要がある:**
+```json
+{
+  "verified_files": [
+    {
+      "file": "app/Services/CartService.php",
+      "status": "will_modify",
+      "reason": null
+    },
+    {
+      "file": "tests/Feature/ProductTest.php",
+      "status": "no_change_needed",
+      "reason": "テストはモックデータを使用、型変更の影響なし"
+    }
+  ],
+  "inferred_from_rules": [
+    "project_rules の命名規則から ProductResource.php を追加"
+  ]
+}
+```
+
+**ステータス値:**
+| Status | 意味 |
+|--------|------|
+| will_modify | このファイルを修正する |
+| no_change_needed | 確認済み、変更不要 |
+| not_affected | 変更の影響を受けない |
+
+**検証ルール:**
+- `must_verify` の全ファイルに回答が必要
+- `status != will_modify` の場合は `reason` が必須
+- 回答漏れは READY への移行をブロック
+
+### マークアップ緩和
+
+**対象ファイルが純粋なマークアップのみの場合、緩和モードが適用:**
+
+```json
+{
+  "impact_analysis": {
+    "mode": "relaxed_markup",
+    "reason": "対象ファイルがマークアップのみ",
+    "static_references": {},
+    "naming_convention_matches": {}
+  },
+  "confirmation_required": {
+    "must_verify": [],
+    "should_verify": []
+  }
+}
+```
+
+**緩和対象:** `.html`, `.htm`, `.css`, `.scss`, `.md`
+**緩和なし:** `.blade.php`, `.vue`, `.jsx`, `.tsx`（ロジックを含む）
+
+---
+
+## Step 9: READY フェーズ（実装許可）
 
 **このフェーズで初めて Edit/Write が可能になります。**
 

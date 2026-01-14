@@ -52,6 +52,7 @@ from tools.query_frame import (
     validate_slot, assess_risk_level, generate_investigation_guidance,
 )
 from tools.context_provider import ContextProvider
+from tools.impact_analyzer import analyze_impact
 from tools.chromadb_manager import (
     ChromaDBManager, SearchResult, SearchHit,
     CHROMADB_AVAILABLE,
@@ -933,6 +934,29 @@ async def list_tools() -> list[Tool]:
                 "required": ["query"],
             },
         ),
+        # v1.1: Impact analysis tool
+        Tool(
+            name="analyze_impact",
+            description="Analyze impact of code changes before READY phase. "
+                        "Detects direct references (callers, type hints) and naming convention matches "
+                        "(tests, factories, seeders). Applies markup relaxation for style-only files. "
+                        "LLM must verify must_verify files and declare verification results.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "target_files": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of file paths to analyze for impact",
+                    },
+                    "change_description": {
+                        "type": "string",
+                        "description": "Description of the change being made (for inference hints)",
+                    },
+                },
+                "required": ["target_files"],
+            },
+        ),
     ]
 
 
@@ -1606,6 +1630,48 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
             except Exception as e:
                 result = {"error": str(e)}
+
+        return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+
+    elif name == "analyze_impact":
+        # v1.1: Impact analysis before READY phase
+        session = session_manager.get_active_session()
+        path = session.repo_path if session else "."
+
+        target_files = arguments["target_files"]
+        change_description = arguments.get("change_description", "")
+
+        try:
+            result = await analyze_impact(
+                target_files=target_files,
+                change_description=change_description,
+                repo_path=path,
+            )
+
+            # Add session context if available
+            if session:
+                result["session_id"] = session.session_id
+                result["current_phase"] = session.phase.name
+
+                # Add essential_context hint if project_rules exists
+                if session.query_frame:
+                    result["query_frame"] = {
+                        "target_feature": session.query_frame.target_feature,
+                    }
+
+            # Add guidance for LLM
+            result["next_steps"] = {
+                "action": "verify_impact",
+                "instructions": (
+                    "1. Review must_verify files and check if changes affect them\n"
+                    "2. Review should_verify files (tests, factories, seeders)\n"
+                    "3. Use project_rules to infer additional related files\n"
+                    "4. Declare verified_files with status and reason for each"
+                ),
+            }
+
+        except Exception as e:
+            result = {"error": str(e)}
 
         return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 

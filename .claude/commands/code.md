@@ -1,4 +1,4 @@
-# /code - Code Implementation Agent v1.0
+# /code - Code Implementation Agent v1.1
 
 You are a code implementation agent. You understand user instructions, investigate the codebase, and perform implementations or modifications.
 
@@ -11,7 +11,7 @@ Step 0: Failure Check (Auto-failure Detection)
     ↓
 Step 1: Intent Classification
     ↓
-Step 2: Session Start
+Step 2: Session Start (+ Essential Context)
     ↓
 Step 3: QueryFrame Setup
     ↓
@@ -23,7 +23,9 @@ Step 6: SEMANTIC (Only if needed)
     ↓
 Step 7: VERIFICATION (Only if needed)
     ↓
-Step 8: READY (Implementation Allowed)
+Step 8: IMPACT ANALYSIS (v1.1)
+    ↓
+Step 9: READY (Implementation Allowed)
 ```
 
 ---
@@ -116,6 +118,16 @@ mcp__code-intel__start_session
 {
   "success": true,
   "session_id": "abc123",
+  "essential_context": {
+    "design_docs": {
+      "source": "docs/architecture",
+      "summaries": [{"file": "overview.md", "summary": "..."}]
+    },
+    "project_rules": {
+      "source": "CLAUDE.md",
+      "summary": "DO:\n- ...\nDON'T:\n- ..."
+    }
+  },
   "query_frame": {
     "status": "pending",
     "extraction_prompt": "Extract slots from the following query...",
@@ -123,6 +135,15 @@ mcp__code-intel__start_session
   }
 }
 ```
+
+### Essential Context (v1.1)
+
+**If `essential_context` is present, review before proceeding:**
+
+1. **design_docs**: Architecture decisions and constraints to follow
+2. **project_rules**: DO/DON'T rules from project conventions
+
+**Important:** These summaries are auto-generated from source documents. Use them to understand project conventions before implementation.
 
 ---
 
@@ -329,7 +350,105 @@ mcp__code-intel__submit_verification
 
 ---
 
-## Step 8: READY Phase (Implementation Allowed)
+## Step 8: IMPACT ANALYSIS (v1.1)
+
+**Purpose:** Before implementation, analyze impact of changes and verify affected files
+
+**When executed:** After VERIFICATION (or EXPLORATION if SEMANTIC not needed) and before READY
+
+**Call analyze_impact:**
+```
+mcp__code-intel__analyze_impact
+  target_files: ["app/Models/Product.php"]
+  change_description: "Change price field type"
+```
+
+**Response:**
+```json
+{
+  "impact_analysis": {
+    "mode": "standard",
+    "depth": "direct_only",
+    "static_references": {
+      "callers": [
+        {"file": "app/Services/CartService.php", "line": 45, "context": "$product->price"}
+      ],
+      "type_hints": []
+    },
+    "naming_convention_matches": {
+      "tests": ["tests/Feature/ProductTest.php"],
+      "factories": ["database/factories/ProductFactory.php"]
+    },
+    "inference_hint": "Check related Resource/Policy based on project_rules"
+  },
+  "confirmation_required": {
+    "must_verify": ["app/Services/CartService.php"],
+    "should_verify": ["tests/Feature/ProductTest.php", "database/factories/ProductFactory.php"],
+    "indirect_note": "Use find_references for deeper investigation if needed"
+  }
+}
+```
+
+### Verification Requirements
+
+**LLM must declare verification results:**
+```json
+{
+  "verified_files": [
+    {
+      "file": "app/Services/CartService.php",
+      "status": "will_modify",
+      "reason": null
+    },
+    {
+      "file": "tests/Feature/ProductTest.php",
+      "status": "no_change_needed",
+      "reason": "Test uses mock data, not affected by type change"
+    }
+  ],
+  "inferred_from_rules": [
+    "Added ProductResource.php based on project_rules naming convention"
+  ]
+}
+```
+
+**Status values:**
+| Status | Meaning |
+|--------|---------|
+| will_modify | Will modify this file |
+| no_change_needed | Checked, no changes required |
+| not_affected | Not affected by changes |
+
+**Validation:**
+- All `must_verify` files must have a response
+- `status != will_modify` requires `reason`
+- Missing responses block transition to READY
+
+### Markup Relaxation
+
+**When all target files are pure markup, relaxed mode applies:**
+
+```json
+{
+  "impact_analysis": {
+    "mode": "relaxed_markup",
+    "reason": "Target files are markup only",
+    "static_references": {},
+    "naming_convention_matches": {}
+  },
+  "confirmation_required": {
+    "must_verify": [],
+    "should_verify": []
+  }
+}
+```
+
+**Relaxed file types:** `.html`, `.htm`, `.css`, `.scss`, `.md`
+**NOT relaxed:** `.blade.php`, `.vue`, `.jsx`, `.tsx` (contain logic)
+
+---
+
+## Step 9: READY Phase (Implementation Allowed)
 
 **Edit/Write becomes available only in this phase.**
 
