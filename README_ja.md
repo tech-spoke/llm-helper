@@ -206,49 +206,70 @@ MCP サーバーを読み込むために再起動。初回セッション開始�
 
 ### Step 6: 必須コンテキストの設定（v1.1、任意）
 
-`.code-intel/context.yml` を作成して、セッション開始時に設計ドキュメントとプロジェクトルールを LLM に提供：
+`.code-intel/context.yml` を作成して、セッション開始時に設計ドキュメントとプロジェクトルールを LLM に提供。
+
+**最小テンプレート（コピーして編集）:**
 
 ```yaml
 # .code-intel/context.yml
 
-# 設計ドキュメント - セッション開始時に要約が自動提供される
 essential_docs:
-  source: "docs/architecture"  # 設計ドキュメントのディレクトリ
+  source: "docs/architecture"      # ← 設計ドキュメントのディレクトリ
+  summaries:
+    - file: "overview.md"
+      path: "docs/architecture/overview.md"
+      summary: |
+        ここにドキュメントの要約を書く。
+        セッション開始時に LLM に提供される。
+
+project_rules:
+  source: "CLAUDE.md"              # ← ルールファイル
+  summary: |
+    DO:
+    - プロジェクトルールをここに書く
+
+    DON'T:
+    - 避けるべきことをここに書く
+```
+
+**全フィールドの例（オプション含む）:**
+
+```yaml
+essential_docs:
+  source: "docs/architecture"
   summaries:
     - file: "overview.md"
       path: "docs/architecture/overview.md"
       summary: |
         3層アーキテクチャ（Controller/Service/Repository）。
         ビジネスロジックは Service 層に集約。
-      content_hash: "abc123..."  # 自動生成、変更検知に使用
-      extra_notes: |
-        # 手動追記（任意 - 自動生成された要約を補完）
+      extra_notes: |                     # ← 任意: 暗黙知を追加
         - 例外: 単純な CRUD は Service 層をバイパス可
+      # content_hash: "..."              # ← 自動生成、書かない
 
-# プロジェクトルール - CLAUDE.md 等からの DO/DON'T ルール
 project_rules:
-  source: "CLAUDE.md"  # ルールのソースファイル
+  source: "CLAUDE.md"
   summary: |
     DO:
     - Service 層でビジネスロジックを実装
     - 全機能にテストを書く
-    - 既存の命名規則に従う
 
     DON'T:
     - Controller に複雑なロジックを書かない
     - コードレビューをスキップしない
-    - main ブランチに直接コミットしない
-  content_hash: "def456..."
-  extra_notes: ""
+  extra_notes: ""                        # ← 任意
+  # content_hash: "..."                  # ← 自動生成、書かない
 
-last_synced: "2025-01-14T10:00:00"  # 自動更新
+# last_synced: "..."                     # ← 自動生成、書かない
 ```
 
-**ポイント:**
-- `summary` は手動で書くか、LLM に生成させる
-- `extra_notes` でソースドキュメントにない暗黙知を追加可能
-- `content_hash` で `sync_index` 実行時に変更を検知
-- セッション開始時、`essential_context` としてこれらの要約が返される
+| フィールド | 必須 | 説明 |
+|-----------|------|------|
+| `source` | Yes | ソースファイル/ディレクトリのパス |
+| `summary` | Yes | LLM に提供する要約 |
+| `extra_notes` | No | 追加の暗黙知 |
+| `content_hash` | No | 自動生成（変更検知用） |
+| `last_synced` | No | 自動生成（タイムスタンプ） |
 
 **自動検出:** `context.yml` が存在しない場合、サーバーは一般的なパターンを検出：
 - 設計ドキュメント: `docs/architecture/`, `docs/design/`, `docs/`

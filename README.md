@@ -206,49 +206,70 @@ Restart to load the MCP server. Index is automatically built on first session st
 
 ### Step 6: Configure Essential Context (v1.1, optional)
 
-Create `.code-intel/context.yml` to provide design docs and project rules to LLM at session start:
+Create `.code-intel/context.yml` to provide design docs and project rules to LLM at session start.
+
+**Minimal template (copy and edit):**
 
 ```yaml
 # .code-intel/context.yml
 
-# Design documents - summaries are auto-provided at session start
 essential_docs:
-  source: "docs/architecture"  # Directory containing design docs
+  source: "docs/architecture"      # ← Your design docs directory
+  summaries:
+    - file: "overview.md"
+      path: "docs/architecture/overview.md"
+      summary: |
+        Write a summary of this document here.
+        This will be provided to LLM at session start.
+
+project_rules:
+  source: "CLAUDE.md"              # ← Your rules file
+  summary: |
+    DO:
+    - Your project rules here
+
+    DON'T:
+    - Things to avoid here
+```
+
+**Full example with optional fields:**
+
+```yaml
+essential_docs:
+  source: "docs/architecture"
   summaries:
     - file: "overview.md"
       path: "docs/architecture/overview.md"
       summary: |
         3-layer architecture (Controller/Service/Repository).
         Business logic must be in Service layer.
-      content_hash: "abc123..."  # Auto-generated, used for change detection
-      extra_notes: |
-        # Manual notes (optional - supplement auto-generated summary)
+      extra_notes: |                     # ← Optional: add implicit knowledge
         - Exception: Simple CRUD can bypass Service layer
+      # content_hash: "..."              # ← Auto-generated, don't write
 
-# Project rules - DO/DON'T rules from CLAUDE.md or similar
 project_rules:
-  source: "CLAUDE.md"  # Source file for rules
+  source: "CLAUDE.md"
   summary: |
     DO:
     - Use Service layer for business logic
     - Write tests for all features
-    - Follow existing naming conventions
 
     DON'T:
     - Write complex logic in Controllers
     - Skip code review
-    - Commit directly to main branch
-  content_hash: "def456..."
-  extra_notes: ""
+  extra_notes: ""                        # ← Optional
+  # content_hash: "..."                  # ← Auto-generated, don't write
 
-last_synced: "2025-01-14T10:00:00"  # Auto-updated
+# last_synced: "..."                     # ← Auto-generated, don't write
 ```
 
-**Key points:**
-- `summary` can be manually written or LLM-generated
-- `extra_notes` allows adding implicit knowledge not in the source doc
-- `content_hash` enables change detection via `sync_index`
-- At session start, `essential_context` is returned with these summaries
+| Field | Required | Description |
+|-------|----------|-------------|
+| `source` | Yes | Path to source file/directory |
+| `summary` | Yes | Summary to provide to LLM |
+| `extra_notes` | No | Additional implicit knowledge |
+| `content_hash` | No | Auto-generated for change detection |
+| `last_synced` | No | Auto-generated timestamp |
 
 **Auto-detection:** If `context.yml` doesn't exist, the server detects common patterns:
 - Design docs: `docs/architecture/`, `docs/design/`, `docs/`
