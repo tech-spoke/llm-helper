@@ -25,7 +25,6 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
 
-from tools.repomix_tool import pack_repository
 from tools.ripgrep_tool import search_text, search_files
 from tools.treesitter_tool import analyze_structure, get_function_at_line
 from tools.ctags_tool import find_definitions, find_references, get_symbols
@@ -257,37 +256,6 @@ async def execute_tool_step(tool: str, params: dict, context: dict) -> dict:
 async def list_tools() -> list[Tool]:
     """List available code intelligence tools."""
     return [
-        Tool(
-            name="repo_pack",
-            description="Pack an entire repository into LLM-friendly format using Repomix. "
-                        "Useful for providing full codebase context to LLMs.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Path to the repository to pack",
-                    },
-                    "format": {
-                        "type": "string",
-                        "enum": ["markdown", "xml", "plain"],
-                        "default": "markdown",
-                        "description": "Output format",
-                    },
-                    "include": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Glob patterns to include (e.g., ['*.py', 'src/**/*'])",
-                    },
-                    "exclude": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Glob patterns to exclude (e.g., ['node_modules/**', '*.test.js'])",
-                    },
-                },
-                "required": ["path"],
-            },
-        ),
         Tool(
             name="search_text",
             description="Search for text patterns in files using ripgrep. "
@@ -1616,15 +1584,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     # Record tool call in session
     session = session_manager.get_active_session()
 
-    if name == "repo_pack":
-        result = await pack_repository(
-            path=arguments["path"],
-            output_format=arguments.get("format", "markdown"),
-            include_patterns=arguments.get("include"),
-            exclude_patterns=arguments.get("exclude"),
-        )
-
-    elif name == "search_text":
+    if name == "search_text":
         result = await search_text(
             pattern=arguments["pattern"],
             path=arguments.get("path", "."),

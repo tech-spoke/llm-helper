@@ -86,10 +86,6 @@ if [ $MISSING -eq 1 ]; then
     fi
 fi
 
-echo ""
-echo "Checking optional tools..."
-check_tool "repomix" || echo "    Install with: npm install -g repomix (optional)"
-
 # Verify chromadb installation
 echo ""
 echo "Verifying ChromaDB installation..."

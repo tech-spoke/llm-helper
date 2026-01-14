@@ -700,7 +700,7 @@ class SessionState:
             return [
                 "query", "search_text", "find_definitions",
                 "find_references", "analyze_structure", "get_symbols",
-                "repo_pack", "get_function_at_line", "search_files",
+                "get_function_at_line", "search_files",
                 "submit_understanding",
             ]
         elif self.phase == Phase.SEMANTIC:
