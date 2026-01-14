@@ -17,6 +17,9 @@ if [ ! -d "venv" ]; then
 fi
 
 # Install Python dependencies
+echo "Upgrading pip..."
+./venv/bin/pip install -q --upgrade pip
+
 echo "Installing Python dependencies..."
 ./venv/bin/pip install -q -r requirements.txt
 
@@ -65,8 +68,15 @@ check_tool "ctags" || MISSING=1
 
 if [ $MISSING -eq 1 ]; then
     echo ""
-    read -p "Required tools missing. Install automatically? [Y/n] " -n 1 -r
-    echo ""
+    if [ -t 0 ]; then
+        # Interactive mode: ask user
+        read -p "Required tools missing. Install automatically? [Y/n] " -n 1 -r
+        echo ""
+    else
+        # Non-interactive mode: auto-install
+        echo "Non-interactive mode detected. Installing required tools automatically..."
+        REPLY="y"
+    fi
     if [[ $REPLY =~ ^[Yy]$ ]] || [[ -z $REPLY ]]; then
         install_required_tools
         # Re-check
