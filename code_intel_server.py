@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """
-Code Intelligence MCP Server v1.0
+Code Intelligence MCP Server v1.1
 
 Provides Cursor-like code intelligence capabilities using open source tools:
-- Repomix: Pack entire repositories for LLM consumption
 - ripgrep: Fast text search
 - tree-sitter: Code structure analysis
 - ctags: Symbol definitions and references
@@ -15,6 +14,11 @@ Key Features:
 - QueryFrame for structured natural language processing
 - Forest/Map architecture for semantic search
 - Improvement cycle with DecisionLog + OutcomeLog
+
+v1.1 Additions:
+- Essential context provision (design docs + project rules)
+- Impact analysis before READY phase
+- Markup context relaxation
 """
 
 import asyncio
@@ -47,6 +51,7 @@ from tools.query_frame import (
     QueryFrame, QueryDecomposer, SlotSource, SlotEvidence,
     validate_slot, assess_risk_level, generate_investigation_guidance,
 )
+from tools.context_provider import ContextProvider
 from tools.chromadb_manager import (
     ChromaDBManager, SearchResult, SearchHit,
     CHROMADB_AVAILABLE,
@@ -994,6 +999,19 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             },
         }
 
+        # v1.1: Essential context provision (design docs + project rules)
+        try:
+            context_provider = ContextProvider(repo_path)
+            essential_context = context_provider.load_context()
+            if essential_context:
+                result["essential_context"] = essential_context.to_dict()
+                result["essential_context"]["note"] = (
+                    "Design docs and project rules loaded from context.yml. "
+                    "Use these to understand project conventions before implementation."
+                )
+        except Exception as e:
+            result["essential_context"] = {"error": str(e)}
+
         # v3.9: ChromaDB status and auto-sync
         if CHROMADB_AVAILABLE:
             try:
@@ -1533,6 +1551,21 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 if sync_map:
                     map_result = manager.sync_map()
                     result["map_sync"] = map_result.to_dict()
+
+                # v1.1: Check for essential docs changes
+                try:
+                    context_provider = ContextProvider(path)
+                    doc_changes = context_provider.check_docs_changed()
+                    if doc_changes:
+                        result["essential_context"] = {
+                            "changes_detected": doc_changes,
+                            "hint": (
+                                "Essential documents have changed since last sync. "
+                                "Consider regenerating summaries with LLM or update context.yml manually."
+                            ),
+                        }
+                except Exception:
+                    pass  # Non-critical, don't fail sync
 
             except Exception as e:
                 result = {"error": str(e)}

@@ -16,5 +16,8 @@ asyncio
 sentence-transformers>=2.2.0
 scikit-learn>=1.0.0
 
+# v1.1: YAML for context configuration
+PyYAML>=6.0.0
+
 # Testing
 pytest>=7.0.0
