@@ -353,25 +353,48 @@ v1.1 では以下の機能が追加されました。
 ```yaml
 # .code-intel/context.yml
 
+# 設計ドキュメント - セッション開始時に要約が自動提供される
 essential_docs:
-  source: "docs/設計資料/アーキテクチャ"
+  source: "docs/設計資料/アーキテクチャ"  # 設計ドキュメントのディレクトリ
   summaries:
     - file: "全体アーキテクチャ.md"
       path: "docs/設計資料/アーキテクチャ/全体アーキテクチャ.md"
       summary: |
-        3層レイヤード構成。ビジネスロジックは Service 層に集約。
+        3層レイヤード構成（Controller/Service/Repository）。
+        ビジネスロジックは Service 層に集約。
+      content_hash: "abc123..."  # 自動生成、変更検知に使用
       extra_notes: |
         # 手動追記（自動要約で漏れた暗黙知を補完）
+        - 例外: 単純な CRUD は Service 層をバイパス可
 
+# プロジェクトルール - CLAUDE.md 等からの DO/DON'T ルール
 project_rules:
-  source: ".claude/CLAUDE.md"
+  source: "CLAUDE.md"  # ルールのソースファイル
   summary: |
     DO:
     - Service 層でビジネスロジックを実装
+    - 全機能にテストを書く
+    - 既存の命名規則に従う
+
     DON'T:
     - Controller に複雑なロジックを書かない
+    - コードレビューをスキップしない
+    - main ブランチに直接コミットしない
+  content_hash: "def456..."
   extra_notes: ""
+
+last_synced: "2025-01-14T10:00:00"  # 自動更新
 ```
+
+**ポイント:**
+- `summary` は手動で書くか、LLM に生成させる
+- `extra_notes` でソースドキュメントにない暗黙知を追加可能
+- `content_hash` で `sync_index` 実行時に変更を検知
+- セッション開始時、`essential_context` としてこれらの要約が返される
+
+**自動検出:** `context.yml` が存在しない場合、サーバーは一般的なパターンを検出:
+- 設計ドキュメント: `docs/architecture/`, `docs/design/`, `docs/`
+- プロジェクトルール: `CLAUDE.md`, `.claude/CLAUDE.md`, `CONTRIBUTING.md`
 
 **start_session レスポンス:**
 
