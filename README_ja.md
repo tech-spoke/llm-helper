@@ -1,4 +1,4 @@
-# Code Intelligence MCP Server v1.0
+# Code Intelligence MCP Server v1.1
 
 Cursor IDE のようなコードインテリジェンス機能をオープンソースツールで実現する MCP サーバー。
 
@@ -32,6 +32,8 @@ LLM に判断をさせない。守らせるのではなく、守らないと進�
 | 改善サイクル | DecisionLog + OutcomeLog + agreements による学習 |
 | 自動失敗検出 | /code 開始時に前回失敗を自動判定・記録 |
 | プロジェクト分離 | 各プロジェクトごとに独立した学習データ |
+| 必須コンテキスト（v1.1） | セッション開始時に設計ドキュメントとプロジェクトルールを自動提供 |
+| 影響範囲分析（v1.1） | READY フェーズ前に影響確認を強制 |
 
 ---
 
@@ -80,10 +82,10 @@ LLM に判断をさせない。守らせるのではなく、守らないと進�
 ## フェーズゲート
 
 ```
-EXPLORATION → SEMANTIC → VERIFICATION → READY
-     ↓           ↓           ↓           ↓
-  code-intel  semantic    検証       実装許可
-   ツール      search     (確定)
+EXPLORATION → SEMANTIC → VERIFICATION → IMPACT ANALYSIS → READY
+     ↓           ↓           ↓               ↓               ↓
+  code-intel  semantic    検証          analyze_impact   実装許可
+   ツール      search     (確定)          (v1.1)
              (仮説)
 ```
 
@@ -92,6 +94,7 @@ EXPLORATION → SEMANTIC → VERIFICATION → READY
 | EXPLORATION | code-intel ツール | semantic_search |
 | SEMANTIC | semantic_search | code-intel |
 | VERIFICATION | code-intel ツール | semantic_search |
+| IMPACT ANALYSIS | analyze_impact, code-intel | semantic_search |
 | READY | すべて | - |
 
 ---
@@ -110,6 +113,7 @@ EXPLORATION → SEMANTIC → VERIFICATION → READY
 | `get_symbols` | シンボル一覧取得 |
 | `sync_index` | ソースコードを ChromaDB にインデックス |
 | `semantic_search` | 地図/森の統合ベクトル検索 |
+| `analyze_impact` | 変更の影響範囲分析（v1.1） |
 
 ### セッション管理
 
@@ -200,6 +204,56 @@ cp /path/to/llm-helper/.claude/commands/*.md /path/to/your-project/.claude/comma
 
 MCP サーバーを読み込むために再起動。初回セッション開始時に自動的にインデックスが構築されます。
 
+### Step 6: 必須コンテキストの設定（v1.1、任意）
+
+`.code-intel/context.yml` を作成して、セッション開始時に設計ドキュメントとプロジェクトルールを LLM に提供：
+
+```yaml
+# .code-intel/context.yml
+
+# 設計ドキュメント - セッション開始時に要約が自動提供される
+essential_docs:
+  source: "docs/architecture"  # 設計ドキュメントのディレクトリ
+  summaries:
+    - file: "overview.md"
+      path: "docs/architecture/overview.md"
+      summary: |
+        3層アーキテクチャ（Controller/Service/Repository）。
+        ビジネスロジックは Service 層に集約。
+      content_hash: "abc123..."  # 自動生成、変更検知に使用
+      extra_notes: |
+        # 手動追記（任意 - 自動生成された要約を補完）
+        - 例外: 単純な CRUD は Service 層をバイパス可
+
+# プロジェクトルール - CLAUDE.md 等からの DO/DON'T ルール
+project_rules:
+  source: "CLAUDE.md"  # ルールのソースファイル
+  summary: |
+    DO:
+    - Service 層でビジネスロジックを実装
+    - 全機能にテストを書く
+    - 既存の命名規則に従う
+
+    DON'T:
+    - Controller に複雑なロジックを書かない
+    - コードレビューをスキップしない
+    - main ブランチに直接コミットしない
+  content_hash: "def456..."
+  extra_notes: ""
+
+last_synced: "2025-01-14T10:00:00"  # 自動更新
+```
+
+**ポイント:**
+- `summary` は手動で書くか、LLM に生成させる
+- `extra_notes` でソースドキュメントにない暗黙知を追加可能
+- `content_hash` で `sync_index` 実行時に変更を検知
+- セッション開始時、`essential_context` としてこれらの要約が返される
+
+**自動検出:** `context.yml` が存在しない場合、サーバーは一般的なパターンを検出：
+- 設計ドキュメント: `docs/architecture/`, `docs/design/`, `docs/`
+- プロジェクトルール: `CLAUDE.md`, `.claude/CLAUDE.md`, `CONTRIBUTING.md`
+
 ---
 
 ## 利用方法
@@ -213,13 +267,14 @@ MCP サーバーを読み込むために再起動。初回セッション開始�
 スキルが自動的に：
 1. 失敗チェック（前回失敗を自動検出・記録）
 2. Intent 判定
-3. セッション開始（自動同期）
+3. セッション開始（自動同期、必須コンテキスト）
 4. QueryFrame 抽出・検証
 5. EXPLORATION（find_definitions, find_references 等）
 6. シンボル検証（Embedding）
 7. 必要に応じて SEMANTIC
 8. VERIFICATION（仮説検証）
-9. READY（実装）
+9. IMPACT ANALYSIS（v1.1 - 影響範囲の分析）
+10. READY（実装）
 
 ### 直接ツールを呼び出す
 
@@ -273,6 +328,7 @@ tree-sitter>=0.21.0
 tree-sitter-languages>=1.10.0
 sentence-transformers>=2.2.0
 scikit-learn>=1.0.0
+PyYAML>=6.0.0
 pytest>=7.0.0
 ```
 
@@ -293,6 +349,8 @@ llm-helper/
 │   ├── ast_chunker.py      ← AST チャンキング
 │   ├── sync_state.py       ← 同期状態管理
 │   ├── outcome_log.py      ← 改善サイクルログ
+│   ├── context_provider.py ← 必須コンテキスト（v1.1）
+│   ├── impact_analyzer.py  ← 影響範囲分析（v1.1）
 │   └── ...
 ├── setup.sh                ← サーバーセットアップ
 ├── init-project.sh         ← プロジェクト初期化
@@ -307,6 +365,7 @@ your-project/
 ├── .mcp.json               ← MCP 設定（手動設定）
 ├── .code-intel/            ← Code Intel データ（自動生成）
 │   ├── config.json
+│   ├── context.yml         ← 必須コンテキスト設定（v1.1）
 │   ├── chroma/             ← ChromaDB データ
 │   ├── agreements/         ← 成功ペア
 │   ├── logs/               ← DecisionLog, OutcomeLog

@@ -302,22 +302,124 @@ llm-helper/
 
 ## Setup
 
-```bash
-# Install dependencies
-pip install -r requirements.txt
-
-# Initialize project
-./init-project.sh
-
-# Start server
-python code_intel_server.py
-```
-
 ### Required External Tools
 
 - Universal Ctags
 - ripgrep
-- tree-sitter
+- Python 3.10+
+
+### Step 1: MCP Server Setup (once only)
+
+```bash
+# Clone repository
+git clone https://github.com/tech-spoke/llm-helper.git
+cd llm-helper
+
+# Setup server (venv, dependencies)
+./setup.sh
+```
+
+### Step 2: Project Initialization (per project)
+
+```bash
+# Initialize target project (index entire project)
+./init-project.sh /path/to/your-project
+
+# Option: Index only specific directories
+./init-project.sh /path/to/your-project --include=src,packages
+
+# Option: Specify additional exclude patterns
+./init-project.sh /path/to/your-project --exclude=tests,docs,*.log
+```
+
+This creates:
+
+```
+your-project/
+└── .code-intel/
+    ├── config.json       ← Configuration
+    ├── chroma/           ← ChromaDB data (auto-generated)
+    ├── agreements/       ← Agreements directory
+    └── logs/             ← DecisionLog, OutcomeLog
+```
+
+### Step 3: Configure .mcp.json
+
+Add the configuration output by `init-project.sh` to `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "code-intel": {
+      "type": "stdio",
+      "command": "/path/to/llm-helper/venv/bin/python",
+      "args": ["/path/to/llm-helper/code_intel_server.py"],
+      "env": {"PYTHONPATH": "/path/to/llm-helper"}
+    }
+  }
+}
+```
+
+### Step 4: Setup Skills (optional)
+
+```bash
+mkdir -p /path/to/your-project/.claude/commands
+cp /path/to/llm-helper/.claude/commands/*.md /path/to/your-project/.claude/commands/
+```
+
+### Step 5: Restart Claude Code
+
+Restart to load the MCP server. Index is automatically built on first session start.
+
+### Step 6: Configure Essential Context (v1.1, optional)
+
+Create `.code-intel/context.yml` to provide design docs and project rules to LLM at session start:
+
+```yaml
+# .code-intel/context.yml
+
+# Design documents - summaries are auto-provided at session start
+essential_docs:
+  source: "docs/architecture"  # Directory containing design docs
+  summaries:
+    - file: "overview.md"
+      path: "docs/architecture/overview.md"
+      summary: |
+        3-layer architecture (Controller/Service/Repository).
+        Business logic must be in Service layer.
+      content_hash: "abc123..."  # Auto-generated, used for change detection
+      extra_notes: |
+        # Manual notes (optional - supplement auto-generated summary)
+        - Exception: Simple CRUD can bypass Service layer
+
+# Project rules - DO/DON'T rules from CLAUDE.md or similar
+project_rules:
+  source: "CLAUDE.md"  # Source file for rules
+  summary: |
+    DO:
+    - Use Service layer for business logic
+    - Write tests for all features
+    - Follow existing naming conventions
+
+    DON'T:
+    - Write complex logic in Controllers
+    - Skip code review
+    - Commit directly to main branch
+  content_hash: "def456..."
+  extra_notes: ""
+
+last_synced: "2025-01-14T10:00:00"  # Auto-updated
+```
+
+**Key points:**
+- `summary` can be manually written or LLM-generated
+- `extra_notes` allows adding implicit knowledge not in the source doc
+- `content_hash` enables change detection via `sync_index`
+- At session start, `essential_context` is returned with these summaries
+
+**Auto-detection:** If `context.yml` doesn't exist, the server detects common patterns:
+- Design docs: `docs/architecture/`, `docs/design/`, `docs/`
+- Project rules: `CLAUDE.md`, `.claude/CLAUDE.md`, `CONTRIBUTING.md`
 
 ---
 
