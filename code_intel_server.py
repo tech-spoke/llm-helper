@@ -1146,21 +1146,16 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                             change_path = Path(repo_path) / change["path"]
                             if change_path.exists():
                                 try:
-                                    content = change_path.read_text(encoding="utf-8")
                                     if change["type"] == "essential_doc":
                                         docs_to_summarize.append({
                                             "type": "design_doc",
                                             "path": change["path"],
                                             "file": change_path.name,
-                                            "content": content,
-                                            "prompt": prompts["design_doc"].format(document_content=content),
                                         })
                                     elif change["type"] == "project_rules":
                                         docs_to_summarize.append({
                                             "type": "project_rules",
                                             "path": change["path"],
-                                            "content": content,
-                                            "prompt": prompts["project_rules"].format(document_content=content),
                                         })
                                 except Exception:
                                     pass
@@ -1168,8 +1163,9 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                         if docs_to_summarize:
                             result["context_update_required"] = {
                                 "documents": docs_to_summarize,
+                                "prompts": prompts,
                                 "instruction": (
-                                    "Generate summaries for the documents above using the provided prompts, "
+                                    "Read each document using the Read tool, generate a summary using the appropriate prompt, "
                                     "then call update_context tool with the generated summaries."
                                 ),
                             }
@@ -1722,21 +1718,16 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                             change_path = Path(path) / change["path"]
                             if change_path.exists():
                                 try:
-                                    content = change_path.read_text(encoding="utf-8")
                                     if change["type"] == "essential_doc":
                                         docs_to_summarize.append({
                                             "type": "design_doc",
                                             "path": change["path"],
                                             "file": change_path.name,
-                                            "content": content,
-                                            "prompt": prompts["design_doc"].format(document_content=content),
                                         })
                                     elif change["type"] == "project_rules":
                                         docs_to_summarize.append({
                                             "type": "project_rules",
                                             "path": change["path"],
-                                            "content": content,
-                                            "prompt": prompts["project_rules"].format(document_content=content),
                                         })
                                 except Exception:
                                     pass
@@ -1744,8 +1735,9 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                         if docs_to_summarize:
                             result["context_update_required"] = {
                                 "documents": docs_to_summarize,
+                                "prompts": prompts,
                                 "instruction": (
-                                    "Generate summaries for the documents above using the provided prompts, "
+                                    "Read each document using the Read tool, generate a summary using the appropriate prompt, "
                                     "then call update_context tool with the generated summaries."
                                 ),
                             }

@@ -524,11 +524,24 @@ mcp__code-intel__analyze_impact
     "naming_convention_matches": {
       "tests": ["tests/Feature/ProductTest.php"],
       "factories": ["database/factories/ProductFactory.php"]
+    },
+    "document_mentions": {
+      "files": [
+        {
+          "file": "docs/API仕様.md",
+          "match_count": 5,
+          "keywords": ["price"],
+          "sample_lines": [
+            {"line": 45, "content": "price フィールドは decimal(10,2) 型", "keyword": "price"}
+          ]
+        }
+      ],
+      "keywords_searched": ["price", "ProductPrice"]
     }
   },
   "confirmation_required": {
     "must_verify": ["app/Services/CartService.php"],
-    "should_verify": ["tests/Feature/ProductTest.php"]
+    "should_verify": ["tests/Feature/ProductTest.php", "docs/API仕様.md"]
   }
 }
 ```
@@ -561,3 +574,48 @@ mcp__code-intel__analyze_impact
 **設計理由:**
 - 再帰的な全探索はノイズが多い
 - 直接参照を確認した時点で、LLM は追加調査の必要性を判断できる
+
+### ドキュメント内キーワード検索（v1.1.1）
+
+`change_description` と `target_files` からキーワードを自動抽出し、ドキュメント内を検索します。
+
+**目的:** ドキュメント修正漏れを防止
+
+**検索対象（デフォルト）:**
+- `**/*.md` - Markdown ファイル
+- `**/README*` - README ファイル
+- `**/docs/**/*` - docs ディレクトリ配下
+
+**除外パターン（デフォルト）:**
+- `node_modules/**`, `vendor/**`, `.git/**`, `.venv/**`, `__pycache__/**`
+
+**設定によるカスタマイズ:**
+
+`context.yml` の `document_search` セクションで検索対象と除外パターンをカスタマイズ可能:
+
+```yaml
+# .code-intel/context.yml
+document_search:
+  include_patterns:
+    - "**/*.md"
+    - "**/README*"
+    - "**/docs/**/*"
+  exclude_patterns:
+    - "node_modules/**"
+    - "vendor/**"
+    - ".git/**"
+    - "CHANGELOG*.md"      # プロジェクト固有の除外
+    - "docs/archive/**"
+```
+
+**キーワード抽出（優先度順）:**
+1. **高**: クォート文字列（`"auto_billing"` など明示指定）
+2. **中**: CamelCase/snake_case の技術用語（`ProductPrice`, `user_account`）
+3. **低**: ファイル名（汎用的すぎるためノイズになりやすい）
+
+**制限:**
+- キーワード数: 最大10個
+- ファイル数: 最大20ファイル
+- ファイルあたりサンプル行: 最大3行
+
+**出力形式:** ファイル単位で集約（LLM が「このファイルを読むべきか」を判断しやすい形式）

@@ -539,11 +539,24 @@ mcp__code-intel__analyze_impact
     "naming_convention_matches": {
       "tests": ["tests/Feature/ProductTest.php"],
       "factories": ["database/factories/ProductFactory.php"]
+    },
+    "document_mentions": {
+      "files": [
+        {
+          "file": "docs/API-spec.md",
+          "match_count": 5,
+          "keywords": ["price"],
+          "sample_lines": [
+            {"line": 45, "content": "price field is decimal(10,2) type", "keyword": "price"}
+          ]
+        }
+      ],
+      "keywords_searched": ["price", "ProductPrice"]
     }
   },
   "confirmation_required": {
     "must_verify": ["app/Services/CartService.php"],
-    "should_verify": ["tests/Feature/ProductTest.php"]
+    "should_verify": ["tests/Feature/ProductTest.php", "docs/API-spec.md"]
   }
 }
 ```
@@ -576,3 +589,48 @@ When targeting only pure markup files (.html, .css, .md), impact analysis is rel
 **Design Rationale:**
 - Recursive full exploration creates too much noise
 - After checking direct references, LLM can judge if additional investigation is needed
+
+### Document Keyword Search (v1.1.1)
+
+Automatically extracts keywords from `change_description` and `target_files`, then searches within documentation.
+
+**Purpose:** Prevent documentation update omissions
+
+**Search Targets (default):**
+- `**/*.md` - Markdown files
+- `**/README*` - README files
+- `**/docs/**/*` - Files under docs directory
+
+**Exclude Patterns (default):**
+- `node_modules/**`, `vendor/**`, `.git/**`, `.venv/**`, `__pycache__/**`
+
+**Configuration Customization:**
+
+Customize search targets and exclude patterns via `document_search` section in `context.yml`:
+
+```yaml
+# .code-intel/context.yml
+document_search:
+  include_patterns:
+    - "**/*.md"
+    - "**/README*"
+    - "**/docs/**/*"
+  exclude_patterns:
+    - "node_modules/**"
+    - "vendor/**"
+    - ".git/**"
+    - "CHANGELOG*.md"      # Project-specific exclusion
+    - "docs/archive/**"
+```
+
+**Keyword Extraction (by priority):**
+1. **High**: Quoted strings (`"auto_billing"` - explicitly specified)
+2. **Medium**: CamelCase/snake_case technical terms (`ProductPrice`, `user_account`)
+3. **Low**: File names (often too generic, may cause noise)
+
+**Limits:**
+- Keywords: max 10
+- Files: max 20
+- Sample lines per file: max 3
+
+**Output Format:** Aggregated by file (helps LLM decide "should I read this file?")

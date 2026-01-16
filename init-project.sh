@@ -180,6 +180,44 @@ cat > "$PROJECT_PATH/.code-intel/config.json" << EOF
 EOF
 echo "  ✓ .code-intel/config.json"
 
+# Generate context.yml (only if not exists - preserve user settings)
+if [ ! -f "$PROJECT_PATH/.code-intel/context.yml" ]; then
+    cat > "$PROJECT_PATH/.code-intel/context.yml" << 'EOF'
+# Code Intel Context Configuration v1.1
+# See: https://github.com/your-repo/llm-helper
+
+# Design document summaries (optional)
+# Uncomment and set to your design docs directory
+# essential_docs:
+#   source: "docs/design"
+
+# Project rules (optional)
+# Uncomment and set to your project rules file
+# project_rules:
+#   source: "CLAUDE.md"
+
+# Document search settings for analyze_impact (v1.1.1)
+# Controls which documentation files are searched for keyword mentions
+document_search:
+  include_patterns:
+    - "**/*.md"
+    - "**/README*"
+    - "**/docs/**/*"
+  exclude_patterns:
+    - "node_modules/**"
+    - "vendor/**"
+    - ".git/**"
+    - ".venv/**"
+    - "__pycache__/**"
+    # Add project-specific exclusions below:
+    # - "CHANGELOG*.md"
+    # - "docs/archive/**"
+EOF
+    echo "  ✓ .code-intel/context.yml"
+else
+    echo "  - .code-intel/context.yml already exists (skipped)"
+fi
+
 # Show configured paths
 echo ""
 echo "Index configuration:"
@@ -222,7 +260,8 @@ echo ""
 echo "Project structure:"
 echo "  $PROJECT_PATH/"
 echo "  └── .code-intel/"
-echo "      ├── config.json          (configuration)"
+echo "      ├── config.json          (indexing configuration)"
+echo "      ├── context.yml          (context & document search settings)"
 echo "      ├── agreements/          (learned NL->Symbol pairs)"
 echo "      ├── chroma/              (ChromaDB vector database)"
 echo "      └── sync_state.json      (incremental sync state)"

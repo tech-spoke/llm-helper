@@ -348,6 +348,22 @@ class ContextProvider:
                 }
                 break
 
+        # Add document_search defaults (for analyze_impact keyword search)
+        result["document_search"] = {
+            "include_patterns": [
+                "**/*.md",
+                "**/README*",
+                "**/docs/**/*",
+            ],
+            "exclude_patterns": [
+                "node_modules/**",
+                "vendor/**",
+                ".git/**",
+                ".venv/**",
+                "__pycache__/**",
+            ],
+        }
+
         return result
 
     def save_context(self, config: dict) -> None:

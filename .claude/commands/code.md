@@ -134,12 +134,33 @@ mcp__code-intel__start_session
 
 **If `context_update_required` is present in start_session response:**
 
-The response contains documents that need summaries. Generate summaries using the provided prompts, then call:
+The response contains document paths that need summaries. For each document:
+1. Read the document using the Read tool
+2. Generate a summary using the appropriate prompt from `prompts` field
+3. Call update_context with the generated summaries
 
+**Response format:**
+```json
+{
+  "context_update_required": {
+    "documents": [
+      {"type": "design_doc", "path": "docs/DESIGN.md", "file": "DESIGN.md"},
+      {"type": "project_rules", "path": "CLAUDE.md"}
+    ],
+    "prompts": {
+      "design_doc": "Summarize the key architectural decisions...",
+      "project_rules": "Extract DO and DON'T rules..."
+    },
+    "instruction": "Read each document..."
+  }
+}
+```
+
+**Then call:**
 ```
 mcp__code-intel__update_context
   design_doc_summaries: [
-    {"path": "docs/architecture/overview.md", "file": "overview.md", "summary": "generated summary..."}
+    {"path": "docs/DESIGN.md", "file": "DESIGN.md", "summary": "generated summary..."}
   ]
   project_rules_summary: "DO:\n- ...\nDON'T:\n- ..."
 ```

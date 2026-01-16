@@ -1,9 +1,9 @@
 # 設計ドラフト: コンテキスト提供と影響範囲分析
 
-**Version:** Draft v1.03
-**Date:** 2025-01-14
+**Version:** Draft v1.1.1
+**Date:** 2025-01-16
 **Status:** 実装済み
-**Base Version:** Code Intelligence MCP Server v1.0
+**Base Version:** Code Intelligence MCP Server v1.1
 
 ---
 
@@ -14,6 +14,7 @@
 | v0.1 | 2025-01-14 | 初版ドラフト |
 | v1.02 | 2025-01-14 | LLM要約方式、マークアップ緩和、sync連携を追加 |
 | v1.03 | 2025-01-14 | impact-rules.yml 廃止、project_rules 追加、extra_notes 追加、間接参照の扱いを明確化 |
+| v1.1.1 | 2025-01-16 | ドキュメント内キーワード検索機能を追加（修正漏れ防止） |
 
 ---
 
@@ -60,9 +61,25 @@ essential_docs:
 
 project_rules:
   source: ".claude/CLAUDE.md"
+
+# v1.1.1: ドキュメント検索設定（analyze_impact で使用）
+document_search:
+  include_patterns:
+    - "**/*.md"
+    - "**/README*"
+    - "**/docs/**/*"
+  exclude_patterns:
+    - "node_modules/**"
+    - "vendor/**"
+    - ".git/**"
+    - ".venv/**"
+    - "__pycache__/**"
+    # プロジェクト固有の除外:
+    # - "CHANGELOG*.md"
+    # - "docs/archive/**"
 ```
 
-設定は最小限。要約は自動生成される。
+設定は最小限。要約は自動生成される。`document_search` はデフォルト値があり、カスタマイズが必要な場合のみ記載。
 
 ### 自動生成される構造
 
@@ -265,6 +282,26 @@ READY フェーズ移行前に、修正対象の影響範囲を明示的に確�
 - 間接参照（2段階以上）は LLM の判断に委ねる
 - LLM が必要と判断すれば `find_references` で追加調査可能
 
+**v1.1.1 追加: ドキュメント内キーワード検索**
+- `change_description` と `target_files` からキーワードを自動抽出
+- ドキュメントファイル（`*.md`, `README*`, `docs/**/*`）内でキーワードを検索
+- 関連するドキュメントを `should_verify` に自動追加
+- **目的:** ドキュメント修正漏れを防止
+
+**キーワード抽出の優先度:**
+| 優先度 | ソース | 例 |
+|--------|--------|-----|
+| 高 | クォート文字列 | `"auto_billing"` |
+| 中 | CamelCase/snake_case | `ProductPrice`, `user_account` |
+| 低 | ファイル名 | `Product`（汎用的すぎるためノイズになりやすい）|
+
+**制限（膨大な結果を防止）:**
+- キーワード数: 最大10個
+- ファイル数: 最大20ファイル
+- ファイルあたりサンプル行: 最大3行
+
+**出力形式:** ファイル単位で集約（LLM が「このファイルを読むべきか」を判断しやすい）
+
 ### 新ツール: `analyze_impact`
 
 ```
@@ -294,6 +331,27 @@ mcp__code-intel__analyze_impact
       "factories": ["database/factories/ProductFactory.php"],
       "seeders": ["database/seeders/ProductSeeder.php"]
     },
+    "document_mentions": {
+      "files": [
+        {
+          "file": "docs/API仕様.md",
+          "match_count": 5,
+          "keywords": ["price"],
+          "sample_lines": [
+            {"line": 45, "content": "price フィールドは decimal(10,2) 型", "keyword": "price"}
+          ]
+        },
+        {
+          "file": "README.md",
+          "match_count": 2,
+          "keywords": ["price"],
+          "sample_lines": [
+            {"line": 120, "content": "price は税抜価格", "keyword": "price"}
+          ]
+        }
+      ],
+      "keywords_searched": ["price", "ProductPrice"]
+    },
     "inference_hint": "project_rules に基づき、関連する Resource や Policy も確認してください"
   },
   "confirmation_required": {
@@ -303,7 +361,9 @@ mcp__code-intel__analyze_impact
     ],
     "should_verify": [
       "tests/Feature/ProductTest.php",
-      "database/factories/ProductFactory.php"
+      "database/factories/ProductFactory.php",
+      "docs/API仕様.md",
+      "README.md"
     ],
     "llm_should_infer": [
       "project_rules の命名規則に従い、対応する Resource/Policy を確認"
