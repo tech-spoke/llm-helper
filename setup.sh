@@ -45,28 +45,32 @@ install_required_tools() {
     if command -v apt &> /dev/null; then
         echo "  Using apt..."
         sudo apt update -qq
-        sudo apt install -y ripgrep universal-ctags
+        sudo apt install -y ripgrep universal-ctags fuse-overlayfs
     elif command -v brew &> /dev/null; then
         echo "  Using brew..."
         brew install ripgrep universal-ctags
+        # Note: fuse-overlayfs is Linux-only, macOS uses different approach
+        echo "  ⚠ fuse-overlayfs is Linux-only. OverlayFS features will be disabled on macOS."
     elif command -v dnf &> /dev/null; then
         echo "  Using dnf..."
-        sudo dnf install -y ripgrep ctags
+        sudo dnf install -y ripgrep ctags fuse-overlayfs
     elif command -v pacman &> /dev/null; then
         echo "  Using pacman..."
-        sudo pacman -S --noconfirm ripgrep ctags
+        sudo pacman -S --noconfirm ripgrep ctags fuse-overlayfs
     else
         echo "  ✗ No supported package manager found (apt/brew/dnf/pacman)"
-        echo "  Please install ripgrep and universal-ctags manually."
+        echo "  Please install ripgrep, universal-ctags, and fuse-overlayfs manually."
         return 1
     fi
 }
 
 MISSING=0
+OVERLAY_MISSING=0
 check_tool "rg" || MISSING=1
 check_tool "ctags" || MISSING=1
+check_tool "fuse-overlayfs" || OVERLAY_MISSING=1
 
-if [ $MISSING -eq 1 ]; then
+if [ $MISSING -eq 1 ] || [ $OVERLAY_MISSING -eq 1 ]; then
     echo ""
     if [ -t 0 ]; then
         # Interactive mode: ask user
@@ -81,8 +85,10 @@ if [ $MISSING -eq 1 ]; then
         install_required_tools
         # Re-check
         MISSING=0
+        OVERLAY_MISSING=0
         check_tool "rg" || MISSING=1
         check_tool "ctags" || MISSING=1
+        check_tool "fuse-overlayfs" || OVERLAY_MISSING=1
     fi
 fi
 
@@ -104,6 +110,13 @@ if [ $MISSING -eq 1 ]; then
     echo "  macOS: brew install ripgrep universal-ctags"
 fi
 
+if [ $OVERLAY_MISSING -eq 1 ]; then
+    echo ""
+    echo "⚠ fuse-overlayfs not found. OverlayFS features (garbage detection) will be disabled."
+    echo "  Ubuntu/Debian: sudo apt install fuse-overlayfs"
+    echo "  Note: This is optional but recommended for v1.2 garbage detection feature."
+fi
+
 echo ""
 echo "=== Setup Complete ==="
 echo ""
@@ -114,6 +127,7 @@ echo "  • ChromaDB-based semantic search"
 echo "  • AST-based chunking for PHP, Python, JS, Blade, etc."
 echo "  • Fingerprint-based incremental sync"
 echo "  • Auto-sync on session start"
+echo "  • v1.2: OverlayFS-based garbage detection (requires fuse-overlayfs)"
 echo ""
 echo "Next steps:"
 echo "  1. Initialize your target project:"

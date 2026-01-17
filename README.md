@@ -1,4 +1,4 @@
-# Code Intelligence MCP Server v1.1
+# Code Intelligence MCP Server v1.2
 
 An MCP server that provides Cursor IDE-like code intelligence capabilities using open source tools.
 
@@ -34,6 +34,7 @@ And have a mechanism to learn from failures.
 | Project Isolation | Independent learning data for each project |
 | Essential Context (v1.1) | Auto-provide design docs and project rules at session start |
 | Impact Analysis (v1.1) | Enforce impact verification before READY phase |
+| Garbage Isolation (v1.2) | Isolate changes with OverlayFS + Git branch, bulk discard with --clean |
 
 ---
 
@@ -81,21 +82,46 @@ And have a mechanism to learn from failures.
 
 ## Phase Gates
 
+### Complete Flow
+
 ```
-EXPLORATION → SEMANTIC → VERIFICATION → IMPACT ANALYSIS → READY
-     ↓           ↓           ↓               ↓               ↓
-  code-intel  semantic    verify         analyze_impact   implementation
-   tools      search    (confirm)        (v1.1)           allowed
-             (hypothesis)
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  Flag Check → Failure Check → Intent → Session Start → QueryFrame           │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    ↓
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  EXPLORATION → Symbol Validation → SEMANTIC* → VERIFICATION* → IMPACT       │
+│       ↓              ↓                ↓             ↓            ↓          │
+│  code-intel     Embedding         semantic     code verify   analyze_impact │
+│   tools         (NL→Symbol)        search      (hypo→fact)   (impact)       │
+│                                   (hypothesis)                              │
+│                                                                             │
+│  * SEMANTIC/VERIFICATION only when confidence=low                           │
+│  ← Skip this entire block with --quick / -g=n                               │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    ↓
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  READY (impl) → POST_IMPLEMENTATION_VERIFICATION → PRE_COMMIT → Merge       │
+│       ↓                    ↓                           ↓           ↓        │
+│  Edit/Write           Run verifier prompt          Review changes  Merge    │
+│  (explored files only)  (Playwright/pytest)        Discard garbage to main  │
+│                                                                             │
+│  ← Skip VERIFICATION with --no-verify                                       │
+│  ← Loop back to READY on verification failure                               │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
+
+### Tool Permissions by Phase
 
 | Phase | Allowed | Forbidden |
 |-------|---------|-----------|
-| EXPLORATION | code-intel tools | semantic_search |
+| EXPLORATION | code-intel tools (query, find_definitions, find_references, search_text) | semantic_search |
 | SEMANTIC | semantic_search | code-intel |
 | VERIFICATION | code-intel tools | semantic_search |
-| IMPACT ANALYSIS | analyze_impact, code-intel | semantic_search |
-| READY | all | - |
+| IMPACT_ANALYSIS | analyze_impact, code-intel | semantic_search |
+| READY | Edit, Write (explored files only) | - |
+| POST_IMPL_VERIFY | Verification tools (Playwright, pytest, etc.) | - |
+| PRE_COMMIT | review_changes, finalize_changes | - |
 
 ---
 
@@ -249,9 +275,9 @@ project_rules:
 
 ---
 
-## Upgrade (v1.0 → v1.1)
+## Upgrade (v1.0 → v1.1 → v1.2)
 
-If you have existing projects initialized with v1.0, follow these steps to upgrade:
+Steps to upgrade existing projects:
 
 ### Step 1: Update llm-helper Server
 
@@ -273,12 +299,14 @@ Restart to reload the MCP server.
 
 ### What Changes
 
-| Item | v1.0 | v1.1 |
-|------|------|------|
-| Phases | 4 | 5 (IMPACT_ANALYSIS added) |
-| context.yml | None | Auto-generated |
-| Design docs summary | None | Auto-provided at session start |
-| Project rules | Manual CLAUDE.md reference | Auto-provided at session start |
+| Item | v1.0 | v1.1 | v1.2 |
+|------|------|------|------|
+| Phases | 4 | 5 (IMPACT_ANALYSIS added) | 5 |
+| context.yml | None | Auto-generated | Auto-generated |
+| Design docs summary | None | Auto-provided at session start | Same |
+| Project rules | Manual CLAUDE.md reference | Auto-provided at session start | Same |
+| Garbage isolation | None | None | OverlayFS + Git branch |
+| /code --clean | None | None | Bulk discard changes |
 
 ### No Changes Required
 
@@ -298,17 +326,70 @@ The `context.yml` file will be automatically created on next session start.
 /code Fix the bug in AuthService's login function where no error is shown when password is empty
 ```
 
+### Command Options
+
+| Long | Short | Description |
+|------|-------|-------------|
+| `--no-verify` | - | Skip verification |
+| `--only-verify` | `-v` | Run verification only (skip implementation) |
+| `--gate=LEVEL` | `-g=LEVEL` | Gate level: h(igh), m(iddle), l(ow), a(uto), n(one) |
+| `--quick` | `-q` | Skip exploration phases (= `-g=n`) |
+| `--clean` | `-c` | Cleanup stale overlays |
+
+**Default behavior:** gate=high + implementation + verification (full mode)
+
+#### Examples
+
+```bash
+# Full mode (default): gate=high + impl + verify
+/code add login feature
+
+# Skip verification
+/code --no-verify fix this bug
+
+# Verification only (check existing implementation)
+/code -v sample/hello.html
+
+# Quick mode (skip exploration, impl + verify only)
+/code -q change the button color to blue
+
+# Set gate level explicitly
+/code -g=m add password validation
+
+# Cleanup stale overlays
+/code -c
+```
+
+#### --clean Option (v1.2)
+
+To discard files created in the previous session and start over:
+
+```
+/code -c
+```
+
+With `-c` / `--clean`:
+- Discards changes in current OverlayFS session
+- Deletes Git branches (`llm_task_*`)
+- Starts a new session from clean state
+
+**Note**: OverlayFS features are disabled if `fuse-overlayfs` is not installed.
+
+#### Normal Execution Flow
+
 The skill automatically:
-1. Failure check (auto-detect and record previous failures)
-2. Intent determination
-3. Session start (auto-sync, essential context)
-4. QueryFrame extraction and verification
-5. EXPLORATION (find_definitions, find_references, etc.)
-6. Symbol verification (Embedding)
-7. SEMANTIC if needed
-8. VERIFICATION (hypothesis verification)
-9. IMPACT ANALYSIS (v1.1 - analyze affected files)
-10. READY (implementation)
+1. Flag check
+2. Failure check (auto-detect and record previous failures)
+3. Intent determination
+4. Session start (auto-sync, essential context)
+5. QueryFrame extraction and verification
+6. EXPLORATION (find_definitions, find_references, etc.) ← skip with `--quick` / `-g=n`
+7. Symbol verification (Embedding) ← skip with `--quick` / `-g=n`
+8. SEMANTIC if needed ← skip with `--quick` / `-g=n`
+9. VERIFICATION (hypothesis verification) ← skip with `--quick` / `-g=n`
+10. IMPACT ANALYSIS (v1.1 - analyze affected files) ← skip with `--quick` / `-g=n`
+11. READY (implementation)
+12. POST_IMPLEMENTATION_VERIFICATION ← skip with `--no-verify`
 
 ### Direct tool invocation
 
@@ -352,6 +433,7 @@ At `/code` start, automatically determines if current request indicates "previou
 | ripgrep (rg) | Yes | search_text, find_references |
 | universal-ctags | Yes | find_definitions, get_symbols |
 | Python 3.10+ | Yes | Server |
+| fuse-overlayfs | No | Garbage isolation (v1.2, Linux only) |
 
 ### Python Packages
 
@@ -385,6 +467,7 @@ llm-helper/
 │   ├── outcome_log.py      ← Improvement cycle log
 │   ├── context_provider.py ← Essential context (v1.1)
 │   ├── impact_analyzer.py  ← Impact analysis (v1.1)
+│   ├── overlay_manager.py  ← OverlayFS garbage isolation (v1.2)
 │   └── ...
 ├── setup.sh                ← Server setup
 ├── init-project.sh         ← Project initialization

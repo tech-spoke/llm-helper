@@ -1,6 +1,7 @@
 # Code Intelligence MCP Server v1.0 Design Document
 
 > **For v1.1 additions, see the [v1.1 Additions](#v11-additions) section.**
+> **For v1.2 additions, see the [v1.2 Additions](#v12-additions) section.**
 
 ## Overview
 
@@ -310,6 +311,7 @@ llm-helper/
 - Universal Ctags
 - ripgrep
 - Python 3.10+
+- fuse-overlayfs (optional, for v1.2 garbage detection)
 
 ### Step 1: MCP Server Setup (once only)
 
@@ -634,3 +636,66 @@ document_search:
 - Sample lines per file: max 3
 
 **Output Format:** Aggregated by file (helps LLM decide "should I read this file?")
+
+---
+
+## v1.2 Additions
+
+The following features were added in v1.2.
+
+### OverlayFS-based Garbage Detection
+
+Mount OverlayFS before implementation to capture all changes. In the PRE_COMMIT phase, LLM reviews and can discard unnecessary files (debug logs, commented code, etc.).
+
+**Additional Phase:**
+
+```
+EXPLORATION → ... → READY → PRE_COMMIT → Finalize & Merge
+                              ↑
+                         Added in v1.2
+```
+
+**Required Tool:**
+```bash
+sudo apt-get install -y fuse-overlayfs
+```
+
+**Workflow:**
+
+1. Specify `enable_overlay: true` in `start_session`
+2. Create Git branch `llm_task_{session_id}`
+3. Mount OverlayFS (changes captured in `.overlay/upper/`)
+4. Implement in READY phase (work under `merged_path`)
+5. `submit_for_review` → transition to PRE_COMMIT phase
+6. `review_changes` to see diffs
+7. `finalize_changes` to discard garbage, commit only needed files
+8. `merge_to_main` to merge to main branch
+
+**Examples of Garbage:**
+- Debug `console.log` / `print()` statements
+- Commented out code
+- Test files not requested
+- Unrelated modifications
+
+**Concurrent Session Support:**
+
+When multiple LLM sessions start simultaneously, an exclusive lock is held only during `checkout` + `mount`. After mounting, each session works independently.
+
+```
+Session A: [Lock] checkout → mount [Unlock] → work → finalize
+Session B:        (wait)   [Lock] checkout → mount [Unlock] → work → ...
+```
+
+### /code --clean Flag
+
+Flag to clean up remnants from interrupted sessions.
+
+```bash
+/code --clean
+```
+
+**Cleanup Targets:**
+- Stale overlay mounts
+- Directories under `.overlay/`
+- `llm_task_*` branches
+- Lock files

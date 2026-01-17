@@ -35,24 +35,92 @@ MARKUP_EXTENSIONS = {
 }
 
 
-def is_markup_context(files: list[str]) -> bool:
+def extract_extensions_from_text(text: str) -> list[str]:
+    """
+    テキストからファイル拡張子を抽出。
+
+    Args:
+        text: 検索対象のテキスト（例: "sampleフォルダにhello worldのHTML"）
+
+    Returns:
+        見つかった拡張子のリスト（例: [".html"]）
+    """
+    import re
+    extensions = []
+
+    # パターン1: 明示的なファイル名（例: "hello.html", "style.css"）
+    file_pattern = r'\b[\w\-]+(\.[a-zA-Z]{2,5})\b'
+    for match in re.finditer(file_pattern, text):
+        ext = match.group(1).lower()
+        extensions.append(ext)
+
+    # パターン2: ファイルタイプの言及（例: "HTMLを作成", "CSSファイル"）
+    # 日本語と英語の両方に対応（単語境界 \b は日本語で機能しないため、パターンを調整）
+    type_mappings = {
+        r'(?i)html': '.html',
+        r'(?i)(?<![a-z])htm(?![a-z])': '.htm',
+        r'(?i)css': '.css',
+        r'(?i)scss': '.scss',
+        r'(?i)sass': '.sass',
+        r'(?i)less(?![a-z])': '.less',  # "unless" などを除外
+        r'(?i)(?<![a-z])xml(?![a-z])': '.xml',
+        r'(?i)(?<![a-z])svg(?![a-z])': '.svg',
+        r'(?i)markdown': '.md',
+        r'(?i)(?<![a-z])md(?![a-z])': '.md',
+    }
+    for pattern, ext in type_mappings.items():
+        if re.search(pattern, text):
+            if ext not in extensions:
+                extensions.append(ext)
+
+    return extensions
+
+
+def is_markup_context(files: list[str], target_files: list[str] | None = None) -> bool:
     """
     探索済みファイルがすべてマークアップ系かを判定。
 
     Args:
         files: 探索済みファイルのリスト
+        target_files: 新規作成予定のファイルリスト（任意）
 
     Returns:
-        True if all files are markup files
+        True if all files are markup files (or directories with markup targets)
+
+    判定ロジック:
+    1. target_files が指定されている場合、それらの拡張子をチェック
+    2. files にディレクトリ（拡張子なし or "/" で終わる）が含まれる場合:
+       - target_files があれば、そちらで判定
+       - なければ、ディレクトリは無視して他のファイルで判定
+    3. すべてのファイルがマークアップ拡張子を持つ場合 True
     """
-    if not files:
+    if not files and not target_files:
         return False
 
+    # target_files が指定されている場合、そちらを優先
+    if target_files:
+        for f in target_files:
+            ext = Path(f).suffix.lower()
+            if ext and ext not in MARKUP_EXTENSIONS:
+                return False
+        return True
+
+    # files のみで判定
+    has_markup_file = False
     for f in files:
+        # ディレクトリパスをスキップ（拡張子なし or "/" で終わる）
+        if f.endswith("/") or f.endswith("\\"):
+            continue
         ext = Path(f).suffix.lower()
+        if not ext:
+            # 拡張子なしのパス（ディレクトリの可能性）はスキップ
+            continue
         if ext not in MARKUP_EXTENSIONS:
             return False
-    return True
+        has_markup_file = True
+
+    # マークアップファイルが1つ以上あるか、すべてディレクトリの場合は False
+    return has_markup_file
 
 
 class Phase(Enum):
@@ -62,6 +130,7 @@ class Phase(Enum):
     VERIFICATION = auto()     # Phase 3: verify semantic hypotheses
     IMPACT_ANALYSIS = auto()  # Phase 4: analyze impact before implementation (v1.1)
     READY = auto()            # Phase 5: implementation allowed
+    PRE_COMMIT = auto()       # Phase 6: garbage detection before commit (v1.2)
 
 
 class SemanticReason(Enum):
@@ -113,12 +182,57 @@ STRICT_EXPLORATION_REQUIREMENTS = {
     "existing_patterns": 1,
 }
 
+# =============================================================================
+# Gate Level Requirements (v1.2)
+# =============================================================================
 
-def evaluate_exploration(result: "ExplorationResult", intent: str) -> tuple[str, list[str]]:
+# Gate level determines exploration thoroughness requirements
+# "none" skips exploration entirely (handled in create_session)
+
+GATE_LEVEL_REQUIREMENTS = {
+    "high": {
+        # Strictest requirements - comprehensive exploration
+        "symbols_identified": 5,
+        "entry_points": 2,
+        "files_analyzed": 4,
+        "existing_patterns": 2,
+        "required_tools": {"find_definitions", "find_references", "search_text"},
+    },
+    "middle": {
+        # Standard requirements
+        "symbols_identified": 3,
+        "entry_points": 1,
+        "files_analyzed": 2,
+        "existing_patterns": 1,
+        "required_tools": {"find_definitions", "find_references"},
+    },
+    "low": {
+        # Minimal requirements
+        "symbols_identified": 1,
+        "entry_points": 0,
+        "files_analyzed": 1,
+        "existing_patterns": 0,
+        "required_tools": {"find_definitions"},
+    },
+    "auto": None,  # Determined by server based on risk_level
+}
+
+
+def evaluate_exploration(
+    result: "ExplorationResult",
+    intent: str,
+    gate_level: str = "high",
+) -> tuple[str, list[str]]:
     """
     サーバー側で confidence を算出する。
 
     LLM の自己申告ではなく、成果物から機械的に判定。
+
+    Args:
+        result: 探索結果
+        intent: IMPLEMENT, MODIFY, INVESTIGATE, QUESTION
+        gate_level: v1.2 gate level (high, middle, low, auto, none)
+                   "none" should not reach here (skipped in create_session)
 
     Returns:
         (confidence, missing_requirements)
@@ -126,18 +240,29 @@ def evaluate_exploration(result: "ExplorationResult", intent: str) -> tuple[str,
     missing = []
     tools_used = set(result.tools_used)
 
-    # Use strict requirements for IMPLEMENT/MODIFY
-    if intent in ("IMPLEMENT", "MODIFY"):
-        reqs = STRICT_EXPLORATION_REQUIREMENTS
+    # v1.2: Gate level determines requirements
+    if gate_level in GATE_LEVEL_REQUIREMENTS and GATE_LEVEL_REQUIREMENTS[gate_level] is not None:
+        reqs = GATE_LEVEL_REQUIREMENTS[gate_level]
+    elif gate_level == "auto":
+        # Auto mode: use old behavior based on intent
+        if intent in ("IMPLEMENT", "MODIFY"):
+            reqs = STRICT_EXPLORATION_REQUIREMENTS
+        else:
+            reqs = MIN_EXPLORATION_REQUIREMENTS
     else:
-        reqs = MIN_EXPLORATION_REQUIREMENTS
+        # Fallback to old behavior (high by default)
+        if intent in ("IMPLEMENT", "MODIFY"):
+            reqs = STRICT_EXPLORATION_REQUIREMENTS
+        else:
+            reqs = MIN_EXPLORATION_REQUIREMENTS
 
     # Check each requirement
     if len(result.symbols_identified) < reqs["symbols_identified"]:
         missing.append(f"symbols_identified: {len(result.symbols_identified)}/{reqs['symbols_identified']}")
 
-    if len(result.entry_points) < reqs["entry_points"]:
-        missing.append(f"entry_points: {len(result.entry_points)}/{reqs['entry_points']}")
+    if reqs.get("entry_points", 0) > 0:
+        if len(result.entry_points) < reqs["entry_points"]:
+            missing.append(f"entry_points: {len(result.entry_points)}/{reqs['entry_points']}")
 
     if len(result.files_analyzed) < reqs["files_analyzed"]:
         missing.append(f"files_analyzed: {len(result.files_analyzed)}/{reqs['files_analyzed']}")
@@ -146,27 +271,40 @@ def evaluate_exploration(result: "ExplorationResult", intent: str) -> tuple[str,
         missing_tools = reqs["required_tools"] - tools_used
         missing.append(f"required_tools: missing {missing_tools}")
 
-    # For IMPLEMENT/MODIFY, also check existing_patterns
-    if intent in ("IMPLEMENT", "MODIFY"):
-        if len(result.existing_patterns) < reqs.get("existing_patterns", 0):
-            missing.append(f"existing_patterns: {len(result.existing_patterns)}/{reqs.get('existing_patterns', 0)}")
+    # Check existing_patterns if required
+    if reqs.get("existing_patterns", 0) > 0:
+        if len(result.existing_patterns) < reqs["existing_patterns"]:
+            missing.append(f"existing_patterns: {len(result.existing_patterns)}/{reqs['existing_patterns']}")
 
     confidence = "high" if not missing else "low"
     return confidence, missing
 
 
-def can_proceed_to_ready(result: "ExplorationResult", intent: str) -> tuple[bool, list[str]]:
+def can_proceed_to_ready(
+    result: "ExplorationResult",
+    intent: str,
+    gate_level: str = "high",
+) -> tuple[bool, list[str]]:
     """
     IMPLEMENT/MODIFY は最低成果条件を満たさないと READY に進めない。
+
+    Args:
+        result: 探索結果
+        intent: IMPLEMENT, MODIFY, INVESTIGATE, QUESTION
+        gate_level: v1.2 gate level (high, middle, low, auto, none)
 
     Returns:
         (can_proceed, missing_requirements)
     """
+    # gate_level="none" should not reach here (already at READY)
+    if gate_level == "none":
+        return True, []
+
     if intent not in ("IMPLEMENT", "MODIFY"):
         # INVESTIGATE can proceed with minimal exploration
         return True, []
 
-    confidence, missing = evaluate_exploration(result, intent)
+    confidence, missing = evaluate_exploration(result, intent, gate_level)
     return confidence == "high", missing
 
 
@@ -219,27 +357,53 @@ def evaluate_exploration_v36(
     intent: str,
     risk_level: str = "LOW",
     query_frame: "QueryFrame | None" = None,
+    gate_level: str = "auto",
 ) -> tuple[str, list[str]]:
     """
     リスクレベルを考慮した成果評価。
 
     v1.1: マークアップファイルのみの場合は要件を緩和。
+    v1.2: gate_level で明示的に要件レベルを指定可能。
 
     Args:
         result: 探索結果
         intent: IMPLEMENT, MODIFY, INVESTIGATE, QUESTION
         risk_level: HIGH, MEDIUM, LOW
         query_frame: QueryFrame（スロット証拠チェック用）
+        gate_level: v1.2 gate level (high, middle, low, auto, none)
+                   "auto" uses risk_level for determination
 
     Returns:
         (confidence, missing_requirements)
     """
     missing = []
     tools_used = set(result.tools_used)
-    reqs = get_dynamic_requirements(risk_level, intent)
+
+    # v1.2: gate_level が指定されている場合はそれを優先
+    if gate_level != "auto" and gate_level in GATE_LEVEL_REQUIREMENTS:
+        if GATE_LEVEL_REQUIREMENTS[gate_level] is not None:
+            reqs = GATE_LEVEL_REQUIREMENTS[gate_level].copy()
+            # 必須スロットチェック用のフィールドを追加（互換性のため）
+            reqs["required_slot_evidence"] = []
+        else:
+            # none は来ないはず（create_session で READY にスキップ）
+            reqs = get_dynamic_requirements(risk_level, intent)
+    else:
+        # auto or fallback: 従来の risk_level ベースの要件を使用
+        reqs = get_dynamic_requirements(risk_level, intent)
 
     # v1.1: マークアップコンテキストの判定
+    # v1.2: QueryFrame の target_feature からも拡張子を抽出して判定
     markup_context = is_markup_context(result.files_analyzed)
+
+    # files_analyzed だけでは判定できない場合、target_feature からヒントを得る
+    if not markup_context and query_frame and query_frame.target_feature:
+        inferred_extensions = extract_extensions_from_text(query_frame.target_feature)
+        if inferred_extensions:
+            # すべての推定拡張子がマークアップ系かチェック
+            all_markup = all(ext in MARKUP_EXTENSIONS for ext in inferred_extensions)
+            if all_markup:
+                markup_context = True
 
     # v1.1: マークアップの場合は要件を緩和
     if markup_context:
@@ -265,11 +429,15 @@ def evaluate_exploration_v36(
         missing.append(f"existing_patterns: {len(result.existing_patterns)}/{reqs.get('existing_patterns', 0)}")
 
     # v1.1: 必須ツールチェック（マークアップの場合は緩和）
+    # v1.2: gate_level 指定時は reqs["required_tools"] を使用
     if markup_context:
         # マークアップの場合: search_text があればOK
         required_tools = {"search_text"}
+    elif "required_tools" in reqs:
+        # gate_level で指定された必須ツールを使用
+        required_tools = reqs["required_tools"]
     else:
-        # ロジックファイルの場合: 従来通り
+        # フォールバック: 従来通り
         required_tools = {"find_definitions", "find_references"}
 
     if not required_tools.issubset(tools_used):
@@ -621,6 +789,46 @@ class ImpactAnalysisResult:
 
 
 # =============================================================================
+# v1.2: Pre-Commit Review Result (Garbage Detection)
+# =============================================================================
+
+@dataclass
+class ReviewedFile:
+    """A file reviewed during PRE_COMMIT phase."""
+    path: str
+    decision: str  # keep, discard
+    reason: str | None = None  # Required if discard
+    change_type: str = "modified"  # added, modified, deleted
+
+    def to_dict(self) -> dict:
+        return {
+            "path": self.path,
+            "decision": self.decision,
+            "reason": self.reason,
+            "change_type": self.change_type,
+        }
+
+
+@dataclass
+class PreCommitReviewResult:
+    """Result of PRE_COMMIT garbage detection phase."""
+    total_changes: int = 0
+    reviewed_files: list[ReviewedFile] = field(default_factory=list)
+    kept_files: list[str] = field(default_factory=list)
+    discarded_files: list[str] = field(default_factory=list)
+    review_notes: str = ""
+
+    def to_dict(self) -> dict:
+        return {
+            "total_changes": self.total_changes,
+            "reviewed_files": [f.to_dict() for f in self.reviewed_files],
+            "kept_files": self.kept_files,
+            "discarded_files": self.discarded_files,
+            "review_notes": self.review_notes,
+        }
+
+
+# =============================================================================
 # Valid tools for verification evidence
 # =============================================================================
 
@@ -697,6 +905,16 @@ class SessionState:
     semantic: SemanticResult | None = None
     verification: VerificationResult | None = None
     impact_analysis: ImpactAnalysisResult | None = None  # v1.1
+    pre_commit_review: PreCommitReviewResult | None = None  # v1.2
+
+    # v1.2: Overlay management
+    overlay_branch: str | None = None  # Git branch name (task_{session_id})
+    overlay_merged_path: str | None = None  # Path to merged directory
+    overlay_upper_path: str | None = None  # Path to upper directory (changes)
+    overlay_enabled: bool = False  # Whether overlay is active
+
+    # v1.2: Gate level for exploration phases
+    _gate_level: str = field(default="high", init=False)  # high, middle, low, auto, none
 
     # Semantic search results (Forest/Map architecture)
     map_results: list[dict] = field(default_factory=list)  # 地図検索結果
@@ -767,7 +985,18 @@ class SessionState:
                 "find_references", "analyze_structure",
             ]
         elif self.phase == Phase.READY:
-            return ["*"]
+            # v1.2: READY allows all tools except commit-related
+            return [
+                "*",  # All exploration/implementation tools
+                "submit_for_review",  # Transition to PRE_COMMIT
+            ]
+        elif self.phase == Phase.PRE_COMMIT:
+            # v1.2: Only review and finalize tools
+            return [
+                "review_changes",  # Get changes for review
+                "finalize_changes",  # Apply reviewed changes
+                "merge_to_main",  # Merge to main branch
+            ]
         return []
 
     def is_tool_allowed(self, tool: str) -> bool:
@@ -973,17 +1202,29 @@ class SessionState:
 
         # v1.1: マークアップコンテキストの場合、リスクレベルを再評価
         # trigger_condition欠損によるHIGHリスクを緩和
+        # v1.2: QueryFrame の target_feature からも拡張子を抽出して判定
         effective_risk_level = self.risk_level
         markup_context = is_markup_context(result.files_analyzed)
+
+        # files_analyzed だけでは判定できない場合、target_feature からヒントを得る
+        if not markup_context and self.query_frame and self.query_frame.target_feature:
+            inferred_extensions = extract_extensions_from_text(self.query_frame.target_feature)
+            if inferred_extensions:
+                all_markup = all(ext in MARKUP_EXTENSIONS for ext in inferred_extensions)
+                if all_markup:
+                    markup_context = True
+
         if markup_context and self.risk_level == "HIGH":
             effective_risk_level = "LOW"
 
         # v3.6: リスクレベルを考慮した成果評価
+        # v1.2: gate_level も渡す
         confidence, missing = evaluate_exploration_v36(
             result,
             self.intent,
             effective_risk_level,
             self.query_frame,
+            self._gate_level,
         )
 
         # v3.4: 成果物の相互整合性チェック
@@ -1354,9 +1595,121 @@ class SessionState:
 
         return response
 
+    def submit_for_review(self) -> dict:
+        """
+        v1.2: Transition from READY to PRE_COMMIT for garbage detection.
+
+        This should be called after implementation is complete.
+
+        Returns: {"success": bool, "next_phase": str, "message": str}
+        """
+        if self.phase != Phase.READY:
+            return {
+                "success": False,
+                "next_phase": self.phase.name,
+                "message": f"Cannot submit for review in phase {self.phase.name}. Must be in READY phase.",
+            }
+
+        if not self.overlay_enabled:
+            return {
+                "success": False,
+                "next_phase": self.phase.name,
+                "message": "Overlay not enabled. submit_for_review requires overlay to be active.",
+            }
+
+        # Record phase transition
+        self.phase_history.append({
+            "from": Phase.READY.name,
+            "to": Phase.PRE_COMMIT.name,
+            "timestamp": datetime.now().isoformat(),
+        })
+
+        self.phase = Phase.PRE_COMMIT
+
+        return {
+            "success": True,
+            "next_phase": Phase.PRE_COMMIT.name,
+            "message": "Implementation complete. Now in PRE_COMMIT phase for garbage detection.",
+            "next_step": "Call review_changes to get all changes, then finalize_changes with decisions.",
+        }
+
+    def submit_pre_commit_review(
+        self,
+        reviewed_files: list[dict],
+        review_notes: str = "",
+    ) -> dict:
+        """
+        v1.2: Submit garbage detection review results.
+
+        This validates that all changes have been reviewed.
+
+        Args:
+            reviewed_files: List of {"path": str, "decision": "keep"|"discard", "reason": str}
+            review_notes: Optional notes about the review
+
+        Returns: {"success": bool, "kept_files": list, "discarded_files": list}
+        """
+        if self.phase != Phase.PRE_COMMIT:
+            return {
+                "success": False,
+                "message": f"Cannot submit review in phase {self.phase.name}. Must be in PRE_COMMIT phase.",
+            }
+
+        # Convert to ReviewedFile objects
+        reviewed = []
+        kept = []
+        discarded = []
+
+        for rf in reviewed_files:
+            decision = rf.get("decision", "keep")
+            path = rf["path"]
+
+            # Validate: discard requires reason
+            if decision == "discard" and not rf.get("reason"):
+                return {
+                    "success": False,
+                    "message": f"Discarding '{path}' requires a reason.",
+                }
+
+            reviewed.append(ReviewedFile(
+                path=path,
+                decision=decision,
+                reason=rf.get("reason"),
+                change_type=rf.get("change_type", "modified"),
+            ))
+
+            if decision == "keep":
+                kept.append(path)
+            else:
+                discarded.append(path)
+
+        # Store result
+        self.pre_commit_review = PreCommitReviewResult(
+            total_changes=len(reviewed),
+            reviewed_files=reviewed,
+            kept_files=kept,
+            discarded_files=discarded,
+            review_notes=review_notes,
+        )
+
+        # Record phase transition
+        self.phase_history.append({
+            "from": Phase.PRE_COMMIT.name,
+            "result": self.pre_commit_review.to_dict(),
+            "timestamp": datetime.now().isoformat(),
+        })
+
+        return {
+            "success": True,
+            "kept_files": kept,
+            "discarded_files": discarded,
+            "message": f"Review complete. {len(kept)} files to keep, {len(discarded)} files to discard.",
+            "next_step": "Call finalize_changes to apply decisions and commit.",
+        }
+
     def get_status(self) -> dict:
         """Get current session status."""
-        return {
+        status = {
             "session_id": self.session_id,
             "intent": self.intent,
             "query": self.query,
@@ -1367,6 +1720,20 @@ class SessionState:
             "verification": self.verification.to_dict() if self.verification else None,
             "tool_calls_count": len(self.tool_calls),
         }
+
+        # v1.2: Add overlay info if enabled
+        if self.overlay_enabled:
+            status["overlay"] = {
+                "enabled": True,
+                "branch": self.overlay_branch,
+                "merged_path": self.overlay_merged_path,
+            }
+
+        # v1.2: Add PRE_COMMIT info if available
+        if self.pre_commit_review:
+            status["pre_commit_review"] = self.pre_commit_review.to_dict()
+
+        return status
 
     def to_dict(self) -> dict:
         """Full serialization for logging."""
@@ -1382,6 +1749,14 @@ class SessionState:
             "exploration": self.exploration.to_dict() if self.exploration else None,
             "semantic": self.semantic.to_dict() if self.semantic else None,
             "verification": self.verification.to_dict() if self.verification else None,
+            "impact_analysis": self.impact_analysis.to_dict() if self.impact_analysis else None,
+            "pre_commit_review": self.pre_commit_review.to_dict() if self.pre_commit_review else None,
+            "overlay": {
+                "enabled": self.overlay_enabled,
+                "branch": self.overlay_branch,
+                "merged_path": self.overlay_merged_path,
+                "upper_path": self.overlay_upper_path,
+            } if self.overlay_enabled else None,
             "tool_calls": self.tool_calls,
             "phase_history": self.phase_history,
         }
@@ -1409,17 +1784,36 @@ class SessionManager:
         query: str,
         session_id: str | None = None,
         repo_path: str = ".",
+        gate_level: str = "high",
     ) -> SessionState:
         """
         Create a new session.
 
-        repo_path: agreements と learned_pairs の保存先を指定。
+        Args:
+            intent: IMPLEMENT, MODIFY, INVESTIGATE, QUESTION
+            query: User's original query
+            session_id: Optional session ID (auto-generated if not provided)
+            repo_path: agreements と learned_pairs の保存先を指定
+            gate_level: Gate level for exploration phases
+                - "high": Strict requirements (default)
+                - "middle": Standard requirements
+                - "low": Minimal requirements
+                - "auto": Server determines based on risk
+                - "none": Skip exploration phases, go directly to READY
         """
         if session_id is None:
             session_id = f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
-        # QUESTION intent skips all phases
-        initial_phase = Phase.READY if intent == "QUESTION" else Phase.EXPLORATION
+        # Determine initial phase based on intent and gate_level
+        if intent == "QUESTION":
+            # QUESTION intent always skips to READY
+            initial_phase = Phase.READY
+        elif gate_level == "none":
+            # --quick / -g=n: Skip exploration phases
+            initial_phase = Phase.READY
+        else:
+            # Normal flow: Start with EXPLORATION
+            initial_phase = Phase.EXPLORATION
 
         session = SessionState(
             session_id=session_id,
@@ -1428,6 +1822,9 @@ class SessionManager:
             phase=initial_phase,
             repo_path=repo_path,
         )
+
+        # Store gate_level for later use (e.g., in evaluate_exploration)
+        session._gate_level = gate_level
 
         self._sessions[session_id] = session
         self._active_session_id = session_id

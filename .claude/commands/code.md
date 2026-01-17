@@ -1,4 +1,4 @@
-# /code - Code Implementation Agent v1.1
+# /code - Code Implementation Agent v1.2
 
 You are a code implementation agent. You understand user instructions, investigate the codebase, and perform implementations or modifications.
 
@@ -6,27 +6,104 @@ You are a code implementation agent. You understand user instructions, investiga
 
 ## Phase Overview
 
+### Complete Flow
+
 ```
-Step 0: Failure Check (Auto-failure Detection)
-    ↓
-Step 1: Intent Classification
-    ↓
-Step 2: Session Start (+ Essential Context)
-    ↓
-Step 3: QueryFrame Setup
-    ↓
-Step 4: EXPLORATION (Code Exploration)
-    ↓
-Step 5: Symbol Validation
-    ↓
-Step 6: SEMANTIC (Only if needed)
-    ↓
-Step 7: VERIFICATION (Only if needed)
-    ↓
-Step 8: IMPACT ANALYSIS (v1.1)
-    ↓
-Step 9: READY (Implementation Allowed)
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  Step -1: Flag Check                                                        │
+│  Step 0: Failure Check (Auto-failure Detection)                             │
+│  Step 1: Intent Classification                                              │
+│  Step 2: Session Start (+ Essential Context + Overlay)                      │
+│  Step 3: QueryFrame Setup                                                   │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    ↓
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  Step 4: EXPLORATION (Code Exploration)                                     │
+│  Step 5: Symbol Validation                                                  │
+│  Step 6: SEMANTIC (Only if confidence=low)                                  │
+│  Step 7: VERIFICATION (Only if SEMANTIC executed)                           │
+│  Step 8: IMPACT ANALYSIS                                                    │
+│                                                                             │
+│  ← Skip this entire block with --quick / -g=n                               │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    ↓
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  Step 9: READY (Implementation - Edit/Write allowed)                        │
+│      ↓                                                                      │
+│  Step 9.5: POST_IMPLEMENTATION_VERIFICATION    ← skip with --no-verify      │
+│      ↓ (loop back to Step 9 on failure)                                     │
+│  Step 10: PRE_COMMIT (Garbage Detection) [if overlay enabled]               │
+│      ↓                                                                      │
+│  Step 11: Finalize & Merge [if overlay enabled]                             │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
+
+### Step Reference
+
+| Step | Phase | Description |
+|------|-------|-------------|
+| -1 | Flag Check | Parse command options (--quick, --no-verify, etc.) |
+| 0 | Failure Check | Auto-detect if previous fix failed |
+| 1 | Intent | Classify as IMPLEMENT/MODIFY/INVESTIGATE/QUESTION |
+| 2 | Session Start | Initialize session, load context, setup overlay |
+| 3 | QueryFrame | Extract structured slots from natural language |
+| 4 | EXPLORATION | Explore codebase with code-intel tools |
+| 5 | Symbol Validation | Verify NL→Symbol relevance via Embedding |
+| 6 | SEMANTIC | Semantic search for missing info (if needed) |
+| 7 | VERIFICATION | Verify hypotheses with actual code (if needed) |
+| 8 | IMPACT ANALYSIS | Analyze affected files before implementation |
+| 9 | READY | Implementation allowed (Edit/Write) |
+| 9.5 | POST_IMPL_VERIFY | Run verifier prompts (Playwright/pytest) |
+| 10 | PRE_COMMIT | Review changes, discard garbage |
+| 11 | Finalize | Commit and merge to main |
+
+---
+
+## Step -1: Flag Check
+
+**Purpose:** Detect if the user is invoking a flag option instead of a regular implementation request.
+
+**Check $ARGUMENTS for flags:**
+
+| Long | Short | Action |
+|------|-------|--------|
+| `--clean` | `-c` | Execute cleanup and exit (see Flags section) |
+| `--no-verify` | - | Skip post-implementation verification |
+| `--only-verify` | `-v` | Run verification only (skip implementation) |
+| `--gate=LEVEL` | `-g=LEVEL` | Set gate level: `h`igh, `m`iddle, `l`ow, `a`uto, `n`one |
+| `--quick` | `-q` | Skip exploration phases (= `--gate=none`) |
+
+**Default behavior (no flags):** gate=high + implementation + verification (full mode)
+
+**Flag processing:**
+
+1. **If `--clean` or `-c` detected:**
+   - Execute the cleanup action
+   - Report result to user
+   - **Do NOT proceed to Step 0**
+
+2. **If `--only-verify` or `-v` detected:**
+   - Skip to Step 9.5 (POST_IMPLEMENTATION_VERIFICATION)
+   - Run verification on existing code
+   - **Do NOT proceed to Step 0**
+
+3. **If `--no-verify` detected:**
+   - Note that verification is disabled (skip Step 9.5)
+   - Remove flag and continue to Step 0
+
+4. **If `--gate=LEVEL` or `-g=LEVEL` detected:**
+   - Set gate level for exploration phases
+   - `none` / `n`: Skip exploration (Step 4-8), go directly to READY
+   - `low` / `l`: Minimal exploration requirements
+   - `middle` / `m`: Standard requirements
+   - `high` / `h`: Strict requirements (default)
+   - `auto` / `a`: Server determines based on risk
+
+5. **If `--quick` or `-q` detected:**
+   - Equivalent to `--gate=none`
+   - Skip exploration phases, go directly to READY
+
+**If NO flag detected:** Proceed to Step 0 with defaults (gate=high, verify=true).
 
 ---
 
@@ -111,6 +188,7 @@ Analyze user instructions and output in the following format:
 mcp__code-intel__start_session
   intent: "IMPLEMENT"
   query: "user's original request"
+  enable_overlay: true  # v1.2: Enable garbage detection
 ```
 
 **Response:**
@@ -126,9 +204,30 @@ mcp__code-intel__start_session
     "project_rules": {...}
   },
   "context_update_required": {...},
-  "query_frame": {...}
+  "query_frame": {...},
+  "overlay": {
+    "enabled": true,
+    "branch": "llm_task_abc123",
+    "merged_path": "/path/to/.overlay/merged/abc123",
+    "upper_path": "/path/to/.overlay/upper/abc123",
+    "note": "All file operations should use merged_path as working directory."
+  }
 }
 ```
+
+### v1.2: OverlayFS Integration
+
+**When `enable_overlay: true`:**
+1. Creates git branch: `llm_task_{session_id}`
+2. Mounts OverlayFS with current state as lower
+3. All changes are captured in `upper_path`
+4. Changes can be reviewed before commit (PRE_COMMIT phase)
+
+**Requirements:**
+- `fuse-overlayfs` installed: `sudo apt-get install -y fuse-overlayfs`
+- Git repository initialized
+
+**Note:** If overlay setup fails, session continues without overlay. Garbage detection will not be available.
 
 ### Step 2.1: Context Update (if needed)
 
@@ -525,6 +624,160 @@ mcp__code-intel__revert_to_exploration
 
 ---
 
+## Step 9.5: POST_IMPLEMENTATION_VERIFICATION (default, skip with --no-verify)
+
+**When executed:** After implementation in READY phase (default behavior, skipped if `--no-verify` flag specified)
+
+**Purpose:** Run verification to ensure implementation works correctly before proceeding to PRE_COMMIT
+
+### 9.5.1: Select Verifier
+
+**Available verifiers in `.code-intel/verifiers/`:**
+
+| File | Use Case |
+|------|----------|
+| `backend.md` | Backend code (API, logic, database) - uses pytest/npm test |
+| `html_css.md` | Frontend UI (HTML/CSS changes) - uses Playwright |
+| `generic.md` | Other files (config, docs, etc.) |
+
+**Selection logic based on modified files:**
+- `.py`, `.js`, `.ts`, `.php` (non-UI) → `backend.md`
+- `.html`, `.css`, `.scss`, `.vue`, `.jsx`, `.tsx` (UI) → `html_css.md`
+- Config/docs/other → `generic.md`
+- Mixed → Use primary category or run multiple
+
+### 9.5.2: Execute Verification
+
+1. Read the selected verifier prompt:
+   ```
+   Read .code-intel/verifiers/{category}.md
+   ```
+
+2. Execute the verification instructions from the prompt
+
+3. Report result: "検証成功" or "検証失敗"
+
+### 9.5.3: Handle Result
+
+**On "検証成功":**
+→ Proceed to Step 10 (PRE_COMMIT)
+
+**On "検証失敗":**
+1. Analyze the failure
+2. Return to Step 9 (READY) to fix the issue
+3. After fix, return to Step 9.5 to re-verify
+4. Loop until verification passes
+
+**Loop limit:** If verification fails 3 times consecutively, ask user for guidance.
+
+---
+
+## Step 10: PRE_COMMIT Phase (v1.2, Garbage Detection)
+
+**When executed:** After implementation in READY phase, when overlay is enabled
+
+**Purpose:** Review all changes before commit to detect and discard garbage (debug logs, commented code, unrelated modifications)
+
+### 10.1: Submit for Review
+
+```
+mcp__code-intel__submit_for_review
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "next_phase": "PRE_COMMIT",
+  "message": "Implementation complete. Now in PRE_COMMIT phase for garbage detection."
+}
+```
+
+### 10.2: Review Changes
+
+```
+mcp__code-intel__review_changes
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "total_changes": 5,
+  "changes": [
+    {
+      "path": "auth/service.py",
+      "change_type": "modified",
+      "diff": "--- a/auth/service.py\n+++ b/auth/service.py\n..."
+    },
+    {
+      "path": "debug.log",
+      "change_type": "added",
+      "diff": "+++ b/debug.log\n+DEBUG: test output..."
+    }
+  ],
+  "review_prompt": "Review each change and decide: keep or discard..."
+}
+```
+
+**Garbage Indicators:**
+- Debug logs (`console.log`, `print()` statements for debugging)
+- Commented out code
+- Test files not requested
+- Unrelated modifications
+- Temporary hacks / workarounds
+
+### 10.3: Finalize Changes
+
+```
+mcp__code-intel__finalize_changes
+  reviewed_files: [
+    {"path": "auth/service.py", "decision": "keep"},
+    {"path": "debug.log", "decision": "discard", "reason": "Debug output not needed"}
+  ]
+  commit_message: "Add authentication validation"
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "commit_hash": "abc123",
+  "kept_files": ["auth/service.py"],
+  "discarded_files": ["debug.log"],
+  "branch": "llm_task_session_123",
+  "overlay_cleaned": true,
+  "message": "Changes finalized. Committed to llm_task_session_123. Overlay unmounted."
+}
+```
+
+---
+
+## Step 11: Merge to Main (v1.2, Optional)
+
+**Purpose:** Merge task branch to main branch and delete task branch
+
+```
+mcp__code-intel__merge_to_main
+  main_branch: "main"
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "merged": true,
+  "branch_deleted": true,
+  "from_branch": "llm_task_session_123",
+  "to_branch": "main",
+  "message": "Successfully merged llm_task_session_123 to main. Branch deleted."
+}
+```
+
+**Note:** After successful merge, task branch is automatically deleted.
+
+---
+
 ## Utilities
 
 ### Check current phase
@@ -554,14 +807,72 @@ mcp__code-intel__get_session_status
 
 ---
 
+## Flags
+
+### /code --clean - Cleanup stale overlays
+
+Clean up stale overlay sessions from interrupted runs.
+
+```
+/code --clean
+```
+
+**Action:**
+```
+mcp__code-intel__cleanup_stale_overlays
+  repo_path: "."
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "unmounted": [".overlay/merged/session_123"],
+  "removed_dirs": [".overlay/upper/session_123", ...],
+  "deleted_branches": ["llm_task_session_123"],
+  "message": "Cleaned up 1 stale mounts, 3 directories, 1 branches."
+}
+```
+
+**When to use:**
+- After interrupting a session (Ctrl+C, crash, etc.)
+- When `start_session` fails with "Session already active" error
+- When stale `llm_task_*` branches remain
+
+---
+
 ## Usage Examples
 
 ```
+# Full mode (default): gate=high + impl + verify
 /code add login feature
-/code fix this bug: error message not displayed
-/code explain how the Router class works
+
+# Skip verification
+/code --no-verify fix this bug
+
+# Verification only (check existing implementation)
+/code -v sample/hello.html
+
+# Quick mode (skip exploration, impl + verify only)
+/code -q change the button color to blue
+
+# Set gate level explicitly
+/code -g=m add password validation
+
+# Cleanup stale overlays
+/code -c
 ```
+
+## Command Options Reference
+
+| Long | Short | Description |
+|------|-------|-------------|
+| `--no-verify` | - | Skip post-implementation verification |
+| `--only-verify` | `-v` | Run verification only |
+| `--gate=LEVEL` | `-g=LEVEL` | Gate level: h(igh), m(iddle), l(ow), a(uto), n(one) |
+| `--quick` | `-q` | Skip exploration (= `-g=n`) |
+| `--clean` | `-c` | Cleanup stale overlays |
 
 ## Arguments
 
-$ARGUMENTS - Instructions from the user
+$ARGUMENTS - Instructions from the user (with optional flags)

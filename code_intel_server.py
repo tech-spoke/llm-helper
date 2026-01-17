@@ -57,6 +57,7 @@ from tools.chromadb_manager import (
     ChromaDBManager, SearchResult, SearchHit,
     CHROMADB_AVAILABLE,
 )
+from tools.overlay_manager import OverlayManager
 
 
 # Create MCP server, router, and session manager
@@ -66,6 +67,9 @@ session_manager = SessionManager()
 
 # ChromaDB manager cache (per project)
 _chromadb_managers: dict[str, ChromaDBManager] = {}
+
+# v1.2: Overlay manager cache (per session)
+_overlay_managers: dict[str, OverlayManager] = {}
 
 
 def get_chromadb_manager(project_root: str = ".") -> ChromaDBManager:
@@ -486,7 +490,9 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="start_session",
             description="Start a new code implementation session with phase-gated execution. "
-                        "After calling this, extract QueryFrame using the prompt, then call set_query_frame.",
+                        "After calling this, extract QueryFrame using the prompt, then call set_query_frame. "
+                        "v1.2: Optional enable_overlay for garbage detection via OverlayFS. "
+                        "v1.2: gate_level controls exploration phase requirements (none skips to READY).",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -503,6 +509,17 @@ async def list_tools() -> list[Tool]:
                         "type": "string",
                         "description": "Project root path for agreements and learned_pairs (default: '.')",
                         "default": ".",
+                    },
+                    "enable_overlay": {
+                        "type": "boolean",
+                        "description": "v1.2: Enable OverlayFS for garbage detection. Creates task branch and mounts overlay. Requires fuse-overlayfs.",
+                        "default": False,
+                    },
+                    "gate_level": {
+                        "type": "string",
+                        "enum": ["high", "middle", "low", "auto", "none"],
+                        "description": "v1.2: Gate level for exploration phases. 'none' skips exploration and goes directly to READY (--quick / -g=n).",
+                        "default": "high",
                     },
                 },
                 "required": ["intent", "query"],
@@ -751,6 +768,85 @@ async def list_tools() -> list[Tool]:
                         "type": "boolean",
                         "default": True,
                         "description": "Keep existing exploration results (default: true)",
+                    },
+                },
+            },
+        ),
+        # v1.2: PRE_COMMIT phase tools for garbage detection
+        Tool(
+            name="submit_for_review",
+            description="Transition from READY to PRE_COMMIT phase for garbage detection. "
+                        "Call this after implementation is complete to review changes before commit. "
+                        "Requires overlay to be enabled.",
+            inputSchema={
+                "type": "object",
+                "properties": {},
+            },
+        ),
+        Tool(
+            name="review_changes",
+            description="Get all changes captured in the overlay for garbage review. "
+                        "Returns list of changed files with diffs for LLM to review.",
+            inputSchema={
+                "type": "object",
+                "properties": {},
+            },
+        ),
+        Tool(
+            name="finalize_changes",
+            description="Apply reviewed changes and commit to task branch. "
+                        "Call after review_changes with decisions about which files to keep/discard.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "reviewed_files": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "path": {"type": "string"},
+                                "decision": {"type": "string", "enum": ["keep", "discard"]},
+                                "reason": {"type": "string"},
+                            },
+                            "required": ["path", "decision"],
+                        },
+                        "description": "List of file decisions. Discard requires reason.",
+                    },
+                    "commit_message": {
+                        "type": "string",
+                        "description": "Commit message for the changes",
+                    },
+                },
+                "required": ["reviewed_files"],
+            },
+        ),
+        Tool(
+            name="merge_to_main",
+            description="Merge task branch to main branch. "
+                        "Call after finalize_changes if merge to main is desired.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "main_branch": {
+                        "type": "string",
+                        "description": "Target branch to merge into (default: 'main')",
+                        "default": "main",
+                    },
+                },
+            },
+        ),
+        Tool(
+            name="cleanup_stale_overlays",
+            description="Clean up stale overlay sessions from interrupted runs. "
+                        "Use when overlay mounts or task branches remain after session interruption. "
+                        "Unmounts stale overlays and deletes orphaned task branches.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "repo_path": {
+                        "type": "string",
+                        "description": "Repository path to clean up (default: current directory)",
+                        "default": ".",
                     },
                 },
             },
@@ -1067,15 +1163,26 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         intent = arguments["intent"]
         query = arguments["query"]
         repo_path = arguments.get("repo_path", ".")
+        enable_overlay = arguments.get("enable_overlay", False)
+        gate_level = arguments.get("gate_level", "high")
 
         session = session_manager.create_session(
             intent=intent,
             query=query,
             repo_path=repo_path,
+            gate_level=gate_level,
         )
 
         # Get extraction prompt for QueryFrame
         extraction_prompt = QueryDecomposer.get_extraction_prompt(query)
+
+        # v1.2: Determine message based on gate_level
+        if gate_level == "none":
+            phase_message = f"Session started with gate=none. Exploration skipped, Phase: {session.phase.name} (READY)"
+            next_step_message = "Proceed directly to implementation. Call set_query_frame for context, then Edit/Write."
+        else:
+            phase_message = f"Session started. Phase: {session.phase.name}"
+            next_step_message = "Extract slots from query using the prompt, then call set_query_frame."
 
         result = {
             "success": True,
@@ -1084,14 +1191,58 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             "current_phase": session.phase.name,
             "allowed_tools": session.get_allowed_tools(),
             "repo_path": session.repo_path,  # v3.8
-            "message": f"Session started. Phase: {session.phase.name}",
+            "gate_level": gate_level,  # v1.2
+            "message": phase_message,
             # v3.6: QueryFrame extraction
             "query_frame": {
                 "status": "pending",
                 "extraction_prompt": extraction_prompt,
-                "next_step": "Extract slots from query using the prompt, then call set_query_frame.",
+                "next_step": next_step_message,
             },
         }
+
+        # v1.2: OverlayFS integration for garbage detection
+        if enable_overlay:
+            try:
+                overlay_manager = OverlayManager(repo_path)
+                setup_result = await overlay_manager.setup_session(session.session_id)
+
+                if setup_result.success:
+                    # Store overlay info in session
+                    session.overlay_enabled = True
+                    session.overlay_branch = setup_result.branch_name
+                    session.overlay_merged_path = setup_result.merged_path
+                    session.overlay_upper_path = setup_result.upper_path
+
+                    # Cache overlay manager for this session
+                    _overlay_managers[session.session_id] = overlay_manager
+
+                    result["overlay"] = {
+                        "enabled": True,
+                        "branch": setup_result.branch_name,
+                        "merged_path": setup_result.merged_path,
+                        "upper_path": setup_result.upper_path,
+                        "note": "All file operations should use merged_path as working directory. "
+                                "Changes are captured in upper_path for garbage detection.",
+                    }
+                else:
+                    result["overlay"] = {
+                        "enabled": False,
+                        "error": setup_result.error,
+                        "note": "Overlay setup failed. Proceeding without garbage detection. "
+                                "Install fuse-overlayfs: sudo apt-get install -y fuse-overlayfs",
+                    }
+            except Exception as e:
+                result["overlay"] = {
+                    "enabled": False,
+                    "error": str(e),
+                    "note": "Overlay setup failed. Proceeding without garbage detection.",
+                }
+        else:
+            result["overlay"] = {
+                "enabled": False,
+                "note": "Overlay not enabled. Set enable_overlay=true to enable garbage detection.",
+            }
 
         # v1.1: Essential context provision (design docs + project rules)
         try:
@@ -1409,6 +1560,213 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             result = session.revert_to_exploration(
                 keep_results=arguments.get("keep_results", True),
             )
+        return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+
+    # v1.2: PRE_COMMIT phase tools
+    elif name == "submit_for_review":
+        session = session_manager.get_active_session()
+        if session is None:
+            result = {"error": "no_active_session", "message": "No active session."}
+        else:
+            result = session.submit_for_review()
+        return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+
+    elif name == "review_changes":
+        session = session_manager.get_active_session()
+        if session is None:
+            result = {"error": "no_active_session", "message": "No active session."}
+            return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+
+        if session.phase != Phase.PRE_COMMIT:
+            result = {
+                "error": "phase_blocked",
+                "current_phase": session.phase.name,
+                "message": f"review_changes only allowed in PRE_COMMIT phase, current: {session.phase.name}",
+            }
+            return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+
+        if not session.overlay_enabled:
+            result = {
+                "error": "overlay_not_enabled",
+                "message": "Overlay not enabled. Cannot review changes without overlay.",
+            }
+            return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+
+        # Get overlay manager for this session
+        overlay_manager = _overlay_managers.get(session.session_id)
+        if overlay_manager is None:
+            result = {
+                "error": "overlay_manager_not_found",
+                "message": "Overlay manager not found for this session.",
+            }
+            return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+
+        changes = await overlay_manager.get_changes()
+
+        result = {
+            "success": True,
+            "session_id": session.session_id,
+            "total_changes": changes.total_files,
+            "total_size_bytes": changes.total_size_bytes,
+            "changes": [
+                {
+                    "path": c.path,
+                    "change_type": c.change_type,
+                    "is_binary": c.is_binary,
+                    "size_bytes": c.size_bytes,
+                    "diff": c.diff,
+                }
+                for c in changes.changes
+            ],
+            "review_prompt": (
+                "Review each change and decide: keep (necessary for the task) or discard (garbage). "
+                "Garbage indicators: debug logs, console.log, commented code, test files not requested, "
+                "unrelated modifications, temporary hacks."
+            ),
+        }
+        return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+
+    elif name == "finalize_changes":
+        session = session_manager.get_active_session()
+        if session is None:
+            result = {"error": "no_active_session", "message": "No active session."}
+            return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+
+        if session.phase != Phase.PRE_COMMIT:
+            result = {
+                "error": "phase_blocked",
+                "current_phase": session.phase.name,
+                "message": f"finalize_changes only allowed in PRE_COMMIT phase, current: {session.phase.name}",
+            }
+            return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+
+        if not session.overlay_enabled:
+            result = {
+                "error": "overlay_not_enabled",
+                "message": "Overlay not enabled. Cannot finalize changes without overlay.",
+            }
+            return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+
+        # Get overlay manager for this session
+        overlay_manager = _overlay_managers.get(session.session_id)
+        if overlay_manager is None:
+            result = {
+                "error": "overlay_manager_not_found",
+                "message": "Overlay manager not found for this session.",
+            }
+            return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+
+        # Process reviewed files
+        reviewed_files = arguments.get("reviewed_files", [])
+        commit_message = arguments.get("commit_message")
+
+        # Submit review to session
+        review_result = session.submit_pre_commit_review(
+            reviewed_files=reviewed_files,
+            review_notes=commit_message or "",
+        )
+
+        if not review_result.get("success"):
+            return [TextContent(type="text", text=json.dumps(review_result, indent=2, ensure_ascii=False))]
+
+        # Apply changes using overlay manager
+        finalize_result = await overlay_manager.finalize(
+            keep_files=review_result.get("kept_files"),
+            discard_files=review_result.get("discarded_files"),
+            commit_message=commit_message,
+        )
+
+        if finalize_result.success:
+            # Cleanup overlay (unmount) after finalize
+            await overlay_manager.cleanup()
+
+            result = {
+                "success": True,
+                "commit_hash": finalize_result.commit_hash,
+                "kept_files": finalize_result.kept_files,
+                "discarded_files": finalize_result.discarded_files,
+                "branch": session.overlay_branch,
+                "overlay_cleaned": True,
+                "message": f"Changes finalized. Committed to {session.overlay_branch}. Overlay unmounted.",
+                "next_step": "Call merge_to_main if you want to merge to main branch, or record_outcome to record result.",
+            }
+        else:
+            result = {
+                "success": False,
+                "error": finalize_result.error,
+                "kept_files": finalize_result.kept_files,
+                "discarded_files": finalize_result.discarded_files,
+            }
+
+        return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+
+    elif name == "merge_to_main":
+        session = session_manager.get_active_session()
+        if session is None:
+            result = {"error": "no_active_session", "message": "No active session."}
+            return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+
+        if not session.overlay_enabled:
+            result = {
+                "error": "overlay_not_enabled",
+                "message": "Overlay not enabled. Cannot merge without overlay.",
+            }
+            return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+
+        # Get overlay manager for this session
+        overlay_manager = _overlay_managers.get(session.session_id)
+        if overlay_manager is None:
+            result = {
+                "error": "overlay_manager_not_found",
+                "message": "Overlay manager not found for this session.",
+            }
+            return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+
+        main_branch = arguments.get("main_branch", "main")
+        merge_result = await overlay_manager.merge_to_main(main_branch)
+
+        if merge_result["success"]:
+            # Cleanup overlay after successful merge
+            await overlay_manager.cleanup()
+            del _overlay_managers[session.session_id]
+
+            result = {
+                "success": True,
+                "merged": True,
+                "branch_deleted": merge_result.get("branch_deleted", False),
+                "from_branch": session.overlay_branch,
+                "to_branch": main_branch,
+                "message": f"Successfully merged {session.overlay_branch} to {main_branch}." +
+                          (" Branch deleted." if merge_result.get("branch_deleted") else ""),
+                "next_step": "Call record_outcome to record the result.",
+            }
+        else:
+            result = {
+                "success": False,
+                "merged": False,
+                "branch_deleted": False,
+                "error": merge_result.get("error"),
+            }
+
+        return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+
+    elif name == "cleanup_stale_overlays":
+        # v1.2: Clean up stale overlay sessions from interrupted runs
+        repo_path = arguments.get("repo_path", ".")
+
+        cleanup_result = await OverlayManager.cleanup_stale_sessions(repo_path)
+
+        result = {
+            "success": True,
+            "unmounted": cleanup_result.get("unmounted", []),
+            "removed_dirs": cleanup_result.get("removed_dirs", []),
+            "deleted_branches": cleanup_result.get("deleted_branches", []),
+            "errors": cleanup_result.get("errors", []),
+            "message": f"Cleaned up {len(cleanup_result.get('unmounted', []))} stale mounts, "
+                      f"{len(cleanup_result.get('removed_dirs', []))} directories, "
+                      f"{len(cleanup_result.get('deleted_branches', []))} branches.",
+        }
+
         return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
     elif name == "record_outcome":

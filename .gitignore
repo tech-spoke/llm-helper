@@ -43,3 +43,6 @@ config.json
 docs/old/
 
 qiita/
+
+# OverlayFS session directories
+.overlay/

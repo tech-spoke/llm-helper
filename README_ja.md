@@ -1,4 +1,4 @@
-# Code Intelligence MCP Server v1.1
+# Code Intelligence MCP Server v1.2
 
 Cursor IDE のようなコードインテリジェンス機能をオープンソースツールで実現する MCP サーバー。
 
@@ -34,6 +34,7 @@ LLM に判断をさせない。守らせるのではなく、守らないと進�
 | プロジェクト分離 | 各プロジェクトごとに独立した学習データ |
 | 必須コンテキスト（v1.1） | セッション開始時に設計ドキュメントとプロジェクトルールを自動提供 |
 | 影響範囲分析（v1.1） | READY フェーズ前に影響確認を強制 |
+| ゴミ分離（v1.2） | OverlayFS + Git ブランチで変更を隔離、clean で一括破棄 |
 
 ---
 
@@ -81,21 +82,46 @@ LLM に判断をさせない。守らせるのではなく、守らないと進�
 
 ## フェーズゲート
 
+### 完全なフロー
+
 ```
-EXPLORATION → SEMANTIC → VERIFICATION → IMPACT ANALYSIS → READY
-     ↓           ↓           ↓               ↓               ↓
-  code-intel  semantic    検証          analyze_impact   実装許可
-   ツール      search     (確定)          (v1.1)
-             (仮説)
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  Flag Check → Failure Check → Intent → Session Start → QueryFrame           │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    ↓
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  EXPLORATION → Symbol Validation → SEMANTIC* → VERIFICATION* → IMPACT       │
+│       ↓              ↓                ↓             ↓            ↓          │
+│  code-intel     Embedding検証     semantic     コード検証   analyze_impact  │
+│   ツール         (NL→Symbol)       search       (仮説→確定)    (影響分析)    │
+│                                   (仮説)                                    │
+│                                                                             │
+│  * SEMANTIC/VERIFICATION は confidence=low の場合のみ                        │
+│  ← --quick / -g=n でこのブロック全体をスキップ                                │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    ↓
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  READY (実装) → POST_IMPLEMENTATION_VERIFICATION → PRE_COMMIT → Merge       │
+│       ↓                    ↓                           ↓           ↓        │
+│  Edit/Write           検証プロンプト実行            変更レビュー   mainへ    │
+│  （探索済みファイルのみ）  (Playwright/pytest等)      ゴミ除去      マージ    │
+│                                                                             │
+│  ← --no-verify で VERIFICATION をスキップ                                    │
+│  ← 検証失敗時は READY に戻ってループ                                          │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
+
+### フェーズ別ツール許可
 
 | フェーズ | 許可 | 禁止 |
 |----------|------|------|
-| EXPLORATION | code-intel ツール | semantic_search |
+| EXPLORATION | code-intel ツール (query, find_definitions, find_references, search_text) | semantic_search |
 | SEMANTIC | semantic_search | code-intel |
 | VERIFICATION | code-intel ツール | semantic_search |
-| IMPACT ANALYSIS | analyze_impact, code-intel | semantic_search |
-| READY | すべて | - |
+| IMPACT_ANALYSIS | analyze_impact, code-intel | semantic_search |
+| READY | Edit, Write（探索済みファイルのみ） | - |
+| POST_IMPL_VERIFY | 検証ツール (Playwright, pytest等) | - |
+| PRE_COMMIT | review_changes, finalize_changes | - |
 
 ---
 
@@ -249,9 +275,9 @@ project_rules:
 
 ---
 
-## アップグレード（v1.0 → v1.1）
+## アップグレード（v1.0 → v1.1 → v1.2）
 
-既存の v1.0 で初期化されたプロジェクトがある場合、以下の手順でアップグレードします：
+既存プロジェクトをアップグレードする手順：
 
 ### Step 1: llm-helper サーバーを更新
 
@@ -273,12 +299,14 @@ MCP サーバーを再読み込みするために再起動。
 
 ### 変更点
 
-| 項目 | v1.0 | v1.1 |
-|------|------|------|
-| フェーズ数 | 4 | 5（IMPACT_ANALYSIS 追加） |
-| context.yml | なし | 自動生成 |
-| 設計ドキュメント要約 | なし | セッション開始時に自動提供 |
-| プロジェクトルール | CLAUDE.md を手動参照 | セッション開始時に自動提供 |
+| 項目 | v1.0 | v1.1 | v1.2 |
+|------|------|------|------|
+| フェーズ数 | 4 | 5（IMPACT_ANALYSIS 追加） | 5 |
+| context.yml | なし | 自動生成 | 自動生成 |
+| 設計ドキュメント要約 | なし | セッション開始時に自動提供 | 同左 |
+| プロジェクトルール | CLAUDE.md を手動参照 | セッション開始時に自動提供 | 同左 |
+| ゴミ分離 | なし | なし | OverlayFS + Git ブランチ |
+| /code --clean | なし | なし | 変更の一括破棄 |
 
 ### 変更不要なもの
 
@@ -298,17 +326,70 @@ MCP サーバーを再読み込みするために再起動。
 /code AuthServiceのlogin関数でパスワードが空のときエラーが出ないバグを直して
 ```
 
+### コマンドオプション
+
+| Long | Short | 説明 |
+|------|-------|------|
+| `--no-verify` | - | 検証をスキップ |
+| `--only-verify` | `-v` | 検証のみ実行（実装スキップ） |
+| `--gate=LEVEL` | `-g=LEVEL` | ゲートレベル: h(igh), m(iddle), l(ow), a(uto), n(one) |
+| `--quick` | `-q` | 探索フェーズをスキップ（= `-g=n`） |
+| `--clean` | `-c` | stale オーバーレイのクリーンアップ |
+
+**デフォルト動作:** gate=high + 実装 + 検証（フルモード）
+
+#### 使用例
+
+```bash
+# フルモード（デフォルト）: gate=high + 実装 + 検証
+/code add login feature
+
+# 検証をスキップ
+/code --no-verify fix this bug
+
+# 検証のみ（既存実装のチェック）
+/code -v sample/hello.html
+
+# クイックモード（探索スキップ、実装 + 検証のみ）
+/code -q change the button color to blue
+
+# ゲートレベルを明示的に設定
+/code -g=m add password validation
+
+# stale オーバーレイのクリーンアップ
+/code -c
+```
+
+#### --clean オプション（v1.2）
+
+前回の作業で作成されたファイルを破棄してやり直す場合：
+
+```
+/code -c
+```
+
+`-c` / `--clean` を指定すると：
+- 現在の OverlayFS セッションの変更を破棄
+- Git ブランチ（`llm_task_*`）を削除
+- クリーンな状態から新しいセッションを開始
+
+**注意**: `fuse-overlayfs` がインストールされていない場合、OverlayFS 機能は無効になります。
+
+#### 通常の実行フロー
+
 スキルが自動的に：
-1. 失敗チェック（前回失敗を自動検出・記録）
-2. Intent 判定
-3. セッション開始（自動同期、必須コンテキスト）
-4. QueryFrame 抽出・検証
-5. EXPLORATION（find_definitions, find_references 等）
-6. シンボル検証（Embedding）
-7. 必要に応じて SEMANTIC
-8. VERIFICATION（仮説検証）
-9. IMPACT ANALYSIS（v1.1 - 影響範囲の分析）
-10. READY（実装）
+1. フラグチェック
+2. 失敗チェック（前回失敗を自動検出・記録）
+3. Intent 判定
+4. セッション開始（自動同期、必須コンテキスト）
+5. QueryFrame 抽出・検証
+6. EXPLORATION（find_definitions, find_references 等） ← `--quick` / `-g=n` でスキップ
+7. シンボル検証（Embedding） ← `--quick` / `-g=n` でスキップ
+8. 必要に応じて SEMANTIC ← `--quick` / `-g=n` でスキップ
+9. VERIFICATION（仮説検証） ← `--quick` / `-g=n` でスキップ
+10. IMPACT ANALYSIS（v1.1 - 影響範囲の分析） ← `--quick` / `-g=n` でスキップ
+11. READY（実装）
+12. POST_IMPLEMENTATION_VERIFICATION ← `--no-verify` でスキップ
 
 ### 直接ツールを呼び出す
 
@@ -352,6 +433,7 @@ mcp__code-intel__semantic_search でクエリ "ログイン機能" を検索し�
 | ripgrep (rg) | Yes | search_text, find_references |
 | universal-ctags | Yes | find_definitions, get_symbols |
 | Python 3.10+ | Yes | サーバー本体 |
+| fuse-overlayfs | No | ゴミ分離機能（v1.2、Linux のみ） |
 
 ### Python パッケージ
 
@@ -385,6 +467,7 @@ llm-helper/
 │   ├── outcome_log.py      ← 改善サイクルログ
 │   ├── context_provider.py ← 必須コンテキスト（v1.1）
 │   ├── impact_analyzer.py  ← 影響範囲分析（v1.1）
+│   ├── overlay_manager.py  ← OverlayFS ゴミ分離（v1.2）
 │   └── ...
 ├── setup.sh                ← サーバーセットアップ
 ├── init-project.sh         ← プロジェクト初期化

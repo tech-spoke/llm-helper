@@ -1,6 +1,7 @@
 # Code Intelligence MCP Server v1.0 設計ドキュメント
 
 > **v1.1 での追加機能については [v1.1 追加機能](#v11-追加機能) セクションを参照してください。**
+> **v1.2 での追加機能については [v1.2 追加機能](#v12-追加機能) セクションを参照してください。**
 
 ## 概要
 
@@ -388,6 +389,7 @@ essential_docs:
 - Universal Ctags
 - ripgrep
 - tree-sitter
+- fuse-overlayfs（v1.2 ゴミ検出機能用、オプション）
 
 ---
 
@@ -619,3 +621,66 @@ document_search:
 - ファイルあたりサンプル行: 最大3行
 
 **出力形式:** ファイル単位で集約（LLM が「このファイルを読むべきか」を判断しやすい形式）
+
+---
+
+## v1.2 追加機能
+
+v1.2 では以下の機能が追加されました。
+
+### OverlayFS によるゴミ検出
+
+実装前に OverlayFS をマウントし、すべての変更をキャプチャ。PRE_COMMIT フェーズで LLM がレビューし、不要なファイル（デバッグログ、コメントアウトなど）を破棄できます。
+
+**追加フェーズ:**
+
+```
+EXPLORATION → ... → READY → PRE_COMMIT → Finalize & Merge
+                              ↑
+                          v1.2 で追加
+```
+
+**必要なツール:**
+```bash
+sudo apt-get install -y fuse-overlayfs
+```
+
+**動作フロー:**
+
+1. `start_session` で `enable_overlay: true` を指定
+2. Git ブランチ `llm_task_{session_id}` を作成
+3. OverlayFS をマウント（変更は `.overlay/upper/` にキャプチャ）
+4. READY フェーズで実装（`merged_path` 配下で作業）
+5. `submit_for_review` → PRE_COMMIT フェーズへ
+6. `review_changes` で差分を確認
+7. `finalize_changes` でゴミを破棄、必要なファイルのみコミット
+8. `merge_to_main` でメインブランチにマージ
+
+**ゴミの例:**
+- デバッグ用の `console.log` / `print()` 文
+- コメントアウトされたコード
+- 依頼されていないテストファイル
+- 無関係な修正
+
+**並行セッション対応:**
+
+複数の LLM セッションが同時に起動した場合、`checkout` + `mount` の間のみ排他ロックを取得します。マウント完了後は各セッションが独立して動作します。
+
+```
+Session A: [Lock] checkout → mount [Unlock] → 作業 → finalize
+Session B:        (待機)   [Lock] checkout → mount [Unlock] → 作業 → ...
+```
+
+### /code --clean フラグ
+
+中断されたセッションの残骸をクリーンアップするフラグ。
+
+```bash
+/code --clean
+```
+
+**クリーンアップ対象:**
+- stale なオーバーレイマウント
+- `.overlay/` 配下のディレクトリ
+- `llm_task_*` ブランチ
+- ロックファイル
