@@ -1,4 +1,6 @@
-# Code Intelligence MCP Server v1.2
+# Code Intelligence MCP Server
+
+> **Current Version: v1.3**
 
 An MCP server that provides Cursor IDE-like code intelligence capabilities using open source tools.
 
@@ -35,6 +37,8 @@ And have a mechanism to learn from failures.
 | Essential Context (v1.1) | Auto-provide design docs and project rules at session start |
 | Impact Analysis (v1.1) | Enforce impact verification before READY phase |
 | Garbage Isolation (v1.2) | Isolate changes with OverlayFS + Git branch, bulk discard with --clean |
+| Document Research (v1.3) | Sub-agent research of design docs for task-specific rules |
+| Markup Cross-Reference (v1.3) | Lightweight CSS/HTML/JS cross-reference analysis |
 
 ---
 
@@ -135,8 +139,10 @@ And have a mechanism to learn from failures.
 | `find_definitions` | Symbol definition search (ctags) |
 | `find_references` | Symbol reference search (ripgrep) |
 | `search_text` | Text search (ripgrep) |
+| `search_files` | File pattern search (glob) |
 | `analyze_structure` | Code structure analysis (tree-sitter) |
 | `get_symbols` | Get symbol list |
+| `get_function_at_line` | Get function at specific line |
 | `sync_index` | Index source code to ChromaDB |
 | `semantic_search` | Unified vector search of map/forest |
 | `analyze_impact` | Analyze impact of changes (v1.1) |
@@ -150,11 +156,24 @@ And have a mechanism to learn from failures.
 | `get_session_status` | Check current phase/status |
 | `submit_understanding` | Complete EXPLORATION |
 | `validate_symbol_relevance` | Embedding verification |
+| `confirm_symbol_relevance` | Confirm symbol validation results |
 | `submit_semantic` | Complete SEMANTIC |
 | `submit_verification` | Complete VERIFICATION |
+| `submit_impact_analysis` | Complete IMPACT_ANALYSIS (v1.1) |
 | `check_write_target` | Check write permission |
 | `add_explored_files` | Add explored files |
 | `revert_to_exploration` | Return to EXPLORATION |
+| `update_context` | Update context summaries (v1.1) |
+
+### Garbage Detection (v1.2)
+
+| Tool | Purpose |
+|------|---------|
+| `submit_for_review` | Transition to PRE_COMMIT phase |
+| `review_changes` | Show all file changes |
+| `finalize_changes` | Keep/discard files and commit |
+| `merge_to_main` | Merge task branch to main |
+| `cleanup_stale_overlays` | Clean up interrupted sessions |
 
 ### Improvement Cycle
 
@@ -197,9 +216,12 @@ This creates:
 your-project/
 └── .code-intel/
     ├── config.json       ← Configuration
+    ├── context.yml       ← Essential context (v1.1, auto-generated)
     ├── chroma/           ← ChromaDB data (auto-generated)
     ├── agreements/       ← Agreements directory
-    └── logs/             ← DecisionLog, OutcomeLog
+    ├── logs/             ← DecisionLog, OutcomeLog
+    ├── verifiers/        ← Verification prompts
+    └── doc_research/     ← Document research prompts (v1.3)
 ```
 
 ### Step 3: Configure .mcp.json
@@ -275,7 +297,7 @@ project_rules:
 
 ---
 
-## Upgrade (v1.0 → v1.1 → v1.2)
+## Upgrade (v1.0 → v1.1 → v1.2 → v1.3)
 
 Steps to upgrade existing projects:
 
@@ -293,20 +315,53 @@ git pull
 cp /path/to/llm-helper/.claude/commands/*.md /path/to/your-project/.claude/commands/
 ```
 
-### Step 3: Restart Claude Code
+### Step 3: Add New Directories (v1.3)
+
+Create new directories and copy templates:
+
+```bash
+# Create new directories
+mkdir -p /path/to/your-project/.code-intel/logs
+mkdir -p /path/to/your-project/.code-intel/verifiers
+mkdir -p /path/to/your-project/.code-intel/doc_research
+
+# Copy verifier templates
+cp /path/to/llm-helper/.code-intel/verifiers/*.md /path/to/your-project/.code-intel/verifiers/
+
+# Copy doc_research prompts
+cp /path/to/llm-helper/.code-intel/doc_research/*.md /path/to/your-project/.code-intel/doc_research/
+```
+
+### Step 4: Update context.yml (v1.3)
+
+Add `doc_research` section to your `.code-intel/context.yml`:
+
+```yaml
+# Document research settings (v1.3)
+doc_research:
+  enabled: true
+  docs_path:
+    - "docs/"
+  default_prompts:
+    - "default.md"
+```
+
+### Step 5: Restart Claude Code
 
 Restart to reload the MCP server.
 
 ### What Changes
 
-| Item | v1.0 | v1.1 | v1.2 |
-|------|------|------|------|
-| Phases | 4 | 5 (IMPACT_ANALYSIS added) | 5 |
-| context.yml | None | Auto-generated | Auto-generated |
-| Design docs summary | None | Auto-provided at session start | Same |
-| Project rules | Manual CLAUDE.md reference | Auto-provided at session start | Same |
-| Garbage isolation | None | None | OverlayFS + Git branch |
-| /code --clean | None | None | Bulk discard changes |
+| Item | v1.0 | v1.1 | v1.2 | v1.3 |
+|------|------|------|------|------|
+| Phases | 4 | 5 (IMPACT_ANALYSIS added) | 6 (PRE_COMMIT added) | 6 (DOCUMENT_RESEARCH step added) |
+| context.yml | None | Auto-generated | Auto-generated | doc_research added |
+| Design docs summary | None | Auto-provided at session start | Same | Sub-agent research |
+| Project rules | Manual CLAUDE.md reference | Auto-provided at session start | Same | Two-layer context |
+| Garbage isolation | None | None | OverlayFS + Git branch | Same |
+| Markup analysis | None | Relaxation only | Same | Cross-reference detection |
+| verifiers/ | None | None | None | Verification prompts |
+| doc_research/ | None | None | None | Research prompts |
 
 ### No Changes Required
 
@@ -334,14 +389,17 @@ The `context.yml` file will be automatically created on next session start.
 | `--only-verify` | `-v` | Run verification only (skip implementation) |
 | `--gate=LEVEL` | `-g=LEVEL` | Gate level: h(igh), m(iddle), l(ow), a(uto), n(one) |
 | `--quick` | `-q` | Skip exploration phases (= `-g=n`) |
+| `--doc-research=PROMPTS` | - | Specify document research prompts (v1.3) |
+| `--no-doc-research` | - | Skip document research (v1.3) |
 | `--clean` | `-c` | Cleanup stale overlays |
+| `--rebuild` | `-r` | Force full re-index |
 
 **Default behavior:** gate=high + implementation + verification (full mode)
 
 #### Examples
 
 ```bash
-# Full mode (default): gate=high + impl + verify
+# Full mode (default): gate=high + doc-research + impl + verify
 /code add login feature
 
 # Skip verification
@@ -356,8 +414,17 @@ The `context.yml` file will be automatically created on next session start.
 # Set gate level explicitly
 /code -g=m add password validation
 
+# Document research with specific prompts (v1.3)
+/code --doc-research=security add authentication
+
+# Skip document research (v1.3)
+/code --no-doc-research fix typo
+
 # Cleanup stale overlays
 /code -c
+
+# Force full re-index
+/code -r
 ```
 
 #### --clean Option (v1.2)
@@ -382,14 +449,15 @@ The skill automatically:
 2. Failure check (auto-detect and record previous failures)
 3. Intent determination
 4. Session start (auto-sync, essential context)
-5. QueryFrame extraction and verification
-6. EXPLORATION (find_definitions, find_references, etc.) ← skip with `--quick` / `-g=n`
-7. Symbol verification (Embedding) ← skip with `--quick` / `-g=n`
-8. SEMANTIC if needed ← skip with `--quick` / `-g=n`
-9. VERIFICATION (hypothesis verification) ← skip with `--quick` / `-g=n`
-10. IMPACT ANALYSIS (v1.1 - analyze affected files) ← skip with `--quick` / `-g=n`
-11. READY (implementation)
-12. POST_IMPLEMENTATION_VERIFICATION ← skip with `--no-verify`
+5. DOCUMENT_RESEARCH (v1.3 - sub-agent doc research) ← skip with `--no-doc-research`
+6. QueryFrame extraction and verification
+7. EXPLORATION (find_definitions, find_references, etc.) ← skip with `--quick` / `-g=n`
+8. Symbol verification (Embedding) ← skip with `--quick` / `-g=n`
+9. SEMANTIC if needed ← skip with `--quick` / `-g=n`
+10. VERIFICATION (hypothesis verification) ← skip with `--quick` / `-g=n`
+11. IMPACT ANALYSIS (v1.1 - analyze affected files) ← skip with `--quick` / `-g=n`
+12. READY (implementation)
+13. POST_IMPLEMENTATION_VERIFICATION ← skip with `--no-verify`
 
 ### Direct tool invocation
 
@@ -486,6 +554,8 @@ your-project/
 │   ├── chroma/             ← ChromaDB data
 │   ├── agreements/         ← Success pairs
 │   ├── logs/               ← DecisionLog, OutcomeLog
+│   ├── verifiers/          ← Verification prompts
+│   ├── doc_research/       ← Document research prompts (v1.3)
 │   └── sync_state.json
 ├── .claude/commands/       ← Skills (optional copy)
 └── src/                    ← Your source code
@@ -497,10 +567,21 @@ your-project/
 
 | Document | Content |
 |----------|---------|
-| [DESIGN_v1.0.md](docs/en/DESIGN_v1.0.md) | Overall design |
-| [INTERNALS_v1.0.md](docs/en/INTERNALS_v1.0.md) | Internal details |
-| [DESIGN_v1.0.md (Japanese)](docs/ja/DESIGN_v1.0.md) | Overall design (Japanese) |
-| [INTERNALS_v1.0.md (Japanese)](docs/ja/INTERNALS_v1.0.md) | Internal details (Japanese) |
+| [DESIGN.md](docs/DESIGN.md) | Overall design (English) |
+| [DESIGN_ja.md](docs/DESIGN_ja.md) | Overall design (Japanese) |
+| [DOCUMENTATION_RULES.md](docs/DOCUMENTATION_RULES.md) | Documentation management rules |
+
+---
+
+## CHANGELOG
+
+For version history and detailed changes, see:
+
+| Version | Description | Link |
+|---------|-------------|------|
+| v1.3 | Document Research, Markup Cross-Reference | [v1.3](docs/updates/v1.3.md) |
+| v1.2 | OverlayFS, Gate Levels | [v1.2](docs/updates/v1.2.md) |
+| v1.1 | Impact Analysis, Context Provider | [v1.1](docs/updates/v1.1.md) |
 
 ---
 

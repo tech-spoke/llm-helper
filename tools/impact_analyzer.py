@@ -26,7 +26,7 @@ from tools.ctags_tool import find_references, find_definitions
 
 
 # File extensions for markup relaxation
-RELAXED_MARKUP_EXTENSIONS = {".html", ".htm", ".css", ".scss", ".md", ".markdown"}
+RELAXED_MARKUP_EXTENSIONS = {".html", ".htm", ".css", ".scss", ".sass", ".less", ".md", ".markdown"}
 
 # File extensions that look like markup but contain logic (NOT relaxed)
 LOGIC_MARKUP_EXTENSIONS = {".blade.php", ".vue", ".jsx", ".tsx"}
@@ -167,7 +167,7 @@ class ImpactAnalyzer:
         """
         # Check if markup relaxation applies
         if self._should_relax_markup(target_files):
-            return self._create_relaxed_result()
+            return await self._create_relaxed_result(target_files, change_description)
 
         # Analyze each target file
         all_callers = []
@@ -304,18 +304,76 @@ class ImpactAnalyzer:
 
         return True
 
-    def _create_relaxed_result(self) -> ImpactAnalysisResult:
-        """Create a relaxed markup result."""
+    async def _create_relaxed_result(
+        self,
+        target_files: list[str],
+        change_description: str = "",
+    ) -> ImpactAnalysisResult:
+        """
+        Create a relaxed markup result with lightweight cross-reference analysis.
+
+        v1.3: Even for markup files, we check for cross-references:
+        - CSS changes -> search for class/id usage in HTML files
+        - HTML changes -> search for class/id usage in CSS/JS files
+
+        Args:
+            target_files: List of markup files being modified
+            change_description: Description of the change
+
+        Returns:
+            ImpactAnalysisResult with lightweight analysis
+        """
+        should_verify = []
+        cross_refs = {}
+
+        # Analyze cross-references for each target file
+        for target_file in target_files:
+            suffix = Path(target_file).suffix.lower()
+
+            if suffix in {".css", ".scss", ".sass", ".less"}:
+                # CSS file -> find HTML files that might use these styles
+                refs = await self._find_markup_cross_references(
+                    target_file, change_description, search_type="css_to_html"
+                )
+                if refs:
+                    cross_refs["html_files"] = refs
+                    should_verify.extend(r["file"] for r in refs)
+
+            elif suffix in {".html", ".htm"}:
+                # HTML file -> find CSS/JS files that might reference classes/ids
+                css_refs = await self._find_markup_cross_references(
+                    target_file, change_description, search_type="html_to_css"
+                )
+                js_refs = await self._find_markup_cross_references(
+                    target_file, change_description, search_type="html_to_js"
+                )
+                if css_refs:
+                    cross_refs["css_files"] = css_refs
+                    should_verify.extend(r["file"] for r in css_refs)
+                if js_refs:
+                    cross_refs["js_files"] = js_refs
+                    should_verify.extend(r["file"] for r in js_refs)
+
+        # Deduplicate and remove target files
+        target_set = set(str(Path(f).resolve()) for f in target_files)
+        should_verify = list(set(
+            f for f in should_verify
+            if str(Path(f).resolve()) not in target_set
+        ))
+
         return ImpactAnalysisResult(
             mode="relaxed_markup",
             depth="direct_only",
             reason="対象ファイルがマークアップのみのため緩和モード適用",
-            static_references={},
+            static_references=cross_refs if cross_refs else {},
             naming_convention_matches={},
-            inference_hint=None,
+            inference_hint=(
+                "クラス名やID名の変更がある場合、関連ファイルへの影響を確認してください"
+                if should_verify else None
+            ),
             confirmation_required={
                 "must_verify": [],
-                "should_verify": [],
+                "should_verify": should_verify,
                 "llm_should_infer": [],
                 "schema": {
                     "verified_files": [
@@ -328,6 +386,145 @@ class ImpactAnalyzer:
                 },
             },
         )
+
+    async def _find_markup_cross_references(
+        self,
+        target_file: str,
+        change_description: str,
+        search_type: str,
+    ) -> list[dict]:
+        """
+        Find cross-references between markup files.
+
+        Args:
+            target_file: The file being modified
+            change_description: Description of the change
+            search_type: One of "css_to_html", "html_to_css", "html_to_js"
+
+        Returns:
+            List of files that might be affected
+        """
+        results = []
+
+        # Extract potential class names and IDs from change description
+        identifiers = self._extract_css_identifiers(change_description)
+
+        # If no specific identifiers mentioned, extract from target file content
+        if not identifiers:
+            identifiers = await self._extract_identifiers_from_file(target_file, search_type)
+
+        if not identifiers:
+            return results
+
+        # Define search patterns based on type
+        if search_type == "css_to_html":
+            # Search HTML files for class="..." or id="..." usage
+            file_patterns = ["**/*.html", "**/*.htm"]
+        elif search_type == "html_to_css":
+            # Search CSS files for .classname or #idname
+            file_patterns = ["**/*.css", "**/*.scss", "**/*.sass", "**/*.less"]
+        elif search_type == "html_to_js":
+            # Search JS files for querySelector, getElementById, etc.
+            file_patterns = ["**/*.js", "**/*.ts", "**/*.jsx", "**/*.tsx"]
+        else:
+            return results
+
+        # Search for each identifier in matching files
+        for pattern in file_patterns:
+            for file_path in self.repo_path.glob(pattern):
+                if not file_path.is_file():
+                    continue
+                # Skip the target file itself
+                if str(file_path.resolve()) == str(Path(target_file).resolve()):
+                    continue
+
+                try:
+                    content = file_path.read_text(encoding="utf-8", errors="ignore")
+                    for identifier in identifiers[:5]:  # Limit to avoid too many searches
+                        if identifier in content:
+                            results.append({
+                                "file": str(file_path),
+                                "identifier": identifier,
+                                "type": search_type,
+                            })
+                            break  # One match per file is enough
+                except Exception:
+                    continue
+
+        return results[:10]  # Limit results
+
+    def _extract_css_identifiers(self, text: str) -> list[str]:
+        """
+        Extract CSS class names and IDs from text.
+
+        Looks for patterns like:
+        - .classname or #idname
+        - class="..." or id="..."
+        - Quoted identifiers
+        """
+        identifiers = []
+
+        # CSS selector patterns (.class, #id)
+        css_selectors = re.findall(r'[.#]([a-zA-Z_][a-zA-Z0-9_-]*)', text)
+        identifiers.extend(css_selectors)
+
+        # HTML attribute patterns (class="...", id="...")
+        class_attrs = re.findall(r'class\s*=\s*["\']([^"\']+)["\']', text, re.IGNORECASE)
+        for classes in class_attrs:
+            identifiers.extend(classes.split())
+
+        id_attrs = re.findall(r'id\s*=\s*["\']([^"\']+)["\']', text, re.IGNORECASE)
+        identifiers.extend(id_attrs)
+
+        # Quoted strings that look like identifiers
+        quoted = re.findall(r'["\']([a-zA-Z_][a-zA-Z0-9_-]+)["\']', text)
+        identifiers.extend(quoted)
+
+        # Deduplicate and filter
+        seen = set()
+        unique = []
+        for ident in identifiers:
+            if ident not in seen and len(ident) >= 2:
+                seen.add(ident)
+                unique.append(ident)
+
+        return unique[:10]  # Limit to prevent too many searches
+
+    async def _extract_identifiers_from_file(
+        self,
+        file_path: str,
+        search_type: str,
+    ) -> list[str]:
+        """
+        Extract identifiers from the target file itself.
+
+        Used when change_description doesn't specify what's being changed.
+        """
+        identifiers = []
+
+        try:
+            content = Path(file_path).read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            return identifiers
+
+        suffix = Path(file_path).suffix.lower()
+
+        if suffix in {".css", ".scss", ".sass", ".less"}:
+            # Extract class and ID selectors from CSS
+            selectors = re.findall(r'[.#]([a-zA-Z_][a-zA-Z0-9_-]*)', content)
+            identifiers.extend(selectors)
+
+        elif suffix in {".html", ".htm"}:
+            # Extract class and id attributes from HTML
+            classes = re.findall(r'class\s*=\s*["\']([^"\']+)["\']', content, re.IGNORECASE)
+            for class_list in classes:
+                identifiers.extend(class_list.split())
+
+            ids = re.findall(r'id\s*=\s*["\']([^"\']+)["\']', content, re.IGNORECASE)
+            identifiers.extend(ids)
+
+        # Deduplicate and limit
+        return list(set(identifiers))[:10]
 
     def _extract_base_name(self, file_path: str) -> str:
         """

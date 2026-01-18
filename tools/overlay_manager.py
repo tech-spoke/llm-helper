@@ -237,6 +237,30 @@ class OverlayManager:
         self._is_mounted: bool = False
 
     @classmethod
+    def _process_exists(cls, pid: int) -> bool:
+        """Check if a process with given PID exists."""
+        try:
+            os.kill(pid, 0)  # Signal 0 doesn't kill, just checks existence
+            return True
+        except OSError:
+            return False
+
+    @classmethod
+    def _parse_lock_file(cls, lock_file: Path) -> int | None:
+        """Parse PID from lock file content."""
+        try:
+            content = lock_file.read_text().strip()
+            # Format: "locked by pid 12345"
+            if "pid" in content:
+                parts = content.split()
+                for i, part in enumerate(parts):
+                    if part == "pid" and i + 1 < len(parts):
+                        return int(parts[i + 1])
+            return None
+        except (ValueError, FileNotFoundError, PermissionError):
+            return None
+
+    @classmethod
     async def cleanup_stale_sessions(cls, repo_path: str) -> dict:
         """
         Clean up stale overlay sessions from interrupted runs.
@@ -247,7 +271,19 @@ class OverlayManager:
             repo_path: Path to the git repository root
 
         Returns:
-            {"unmounted": list, "removed_dirs": list, "deleted_branches": list, "errors": list}
+            {
+                "unmounted": list,
+                "removed_dirs": list,
+                "deleted_branches": list,
+                "errors": list,
+                "lock_info": {  # New in v1.2
+                    "existed": bool,
+                    "released": bool,
+                    "held_by_pid": int | None,
+                    "process_alive": bool,
+                    "manual_kill_command": str | None
+                }
+            }
         """
         repo = Path(repo_path).resolve()
         overlay_base = repo / ".overlay"
@@ -255,6 +291,13 @@ class OverlayManager:
         unmounted = []
         removed_dirs = []
         deleted_branches = []
+        lock_info = {
+            "existed": False,
+            "released": False,
+            "held_by_pid": None,
+            "process_alive": False,
+            "manual_kill_command": None,
+        }
 
         # 1. Unmount any stale mounts in merged/
         merged_dir = overlay_base / "merged"
@@ -316,19 +359,37 @@ class OverlayManager:
         except Exception as e:
             errors.append(f"List branches: {e}")
 
-        # 4. Remove stale lock file
+        # 4. Handle lock file with PID check
         lock_file = overlay_base / ".repo.lock"
         if lock_file.exists():
-            try:
-                lock_file.unlink()
-            except Exception as e:
-                errors.append(f"Remove lock file: {e}")
+            lock_info["existed"] = True
+            pid = cls._parse_lock_file(lock_file)
+            lock_info["held_by_pid"] = pid
+
+            if pid is not None and cls._process_exists(pid):
+                # Process is still alive - cannot safely release lock
+                lock_info["process_alive"] = True
+                lock_info["released"] = False
+                lock_info["manual_kill_command"] = f"kill -9 {pid}"
+                errors.append(
+                    f"Lock held by active process (PID: {pid}). "
+                    f"If hung, manually run: kill -9 {pid}"
+                )
+            else:
+                # Process is dead or PID unknown - safe to remove lock
+                try:
+                    lock_file.unlink()
+                    lock_info["released"] = True
+                except Exception as e:
+                    lock_info["released"] = False
+                    errors.append(f"Remove lock file: {e}")
 
         return {
             "unmounted": unmounted,
             "removed_dirs": removed_dirs,
             "deleted_branches": deleted_branches,
             "errors": errors,
+            "lock_info": lock_info,
         }
 
     @property

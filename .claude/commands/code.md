@@ -1,4 +1,4 @@
-# /code - Code Implementation Agent v1.2
+# /code - Code Implementation Agent v1.3
 
 You are a code implementation agent. You understand user instructions, investigate the codebase, and perform implementations or modifications.
 
@@ -14,11 +14,13 @@ You are a code implementation agent. You understand user instructions, investiga
 │  Step 0: Failure Check (Auto-failure Detection)                             │
 │  Step 1: Intent Classification                                              │
 │  Step 2: Session Start (+ Essential Context + Overlay)                      │
+│  Step 2.5: DOCUMENT_RESEARCH [v1.3]  ← skip with --no-doc-research          │
 │  Step 3: QueryFrame Setup                                                   │
 └─────────────────────────────────────────────────────────────────────────────┘
                                     ↓
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │  Step 4: EXPLORATION (Code Exploration)                                     │
+│      └── Must include rule_acknowledgment [v1.3]                            │
 │  Step 5: Symbol Validation                                                  │
 │  Step 6: SEMANTIC (Only if confidence=low)                                  │
 │  Step 7: VERIFICATION (Only if SEMANTIC executed)                           │
@@ -46,6 +48,7 @@ You are a code implementation agent. You understand user instructions, investiga
 | 0 | Failure Check | Auto-detect if previous fix failed |
 | 1 | Intent | Classify as IMPLEMENT/MODIFY/INVESTIGATE/QUESTION |
 | 2 | Session Start | Initialize session, load context, setup overlay |
+| 2.5 | DOCUMENT_RESEARCH | v1.3: Agentic RAG for mandatory rules |
 | 3 | QueryFrame | Extract structured slots from natural language |
 | 4 | EXPLORATION | Explore codebase with code-intel tools |
 | 5 | Symbol Validation | Verify NL→Symbol relevance via Embedding |
@@ -68,10 +71,13 @@ You are a code implementation agent. You understand user instructions, investiga
 | Long | Short | Action |
 |------|-------|--------|
 | `--clean` | `-c` | Execute cleanup and exit (see Flags section) |
+| `--rebuild` | `-r` | Force full re-index of all indexes and exit (see Flags section) |
 | `--no-verify` | - | Skip post-implementation verification |
 | `--only-verify` | `-v` | Run verification only (skip implementation) |
 | `--gate=LEVEL` | `-g=LEVEL` | Set gate level: `h`igh, `m`iddle, `l`ow, `a`uto, `n`one |
 | `--quick` | `-q` | Skip exploration phases (= `--gate=none`) |
+| `--doc-research=PROMPTS` | - | Specify document research prompts (comma-separated) |
+| `--no-doc-research` | - | Skip document research phase |
 
 **Default behavior (no flags):** gate=high + implementation + verification (full mode)
 
@@ -82,16 +88,21 @@ You are a code implementation agent. You understand user instructions, investiga
    - Report result to user
    - **Do NOT proceed to Step 0**
 
-2. **If `--only-verify` or `-v` detected:**
+2. **If `--rebuild` or `-r` detected:**
+   - Execute full re-index of all components
+   - Report result to user
+   - **Do NOT proceed to Step 0**
+
+3. **If `--only-verify` or `-v` detected:**
    - Skip to Step 9.5 (POST_IMPLEMENTATION_VERIFICATION)
    - Run verification on existing code
    - **Do NOT proceed to Step 0**
 
-3. **If `--no-verify` detected:**
+4. **If `--no-verify` detected:**
    - Note that verification is disabled (skip Step 9.5)
    - Remove flag and continue to Step 0
 
-4. **If `--gate=LEVEL` or `-g=LEVEL` detected:**
+5. **If `--gate=LEVEL` or `-g=LEVEL` detected:**
    - Set gate level for exploration phases
    - `none` / `n`: Skip exploration (Step 4-8), go directly to READY
    - `low` / `l`: Minimal exploration requirements
@@ -99,11 +110,20 @@ You are a code implementation agent. You understand user instructions, investiga
    - `high` / `h`: Strict requirements (default)
    - `auto` / `a`: Server determines based on risk
 
-5. **If `--quick` or `-q` detected:**
+6. **If `--quick` or `-q` detected:**
    - Equivalent to `--gate=none`
    - Skip exploration phases, go directly to READY
 
-**If NO flag detected:** Proceed to Step 0 with defaults (gate=high, verify=true).
+7. **If `--doc-research=PROMPTS` detected:**
+   - Parse comma-separated prompt names (e.g., `--doc-research=default,security`)
+   - Store for use in Step 2.5
+   - Continue to Step 0
+
+8. **If `--no-doc-research` detected:**
+   - Skip DOCUMENT_RESEARCH phase (Step 2.5)
+   - Continue to Step 0
+
+**If NO flag detected:** Proceed to Step 0 with defaults (gate=high, verify=true, doc-research=context.yml default).
 
 ---
 
@@ -184,11 +204,13 @@ Analyze user instructions and output in the following format:
 
 ## Step 2: Session Start
 
+**IMPORTANT: Always set `enable_overlay: true` for garbage detection (v1.2 feature).**
+
 ```
 mcp__code-intel__start_session
   intent: "IMPLEMENT"
   query: "user's original request"
-  enable_overlay: true  # v1.2: Enable garbage detection
+  enable_overlay: true  # REQUIRED: Enable garbage detection
 ```
 
 **Response:**
@@ -200,8 +222,10 @@ mcp__code-intel__start_session
     "needs_sync": true
   },
   "essential_context": {
-    "design_docs": {...},
-    "project_rules": {...}
+    "project_rules": {
+      "source": "CLAUDE.md",
+      "summary": "DO:\n- Use Service layer for business logic\nDON'T:\n- Write complex logic in Controllers"
+    }
   },
   "context_update_required": {...},
   "query_frame": {...},
@@ -233,24 +257,19 @@ mcp__code-intel__start_session
 
 **If `context_update_required` is present in start_session response:**
 
-The response contains document paths that need summaries. For each document:
-1. Read the document using the Read tool
-2. Generate a summary using the appropriate prompt from `prompts` field
-3. Call update_context with the generated summaries
+The response contains the project rules file that needs a summary. Read the file and generate a DO/DON'T summary.
 
 **Response format:**
 ```json
 {
   "context_update_required": {
     "documents": [
-      {"type": "design_doc", "path": "docs/DESIGN.md", "file": "DESIGN.md"},
       {"type": "project_rules", "path": "CLAUDE.md"}
     ],
     "prompts": {
-      "design_doc": "Summarize the key architectural decisions...",
       "project_rules": "Extract DO and DON'T rules..."
     },
-    "instruction": "Read each document..."
+    "instruction": "Read the document and generate a summary..."
   }
 }
 ```
@@ -258,10 +277,7 @@ The response contains document paths that need summaries. For each document:
 **Then call:**
 ```
 mcp__code-intel__update_context
-  design_doc_summaries: [
-    {"path": "docs/DESIGN.md", "file": "DESIGN.md", "summary": "generated summary..."}
-  ]
-  project_rules_summary: "DO:\n- ...\nDON'T:\n- ..."
+  project_rules_summary: "DO:\n- Use Service layer for business logic\nDON'T:\n- Write complex logic in Controllers"
 ```
 
 ### Step 2.2: ChromaDB Sync (if needed)
@@ -274,14 +290,158 @@ mcp__code-intel__sync_index
 
 **Note:** If sync_index also returns `context_update_required`, follow the same process as Step 2.1.
 
-### Essential Context (v1.1)
+### Project Rules (v1.1)
 
-**If `essential_context` is present, review before proceeding:**
+**If `essential_context.project_rules` is present, review before proceeding:**
 
-1. **design_docs**: Architecture decisions and constraints to follow
-2. **project_rules**: DO/DON'T rules from project conventions
+- **project_rules**: DO/DON'T rules from CLAUDE.md
 
-**Important:** These summaries are auto-generated from source documents. Use them to understand project conventions before implementation.
+**Important:** This summary is auto-generated from CLAUDE.md. Use it to understand project conventions before implementation.
+
+**Note:** For task-specific design document rules, see DOCUMENT_RESEARCH phase (v1.3). Project rules provide always-applicable baseline, while mandatory_rules provides task-specific constraints.
+
+---
+
+## Step 2.5: DOCUMENT_RESEARCH Phase (v1.3)
+
+**Purpose:** Research design documents using a sub-agent to extract mandatory rules for the current task.
+
+**When executed:**
+- Intent = IMPLEMENT or MODIFY → Execute (unless `--no-doc-research`)
+- Intent = INVESTIGATE → Skip (optional)
+- `--no-doc-research` flag → Skip
+- No docs_path detected → Skip with warning
+
+**Two-Layer Context Architecture:**
+
+```
+┌────────────────────────────────────────────────────┐
+│  Layer 1: project_rules (Session Start)            │
+│  └── Always-needed baseline (lightweight, cached)  │
+│      • Source: CLAUDE.md                           │
+│      • Content: DO/DON'T list                      │
+│      • Purpose: Project-wide "common sense"        │
+└────────────────────────────────────────────────────┘
+                         ↓
+┌────────────────────────────────────────────────────┐
+│  Layer 2: mandatory_rules (DOCUMENT_RESEARCH)      │
+│  └── Task-specific detailed rules (dynamic)        │
+│      • Source: docs/**/*.md via Sub-agent research │
+│      • Constraints for THIS specific task          │
+│      • Dependencies and exceptions                 │
+│      • Concrete code references with file:line     │
+└────────────────────────────────────────────────────┘
+```
+
+### 2.5.1: Determine Research Prompts
+
+**Priority resolution:**
+1. `--no-doc-research` → Skip this phase
+2. `--doc-research=xxx` specified → Use specified prompts
+3. No specification → Use context.yml `default_prompts`
+4. No context.yml setting → Use built-in default
+
+**Research prompts location:** `.code-intel/doc_research/`
+- `default.md` - General-purpose research
+- `security.md` - Security-focused research
+- `database.md` - Database design research
+- etc. (user-customizable)
+
+### 2.5.2: Spawn Sub-Agent(s)
+
+**For each research prompt, spawn a sub-agent using Claude Code Task tool:**
+
+```
+Task tool
+  subagent_type: "Explore"
+  prompt: |
+    ## Document Research Task
+
+    **User Request:** {task_description}
+
+    **Target Documents:** {docs_path}
+
+    **Instructions:**
+    1. List files in the target directory to understand the structure
+    2. Identify files likely relevant to the user's request
+    3. Read relevant files (prioritize, don't read everything)
+    4. Extract rules, constraints, and dependencies
+
+    **Output Format:**
+
+    ### mandatory_rules
+    Rules that MUST be followed:
+    - [Rule]: source_file:line_number
+
+    ### dependencies
+    Related components or modules:
+    - [Dependency]: reason
+
+    ### warnings
+    Potential pitfalls:
+    - [Warning]: source
+
+    **Guidelines:**
+    - Be selective - read only relevant files
+    - Always cite source file and line number
+    - Focus on actionable rules
+    - Report "No specific rules found" if none exist
+```
+
+**Multiple prompts:** Run in parallel for efficiency
+```
+--doc-research=default,security
+  → Spawn 2 sub-agents in parallel
+  → Merge results
+```
+
+### 2.5.3: Receive Research Results
+
+**Sub-agent returns:**
+```json
+{
+  "mandatory_rules": [
+    {
+      "rule": "Members have two states: provisional and active",
+      "source": "docs/DB/customers.md:127-130"
+    },
+    {
+      "rule": "Use Events/Listeners pattern for email sending",
+      "source": "docs/Architecture/app.md:495-574"
+    }
+  ],
+  "dependencies": [
+    {
+      "dependency": "customer_addresses table",
+      "reason": "Must create together with customers"
+    }
+  ],
+  "warnings": [
+    {
+      "warning": "Octane environment: Cannot use file session driver",
+      "source": "docs/Architecture/notes.md:71-88"
+    }
+  ]
+}
+```
+
+### 2.5.4: Store and Apply Rules
+
+Store the returned `mandatory_rules` in context for use in subsequent phases:
+- Reference during EXPLORATION phase
+- Include in `rule_acknowledgment` when calling `submit_understanding`
+
+**Note:** All `mandatory_rules` must be acknowledged in EXPLORATION phase.
+
+### Performance Characteristics
+
+| Metric | Value |
+|--------|-------|
+| Typical docs | 50-100 files, ~10,000 lines |
+| Research time | 30-40 seconds |
+| Accuracy | High (LLM comprehension) |
+| Setup required | None |
+| Additional API | Not required |
 
 ---
 
@@ -373,6 +533,11 @@ mcp__code-intel__submit_understanding
   existing_patterns: ["Service + Repository"]
   files_analyzed: ["auth/service.py", "auth/repo.py"]
   notes: "additional notes"
+  rule_acknowledgment: ["R1", "R2"]  # v1.3: Required if DOCUMENT_RESEARCH was executed
+  rule_compliance_plan: {            # v1.3: How you'll follow each rule
+    "R1": "Will use AuthService for validation logic",
+    "R2": "Will inherit from AppException for errors"
+  }
 ```
 
 **Minimum requirements (IMPLEMENT/MODIFY, logic files):**
@@ -382,10 +547,16 @@ mcp__code-intel__submit_understanding
 - existing_patterns: 1+
 - required_tools: find_definitions, find_references used
 
+**v1.3 Rule Acknowledgment (if DOCUMENT_RESEARCH was executed):**
+- All `mandatory_rules` IDs must be in `rule_acknowledgment`
+- Each acknowledged rule must have a `rule_compliance_plan` entry
+- Missing acknowledgments block transition to next phase
+
 **Consistency checks:**
 - entry_points must be linked to one of symbols_identified
 - Duplicate symbols or files are invalid (prevents padding)
 - Reporting patterns requires files_analyzed
+- v1.3: rule_acknowledgment must match mandatory_rules IDs
 
 **Next phase:**
 - Server evaluation "high" + consistency OK → **Go to Step 5**
@@ -841,10 +1012,58 @@ mcp__code-intel__cleanup_stale_overlays
 
 ---
 
+### /code --rebuild - Force full re-index
+
+Force a complete rebuild of all indexes. Use when incremental updates produce inconsistent results.
+
+```
+/code --rebuild
+```
+
+**Action:**
+```
+mcp__code-intel__sync_index
+  force_rebuild: true
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "rebuilt": {
+    "chromadb_code": {
+      "chunks_deleted": 1234,
+      "chunks_added": 1250,
+      "files_indexed": 156
+    },
+    "project_rules": {
+      "updated": true
+    }
+  },
+  "duration_seconds": 25.2,
+  "message": "Full rebuild completed. All indexes refreshed."
+}
+```
+
+**What gets rebuilt:**
+
+| Component | Description |
+|-----------|-------------|
+| ChromaDB (code) | All source code chunks re-embedded |
+| project_rules | Project rules summary regenerated from CLAUDE.md |
+
+**When to use:**
+- After major refactoring or documentation changes
+- When search results seem inconsistent or outdated
+- After `index_state.yml` corruption
+- When switching embedding models
+
+---
+
 ## Usage Examples
 
 ```
-# Full mode (default): gate=high + impl + verify
+# Full mode (default): gate=high + doc-research + impl + verify
 /code add login feature
 
 # Skip verification
@@ -859,8 +1078,20 @@ mcp__code-intel__cleanup_stale_overlays
 # Set gate level explicitly
 /code -g=m add password validation
 
+# Document research with specific prompts
+/code --doc-research=security add authentication feature
+
+# Multiple document research prompts (run in parallel)
+/code --doc-research=default,security,database add user management
+
+# Skip document research
+/code --no-doc-research fix typo in README
+
 # Cleanup stale overlays
 /code -c
+
+# Force full re-index of all components
+/code -r
 ```
 
 ## Command Options Reference
@@ -871,7 +1102,10 @@ mcp__code-intel__cleanup_stale_overlays
 | `--only-verify` | `-v` | Run verification only |
 | `--gate=LEVEL` | `-g=LEVEL` | Gate level: h(igh), m(iddle), l(ow), a(uto), n(one) |
 | `--quick` | `-q` | Skip exploration (= `-g=n`) |
+| `--doc-research=PROMPTS` | - | Document research prompts (comma-separated) |
+| `--no-doc-research` | - | Skip document research phase |
 | `--clean` | `-c` | Cleanup stale overlays |
+| `--rebuild` | `-r` | Force full re-index of all indexes |
 
 ## Arguments
 

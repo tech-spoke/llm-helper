@@ -42,7 +42,8 @@ config.json
 # Old documentation (archived)
 docs/old/
 
-qiita/
+# Qiita articles (private, not part of repo)
+docs/qiita/
 
 # OverlayFS session directories
 .overlay/

@@ -135,8 +135,10 @@ LLM に判断をさせない。守らせるのではなく、守らないと進�
 | `find_definitions` | シンボル定義検索 (ctags) |
 | `find_references` | シンボル参照検索 (ripgrep) |
 | `search_text` | テキスト検索 (ripgrep) |
+| `search_files` | ファイルパターン検索 (glob) |
 | `analyze_structure` | コード構造解析 (tree-sitter) |
 | `get_symbols` | シンボル一覧取得 |
+| `get_function_at_line` | 指定行の関数を取得 |
 | `sync_index` | ソースコードを ChromaDB にインデックス |
 | `semantic_search` | 地図/森の統合ベクトル検索 |
 | `analyze_impact` | 変更の影響範囲分析（v1.1） |
@@ -150,11 +152,24 @@ LLM に判断をさせない。守らせるのではなく、守らないと進�
 | `get_session_status` | 現在のフェーズ・状態を確認 |
 | `submit_understanding` | EXPLORATION 完了 |
 | `validate_symbol_relevance` | Embedding 検証 |
+| `confirm_symbol_relevance` | シンボル検証結果を確認 |
 | `submit_semantic` | SEMANTIC 完了 |
 | `submit_verification` | VERIFICATION 完了 |
+| `submit_impact_analysis` | IMPACT_ANALYSIS 完了（v1.1） |
 | `check_write_target` | Write 可否確認 |
 | `add_explored_files` | 探索済みファイル追加 |
 | `revert_to_exploration` | EXPLORATION に戻る |
+| `update_context` | コンテキスト要約を更新（v1.1） |
+
+### ゴミ検出（v1.2）
+
+| ツール | 用途 |
+|--------|------|
+| `submit_for_review` | PRE_COMMIT フェーズに遷移 |
+| `review_changes` | 全ファイル変更を表示 |
+| `finalize_changes` | ファイルを保持/破棄してコミット |
+| `merge_to_main` | タスクブランチを main にマージ |
+| `cleanup_stale_overlays` | 中断セッションをクリーンアップ |
 
 ### 改善サイクル
 
@@ -197,9 +212,12 @@ cd llm-helper
 your-project/
 └── .code-intel/
     ├── config.json       ← 設定
+    ├── context.yml       ← Essential context（v1.1、自動生成）
     ├── chroma/           ← ChromaDB データ（自動生成）
     ├── agreements/       ← 合意事項ディレクトリ
-    └── logs/             ← DecisionLog, OutcomeLog
+    ├── logs/             ← DecisionLog, OutcomeLog
+    ├── verifiers/        ← 検証プロンプト
+    └── doc_research/     ← ドキュメント調査プロンプト（v1.3）
 ```
 
 ### Step 3: .mcp.json の設定
@@ -275,7 +293,7 @@ project_rules:
 
 ---
 
-## アップグレード（v1.0 → v1.1 → v1.2）
+## アップグレード（v1.0 → v1.1 → v1.2 → v1.3）
 
 既存プロジェクトをアップグレードする手順：
 
@@ -293,20 +311,53 @@ git pull
 cp /path/to/llm-helper/.claude/commands/*.md /path/to/your-project/.claude/commands/
 ```
 
-### Step 3: Claude Code を再起動
+### Step 3: 新しいディレクトリを追加（v1.3）
+
+新しいディレクトリを作成し、テンプレートをコピー：
+
+```bash
+# 新しいディレクトリを作成
+mkdir -p /path/to/your-project/.code-intel/logs
+mkdir -p /path/to/your-project/.code-intel/verifiers
+mkdir -p /path/to/your-project/.code-intel/doc_research
+
+# verifier テンプレートをコピー
+cp /path/to/llm-helper/.code-intel/verifiers/*.md /path/to/your-project/.code-intel/verifiers/
+
+# doc_research プロンプトをコピー
+cp /path/to/llm-helper/.code-intel/doc_research/*.md /path/to/your-project/.code-intel/doc_research/
+```
+
+### Step 4: context.yml を更新（v1.3）
+
+`.code-intel/context.yml` に `doc_research` セクションを追加：
+
+```yaml
+# ドキュメント調査設定（v1.3）
+doc_research:
+  enabled: true
+  docs_path:
+    - "docs/"
+  default_prompts:
+    - "default.md"
+```
+
+### Step 5: Claude Code を再起動
 
 MCP サーバーを再読み込みするために再起動。
 
 ### 変更点
 
-| 項目 | v1.0 | v1.1 | v1.2 |
-|------|------|------|------|
-| フェーズ数 | 4 | 5（IMPACT_ANALYSIS 追加） | 5 |
-| context.yml | なし | 自動生成 | 自動生成 |
-| 設計ドキュメント要約 | なし | セッション開始時に自動提供 | 同左 |
-| プロジェクトルール | CLAUDE.md を手動参照 | セッション開始時に自動提供 | 同左 |
-| ゴミ分離 | なし | なし | OverlayFS + Git ブランチ |
-| /code --clean | なし | なし | 変更の一括破棄 |
+| 項目 | v1.0 | v1.1 | v1.2 | v1.3 |
+|------|------|------|------|------|
+| フェーズ数 | 4 | 5（IMPACT_ANALYSIS 追加） | 6（PRE_COMMIT 追加） | 6（DOCUMENT_RESEARCH ステップ追加） |
+| context.yml | なし | 自動生成 | 自動生成 | doc_research 追加 |
+| 設計ドキュメント要約 | なし | セッション開始時に自動提供 | 同左 | サブエージェント調査 |
+| プロジェクトルール | CLAUDE.md を手動参照 | セッション開始時に自動提供 | 同左 | 2層コンテキスト |
+| ゴミ分離 | なし | なし | OverlayFS + Git ブランチ | 同左 |
+| マークアップ解析 | なし | 緩和のみ | 同左 | クロスリファレンス検出 |
+| verifiers/ | なし | なし | なし | 検証プロンプト |
+| doc_research/ | なし | なし | なし | 調査プロンプト |
 
 ### 変更不要なもの
 
@@ -486,6 +537,8 @@ your-project/
 │   ├── chroma/             ← ChromaDB データ
 │   ├── agreements/         ← 成功ペア
 │   ├── logs/               ← DecisionLog, OutcomeLog
+│   ├── verifiers/          ← 検証プロンプト
+│   ├── doc_research/       ← ドキュメント調査プロンプト（v1.3）
 │   └── sync_state.json
 ├── .claude/commands/       ← スキル（任意コピー）
 └── src/                    ← あなたのソースコード
@@ -497,10 +550,9 @@ your-project/
 
 | ドキュメント | 内容 |
 |-------------|------|
-| [DESIGN_v1.0.md](docs/ja/DESIGN_v1.0.md) | 全体設計 |
-| [INTERNALS_v1.0.md](docs/ja/INTERNALS_v1.0.md) | 内部動作詳細 |
-| [DESIGN_v1.0.md (英語)](docs/en/DESIGN_v1.0.md) | Overall design (English) |
-| [INTERNALS_v1.0.md (英語)](docs/en/INTERNALS_v1.0.md) | Internal details (English) |
+| [DESIGN_ja.md](docs/DESIGN_ja.md) | 全体設計（日本語） |
+| [DESIGN.md](docs/DESIGN.md) | Overall design (English) |
+| [DOCUMENTATION_RULES.md](docs/DOCUMENTATION_RULES.md) | ドキュメント管理ルール |
 
 ---
 

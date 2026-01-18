@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Code Intelligence MCP Server v1.1
+Code Intelligence MCP Server v1.3
 
 Provides Cursor-like code intelligence capabilities using open source tools:
 - ripgrep: Fast text search
@@ -1245,6 +1245,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             }
 
         # v1.1: Essential context provision (design docs + project rules)
+        # v1.3: Also includes doc_research configuration
         try:
             context_provider = ContextProvider(repo_path)
             essential_context = context_provider.load_context()
@@ -1254,6 +1255,18 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                     "Design docs and project rules loaded from context.yml. "
                     "Use these to understand project conventions before implementation."
                 )
+            else:
+                # v1.3: Even without context.yml, try to get doc_research config
+                doc_research_config = context_provider.get_doc_research_config()
+                if doc_research_config:
+                    result["essential_context"] = {
+                        "doc_research": {
+                            "enabled": doc_research_config.enabled,
+                            "docs_path": doc_research_config.docs_path,
+                            "default_prompts": doc_research_config.default_prompts,
+                        },
+                        "note": "Documentation paths auto-detected. Use for DOCUMENT_RESEARCH phase.",
+                    }
         except Exception as e:
             result["essential_context"] = {"error": str(e)}
 
@@ -1756,16 +1769,30 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
         cleanup_result = await OverlayManager.cleanup_stale_sessions(repo_path)
 
+        # Extract lock_info for detailed reporting
+        lock_info = cleanup_result.get("lock_info", {})
+
         result = {
             "success": True,
             "unmounted": cleanup_result.get("unmounted", []),
             "removed_dirs": cleanup_result.get("removed_dirs", []),
             "deleted_branches": cleanup_result.get("deleted_branches", []),
             "errors": cleanup_result.get("errors", []),
+            "lock_info": lock_info,
             "message": f"Cleaned up {len(cleanup_result.get('unmounted', []))} stale mounts, "
                       f"{len(cleanup_result.get('removed_dirs', []))} directories, "
                       f"{len(cleanup_result.get('deleted_branches', []))} branches.",
         }
+
+        # Add lock-specific message if lock was encountered
+        if lock_info.get("existed"):
+            if lock_info.get("released"):
+                result["message"] += " Lock file released (process was dead)."
+            elif lock_info.get("process_alive"):
+                result["message"] += (
+                    f" WARNING: Lock held by active process (PID: {lock_info.get('held_by_pid')}). "
+                    f"If hung, run: {lock_info.get('manual_kill_command')}"
+                )
 
         return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 

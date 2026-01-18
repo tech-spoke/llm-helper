@@ -29,6 +29,14 @@ class DocSummary:
 
 
 @dataclass
+class DocResearchConfig:
+    """Document research configuration for v1.3."""
+    enabled: bool = True
+    docs_path: list[str] = field(default_factory=list)
+    default_prompts: list[str] = field(default_factory=lambda: ["default.md"])
+
+
+@dataclass
 class EssentialContext:
     """Essential context loaded from context.yml."""
     design_docs: list[DocSummary] = field(default_factory=list)
@@ -37,6 +45,8 @@ class EssentialContext:
     project_rules_summary: str = ""
     project_rules_extra_notes: str = ""
     last_synced: str = ""
+    # v1.3: Document research config
+    doc_research: DocResearchConfig | None = None
 
     def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization."""
@@ -65,6 +75,14 @@ class EssentialContext:
 
         if self.last_synced:
             result["last_synced"] = self.last_synced
+
+        # v1.3: Document research configuration
+        if self.doc_research:
+            result["doc_research"] = {
+                "enabled": self.doc_research.enabled,
+                "docs_path": self.doc_research.docs_path,
+                "default_prompts": self.doc_research.default_prompts,
+            }
 
         return result
 
@@ -123,8 +141,31 @@ class ContextProvider:
             context.project_rules_summary = project_rules.get("summary", "")
             context.project_rules_extra_notes = project_rules.get("extra_notes", "")
 
+        # v1.3: Load doc_research configuration
+        doc_research_config = config.get("doc_research", {})
+        if doc_research_config:
+            docs_path = doc_research_config.get("docs_path", [])
+            # Normalize to list
+            if isinstance(docs_path, str):
+                docs_path = [docs_path]
+            context.doc_research = DocResearchConfig(
+                enabled=doc_research_config.get("enabled", True),
+                docs_path=docs_path,
+                default_prompts=doc_research_config.get("default_prompts", ["default.md"]),
+            )
+        else:
+            # Auto-detect docs_path if not configured
+            detected_paths = self._detect_docs_path()
+            if detected_paths:
+                context.doc_research = DocResearchConfig(
+                    enabled=True,
+                    docs_path=detected_paths,
+                    default_prompts=["default.md"],
+                )
+
         # Check if we have any meaningful content
-        if not context.design_docs and not context.project_rules_summary:
+        # v1.3: doc_research alone is also meaningful
+        if not context.design_docs and not context.project_rules_summary and not context.doc_research:
             return None
 
         return context
@@ -433,6 +474,56 @@ class ContextProvider:
                 break
 
         return " ".join(paragraph) if paragraph else ""
+
+    def _detect_docs_path(self) -> list[str]:
+        """
+        Auto-detect documentation paths for v1.3 DOCUMENT_RESEARCH.
+
+        Returns a list of existing documentation paths.
+        """
+        detected = []
+
+        # Check for docs directory
+        docs_dir = self.repo_path / "docs"
+        if docs_dir.exists() and docs_dir.is_dir():
+            # Verify it contains markdown files
+            md_files = list(docs_dir.glob("**/*.md"))
+            if md_files:
+                detected.append("docs/")
+
+        # Check for DESIGN.md or DESIGN*.md
+        design_files = list(self.repo_path.glob("DESIGN*.md"))
+        for f in design_files:
+            detected.append(f.name)
+
+        # Fallback: README.md (if no other docs found)
+        if not detected:
+            readme = self.repo_path / "README.md"
+            if readme.exists():
+                detected.append("README.md")
+
+        return detected
+
+    def get_doc_research_config(self) -> DocResearchConfig | None:
+        """
+        Get document research configuration for v1.3.
+
+        Returns DocResearchConfig from context.yml or auto-detected.
+        """
+        context = self.load_context()
+        if context and context.doc_research:
+            return context.doc_research
+
+        # If no context.yml exists, try auto-detection
+        detected_paths = self._detect_docs_path()
+        if detected_paths:
+            return DocResearchConfig(
+                enabled=True,
+                docs_path=detected_paths,
+                default_prompts=["default.md"],
+            )
+
+        return None
 
 
 # =============================================================================
