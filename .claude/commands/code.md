@@ -924,13 +924,12 @@ mcp__code-intel__finalize_changes
 
 ---
 
-## Step 11: Merge to Main (v1.2, Optional)
+## Step 11: Merge to Base (v1.2, Optional)
 
-**Purpose:** Merge task branch to main branch and delete task branch
+**Purpose:** Merge task branch back to the base branch (where session started)
 
 ```
-mcp__code-intel__merge_to_main
-  main_branch: "main"
+mcp__code-intel__merge_to_base
 ```
 
 **Response:**
@@ -940,12 +939,12 @@ mcp__code-intel__merge_to_main
   "merged": true,
   "branch_deleted": true,
   "from_branch": "llm_task_session_123",
-  "to_branch": "main",
-  "message": "Successfully merged llm_task_session_123 to main. Branch deleted."
+  "to_branch": "feature/my-feature",
+  "message": "Successfully merged llm_task_session_123 to feature/my-feature. Branch deleted."
 }
 ```
 
-**Note:** After successful merge, task branch is automatically deleted.
+**Note:** Automatically merges to the branch that was active when `start_session` was called. Task branch is deleted after successful merge.
 
 ---
 

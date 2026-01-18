@@ -168,7 +168,7 @@ LLM に判断をさせない。守らせるのではなく、守らないと進�
 | `submit_for_review` | PRE_COMMIT フェーズに遷移 |
 | `review_changes` | 全ファイル変更を表示 |
 | `finalize_changes` | ファイルを保持/破棄してコミット |
-| `merge_to_main` | タスクブランチを main にマージ |
+| `merge_to_base` | タスクブランチを元のブランチにマージ |
 | `cleanup_stale_overlays` | 中断セッションをクリーンアップ |
 
 ### 改善サイクル

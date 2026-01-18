@@ -249,7 +249,7 @@ doc_research:
 | `submit_for_review` | PRE_COMMIT フェーズへ遷移 |
 | `review_changes` | 全ファイル変更を表示 |
 | `finalize_changes` | keep/discard してコミット |
-| `merge_to_main` | タスクブランチを main にマージ |
+| `merge_to_base` | タスクブランチを元のブランチにマージ |
 | `cleanup_stale_overlays` | 中断セッションをクリーンアップ |
 
 ### インデックス & 学習
@@ -334,7 +334,7 @@ Step 10: PRE_COMMIT（overlay 有効時）
     └─ finalize_changes (keep/discard)
 
 Step 11: Merge（オプション）
-    └─ merge_to_main
+    └─ merge_to_base（元のブランチへ）
 ```
 
 ### 検証システム
@@ -530,7 +530,7 @@ class DocResearchConfig:
     ↓
 [PRE_COMMIT] → [review_changes] → [finalize_changes]
     ↓
-[merge_to_main]
+[merge_to_base]（元のブランチへ）
 ```
 
 ### 改善サイクル

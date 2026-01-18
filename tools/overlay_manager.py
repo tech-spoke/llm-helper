@@ -234,6 +234,7 @@ class OverlayManager:
         # Active session tracking
         self._active_session: str | None = None
         self._branch_name: str | None = None
+        self._base_branch: str | None = None  # Branch we started from
         self._is_mounted: bool = False
 
     @classmethod
@@ -455,6 +456,13 @@ class OverlayManager:
             try:
                 # Acquire lock with timeout - only for checkout + mount phase
                 async with repo_lock.locked(timeout=lock_timeout):
+                    # Step 0: Get current branch (base branch to merge back to)
+                    base_result = await self._run_git(["rev-parse", "--abbrev-ref", "HEAD"])
+                    if base_result.returncode == 0:
+                        self._base_branch = base_result.stdout.strip()
+                    else:
+                        self._base_branch = "main"  # Fallback
+
                     # Step 1: Create git branch
                     branch_name = f"llm_task_{session_id}"
                     result = await self._run_git(["checkout", "-b", branch_name])
@@ -739,34 +747,80 @@ class OverlayManager:
                 error=str(e),
             )
 
-    async def merge_to_main(self, main_branch: str = "main", delete_branch: bool = True) -> dict:
+    @property
+    def base_branch(self) -> str | None:
+        """Get the base branch this session was started from."""
+        return self._base_branch
+
+    async def merge_to_base(self, delete_branch: bool = True) -> dict:
         """
-        Merge task branch to main branch.
+        Merge task branch back to the base branch (where session started).
+
+        This merges to the branch that was active when setup_session was called,
+        NOT always to main. This allows working on feature branches.
 
         Args:
-            main_branch: Target branch to merge into
             delete_branch: Delete task branch after successful merge (default: True)
 
         Returns:
-            {"success": bool, "merged": bool, "branch_deleted": bool, "error": str | None}
+            {
+                "success": bool,
+                "merged": bool,
+                "branch_deleted": bool,
+                "from_branch": str,
+                "to_branch": str,
+                "error": str | None
+            }
         """
         if not self._branch_name:
-            return {"success": False, "merged": False, "branch_deleted": False, "error": "No active branch"}
+            return {
+                "success": False,
+                "merged": False,
+                "branch_deleted": False,
+                "from_branch": "",
+                "to_branch": "",
+                "error": "No active branch",
+            }
+
+        if not self._base_branch:
+            return {
+                "success": False,
+                "merged": False,
+                "branch_deleted": False,
+                "from_branch": self._branch_name,
+                "to_branch": "",
+                "error": "Base branch not recorded. Session may have been started before v1.3.1.",
+            }
 
         llm_task_branch = self._branch_name
+        target_branch = self._base_branch
 
         try:
-            # Checkout main
-            result = await self._run_git(["checkout", main_branch])
+            # Checkout base branch
+            result = await self._run_git(["checkout", target_branch])
             if result.returncode != 0:
-                return {"success": False, "merged": False, "branch_deleted": False, "error": f"Failed to checkout {main_branch}: {result.stderr}"}
+                return {
+                    "success": False,
+                    "merged": False,
+                    "branch_deleted": False,
+                    "from_branch": llm_task_branch,
+                    "to_branch": target_branch,
+                    "error": f"Failed to checkout {target_branch}: {result.stderr}",
+                }
 
             # Merge task branch
             result = await self._run_git(["merge", "--no-ff", llm_task_branch, "-m", f"Merge {llm_task_branch}"])
             if result.returncode != 0:
                 # Revert to task branch on failure
                 await self._run_git(["checkout", llm_task_branch])
-                return {"success": False, "merged": False, "branch_deleted": False, "error": f"Merge failed: {result.stderr}"}
+                return {
+                    "success": False,
+                    "merged": False,
+                    "branch_deleted": False,
+                    "from_branch": llm_task_branch,
+                    "to_branch": target_branch,
+                    "error": f"Merge failed: {result.stderr}",
+                }
 
             # Delete task branch after successful merge
             branch_deleted = False
@@ -778,10 +832,24 @@ class OverlayManager:
                     delete_result = await self._run_git(["branch", "-D", llm_task_branch])
                     branch_deleted = delete_result.returncode == 0
 
-            return {"success": True, "merged": True, "branch_deleted": branch_deleted, "error": None}
+            return {
+                "success": True,
+                "merged": True,
+                "branch_deleted": branch_deleted,
+                "from_branch": llm_task_branch,
+                "to_branch": target_branch,
+                "error": None,
+            }
 
         except Exception as e:
-            return {"success": False, "merged": False, "branch_deleted": False, "error": str(e)}
+            return {
+                "success": False,
+                "merged": False,
+                "branch_deleted": False,
+                "from_branch": llm_task_branch,
+                "to_branch": target_branch,
+                "error": str(e),
+            }
 
     async def cleanup(self) -> bool:
         """

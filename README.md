@@ -172,7 +172,7 @@ And have a mechanism to learn from failures.
 | `submit_for_review` | Transition to PRE_COMMIT phase |
 | `review_changes` | Show all file changes |
 | `finalize_changes` | Keep/discard files and commit |
-| `merge_to_main` | Merge task branch to main |
+| `merge_to_base` | Merge task branch to base branch |
 | `cleanup_stale_overlays` | Clean up interrupted sessions |
 
 ### Improvement Cycle

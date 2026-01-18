@@ -821,18 +821,13 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
-            name="merge_to_main",
-            description="Merge task branch to main branch. "
-                        "Call after finalize_changes if merge to main is desired.",
+            name="merge_to_base",
+            description="Merge task branch back to the base branch (where session started). "
+                        "Automatically uses the branch that was active when start_session was called. "
+                        "Call after finalize_changes to complete the workflow.",
             inputSchema={
                 "type": "object",
-                "properties": {
-                    "main_branch": {
-                        "type": "string",
-                        "description": "Target branch to merge into (default: 'main')",
-                        "default": "main",
-                    },
-                },
+                "properties": {},
             },
         ),
         Tool(
@@ -1701,7 +1696,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 "branch": session.overlay_branch,
                 "overlay_cleaned": True,
                 "message": f"Changes finalized. Committed to {session.overlay_branch}. Overlay unmounted.",
-                "next_step": "Call merge_to_main if you want to merge to main branch, or record_outcome to record result.",
+                "next_step": "Call merge_to_base to merge back to original branch, or record_outcome to record result.",
             }
         else:
             result = {
@@ -1713,7 +1708,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
         return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
-    elif name == "merge_to_main":
+    elif name == "merge_to_base":
         session = session_manager.get_active_session()
         if session is None:
             result = {"error": "no_active_session", "message": "No active session."}
@@ -1735,8 +1730,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             }
             return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
-        main_branch = arguments.get("main_branch", "main")
-        merge_result = await overlay_manager.merge_to_main(main_branch)
+        merge_result = await overlay_manager.merge_to_base()
 
         if merge_result["success"]:
             # Cleanup overlay after successful merge
@@ -1747,9 +1741,9 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 "success": True,
                 "merged": True,
                 "branch_deleted": merge_result.get("branch_deleted", False),
-                "from_branch": session.overlay_branch,
-                "to_branch": main_branch,
-                "message": f"Successfully merged {session.overlay_branch} to {main_branch}." +
+                "from_branch": merge_result.get("from_branch"),
+                "to_branch": merge_result.get("to_branch"),
+                "message": f"Successfully merged {merge_result.get('from_branch')} to {merge_result.get('to_branch')}." +
                           (" Branch deleted." if merge_result.get("branch_deleted") else ""),
                 "next_step": "Call record_outcome to record the result.",
             }
@@ -1758,6 +1752,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 "success": False,
                 "merged": False,
                 "branch_deleted": False,
+                "from_branch": merge_result.get("from_branch"),
+                "to_branch": merge_result.get("to_branch"),
                 "error": merge_result.get("error"),
             }
 

@@ -995,7 +995,7 @@ class SessionState:
             return [
                 "review_changes",  # Get changes for review
                 "finalize_changes",  # Apply reviewed changes
-                "merge_to_main",  # Merge to main branch
+                "merge_to_base",  # Merge to base branch
             ]
         return []
 

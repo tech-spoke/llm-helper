@@ -249,7 +249,7 @@ doc_research:
 | `submit_for_review` | Transition to PRE_COMMIT phase |
 | `review_changes` | Show all file changes |
 | `finalize_changes` | Keep/discard files and commit |
-| `merge_to_main` | Merge task branch to main |
+| `merge_to_base` | Merge task branch to base branch |
 | `cleanup_stale_overlays` | Clean up interrupted sessions |
 
 ### Index & Learning
@@ -334,7 +334,7 @@ Step 10: PRE_COMMIT (if overlay enabled)
     └─ finalize_changes (keep/discard)
 
 Step 11: Merge (optional)
-    └─ merge_to_main
+    └─ merge_to_base (to original branch)
 ```
 
 ### Verifier System
@@ -530,7 +530,7 @@ class DocResearchConfig:
     ↓
 [PRE_COMMIT] → [review_changes] → [finalize_changes]
     ↓
-[merge_to_main]
+[merge_to_base] (to original branch)
 ```
 
 ### Improvement Cycle
