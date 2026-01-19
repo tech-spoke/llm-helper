@@ -57,7 +57,7 @@ from tools.chromadb_manager import (
     ChromaDBManager, SearchResult, SearchHit,
     CHROMADB_AVAILABLE,
 )
-from tools.overlay_manager import OverlayManager
+from tools.overlay_manager import BranchManager
 
 
 # Create MCP server, router, and session manager
@@ -68,8 +68,65 @@ session_manager = SessionManager()
 # ChromaDB manager cache (per project)
 _chromadb_managers: dict[str, ChromaDBManager] = {}
 
-# v1.2: Overlay manager cache (per session)
-_overlay_managers: dict[str, OverlayManager] = {}
+# v1.2.1: Branch manager cache (per session) - OverlayFS removed, git branch only
+_branch_managers: dict[str, BranchManager] = {}
+
+
+def _get_or_recreate_branch_manager(session, repo_path: str) -> BranchManager | None:
+    """
+    Get branch manager from cache, or recreate it from session state.
+
+    This handles server restart recovery where the in-memory cache is lost
+    but session state is persisted.
+    """
+    import subprocess
+
+    # Try cache first
+    branch_manager = _branch_managers.get(session.session_id)
+    if branch_manager is not None:
+        return branch_manager
+
+    # Recreate from session state
+    if not session.overlay_branch:
+        return None
+
+    branch_manager = BranchManager(repo_path)
+    branch_manager._active_session = session.session_id
+    branch_manager._branch_name = session.overlay_branch
+
+    # Determine base branch
+    try:
+        result_proc = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+        )
+        current = result_proc.stdout.strip()
+
+        if current.startswith("llm_task_"):
+            for base_candidate in ["main", "master", "develop"]:
+                try:
+                    mb_result = subprocess.run(
+                        ["git", "merge-base", base_candidate, "HEAD"],
+                        cwd=repo_path,
+                        capture_output=True,
+                        text=True,
+                    )
+                    if mb_result.returncode == 0:
+                        branch_manager._base_branch = base_candidate
+                        break
+                except Exception:
+                    pass
+            if not branch_manager._base_branch:
+                branch_manager._base_branch = "main"
+        else:
+            branch_manager._base_branch = current
+    except Exception:
+        branch_manager._base_branch = "main"
+
+    _branch_managers[session.session_id] = branch_manager
+    return branch_manager
 
 
 def get_chromadb_manager(project_root: str = ".") -> ChromaDBManager:
@@ -1196,42 +1253,38 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             },
         }
 
-        # v1.2: OverlayFS integration for garbage detection
+        # v1.2.1: Git branch integration for garbage detection (OverlayFS removed)
         if enable_overlay:
             try:
-                overlay_manager = OverlayManager(repo_path)
-                setup_result = await overlay_manager.setup_session(session.session_id)
+                branch_manager = BranchManager(repo_path)
+                setup_result = await branch_manager.setup_session(session.session_id)
 
                 if setup_result.success:
-                    # Store overlay info in session
+                    # Store branch info in session
                     session.overlay_enabled = True
                     session.overlay_branch = setup_result.branch_name
-                    session.overlay_merged_path = setup_result.merged_path
-                    session.overlay_upper_path = setup_result.upper_path
 
-                    # Cache overlay manager for this session
-                    _overlay_managers[session.session_id] = overlay_manager
+                    # Cache branch manager for this session
+                    _branch_managers[session.session_id] = branch_manager
 
                     result["overlay"] = {
                         "enabled": True,
                         "branch": setup_result.branch_name,
-                        "merged_path": setup_result.merged_path,
-                        "upper_path": setup_result.upper_path,
-                        "note": "All file operations should use merged_path as working directory. "
-                                "Changes are captured in upper_path for garbage detection.",
+                        "base_branch": setup_result.base_branch,
+                        "note": "Task branch created. Changes tracked via git diff. "
+                                "v1.2.1: OverlayFS removed, using git branch only.",
                     }
                 else:
                     result["overlay"] = {
                         "enabled": False,
                         "error": setup_result.error,
-                        "note": "Overlay setup failed. Proceeding without garbage detection. "
-                                "Install fuse-overlayfs: sudo apt-get install -y fuse-overlayfs",
+                        "note": "Branch setup failed. Proceeding without garbage detection.",
                     }
             except Exception as e:
                 result["overlay"] = {
                     "enabled": False,
                     "error": str(e),
-                    "note": "Overlay setup failed. Proceeding without garbage detection.",
+                    "note": "Branch setup failed. Proceeding without garbage detection.",
                 }
         else:
             result["overlay"] = {
@@ -1595,33 +1648,32 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
         if not session.overlay_enabled:
             result = {
-                "error": "overlay_not_enabled",
-                "message": "Overlay not enabled. Cannot review changes without overlay.",
+                "error": "task_branch_not_enabled",
+                "message": "Task branch not enabled. Cannot review changes without enable_overlay=true.",
             }
             return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
-        # Get overlay manager for this session
-        overlay_manager = _overlay_managers.get(session.session_id)
-        if overlay_manager is None:
+        # Get or recreate branch manager for this session
+        repo_path = session.repo_path or "."
+        branch_manager = _get_or_recreate_branch_manager(session, repo_path)
+        if branch_manager is None:
             result = {
-                "error": "overlay_manager_not_found",
-                "message": "Overlay manager not found for this session.",
+                "error": "branch_manager_not_found",
+                "message": "Branch manager not found and cannot be recreated (no overlay_branch in session).",
             }
             return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
-        changes = await overlay_manager.get_changes()
+        changes = await branch_manager.get_changes()
 
         result = {
             "success": True,
             "session_id": session.session_id,
             "total_changes": changes.total_files,
-            "total_size_bytes": changes.total_size_bytes,
             "changes": [
                 {
                     "path": c.path,
                     "change_type": c.change_type,
                     "is_binary": c.is_binary,
-                    "size_bytes": c.size_bytes,
                     "diff": c.diff,
                 }
                 for c in changes.changes
@@ -1650,17 +1702,18 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
         if not session.overlay_enabled:
             result = {
-                "error": "overlay_not_enabled",
-                "message": "Overlay not enabled. Cannot finalize changes without overlay.",
+                "error": "task_branch_not_enabled",
+                "message": "Task branch not enabled. Cannot finalize changes without enable_overlay=true.",
             }
             return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
-        # Get overlay manager for this session
-        overlay_manager = _overlay_managers.get(session.session_id)
-        if overlay_manager is None:
+        # Get or recreate branch manager for this session
+        repo_path = session.repo_path or "."
+        branch_manager = _get_or_recreate_branch_manager(session, repo_path)
+        if branch_manager is None:
             result = {
-                "error": "overlay_manager_not_found",
-                "message": "Overlay manager not found for this session.",
+                "error": "branch_manager_not_found",
+                "message": "Branch manager not found and cannot be recreated (no overlay_branch in session).",
             }
             return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
@@ -1677,25 +1730,21 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         if not review_result.get("success"):
             return [TextContent(type="text", text=json.dumps(review_result, indent=2, ensure_ascii=False))]
 
-        # Apply changes using overlay manager
-        finalize_result = await overlay_manager.finalize(
+        # Apply changes using branch manager
+        finalize_result = await branch_manager.finalize(
             keep_files=review_result.get("kept_files"),
             discard_files=review_result.get("discarded_files"),
             commit_message=commit_message,
         )
 
         if finalize_result.success:
-            # Cleanup overlay (unmount) after finalize
-            await overlay_manager.cleanup()
-
             result = {
                 "success": True,
                 "commit_hash": finalize_result.commit_hash,
                 "kept_files": finalize_result.kept_files,
                 "discarded_files": finalize_result.discarded_files,
                 "branch": session.overlay_branch,
-                "overlay_cleaned": True,
-                "message": f"Changes finalized. Committed to {session.overlay_branch}. Overlay unmounted.",
+                "message": f"Changes finalized. Committed to {session.overlay_branch}.",
                 "next_step": "Call merge_to_base to merge back to original branch, or record_outcome to record result.",
             }
         else:
@@ -1716,26 +1765,27 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
         if not session.overlay_enabled:
             result = {
-                "error": "overlay_not_enabled",
-                "message": "Overlay not enabled. Cannot merge without overlay.",
+                "error": "task_branch_not_enabled",
+                "message": "Task branch not enabled. Cannot merge without enable_overlay=true.",
             }
             return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
-        # Get overlay manager for this session
-        overlay_manager = _overlay_managers.get(session.session_id)
-        if overlay_manager is None:
+        # Get or recreate branch manager for this session
+        repo_path = session.repo_path or "."
+        branch_manager = _get_or_recreate_branch_manager(session, repo_path)
+        if branch_manager is None:
             result = {
-                "error": "overlay_manager_not_found",
-                "message": "Overlay manager not found for this session.",
+                "error": "branch_manager_not_found",
+                "message": "Branch manager not found and cannot be recreated (no overlay_branch in session).",
             }
             return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
-        merge_result = await overlay_manager.merge_to_base()
+        merge_result = await branch_manager.merge_to_base()
 
         if merge_result["success"]:
-            # Cleanup overlay after successful merge
-            await overlay_manager.cleanup()
-            del _overlay_managers[session.session_id]
+            # Cleanup branch manager cache after successful merge
+            if session.session_id in _branch_managers:
+                del _branch_managers[session.session_id]
 
             result = {
                 "success": True,
@@ -1760,10 +1810,10 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
     elif name == "cleanup_stale_overlays":
-        # v1.2: Clean up stale overlay sessions from interrupted runs
+        # v1.2.1: Clean up stale task branches from interrupted runs
         repo_path = arguments.get("repo_path", ".")
 
-        cleanup_result = await OverlayManager.cleanup_stale_sessions(repo_path)
+        cleanup_result = await BranchManager.cleanup_stale_sessions(repo_path)
 
         # Extract lock_info for detailed reporting
         lock_info = cleanup_result.get("lock_info", {})
