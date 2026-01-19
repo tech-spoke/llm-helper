@@ -1,35 +1,34 @@
 """
-Overlay Manager for OverlayFS + Git Integration.
+Branch Manager for Git-based Session Isolation.
 
-This module provides filesystem isolation using OverlayFS,
-allowing all session changes to be captured and reviewed before commit.
+This module provides git branch isolation for LLM sessions,
+allowing all session changes to be tracked and reviewed before commit.
+
+v1.2 Original: OverlayFS + Git Integration
+v1.2.1: Git branch only (OverlayFS removed)
+
+Rationale for removing OverlayFS:
+- LLM edit tools use repository root path, not merged_path
+- Changes were applied directly to lower layer, bypassing overlay
+- Without parallel execution benefit, git branch alone is sufficient
 
 Features:
-- Mount OverlayFS at session start (before EXPLORATION)
-- Capture all file changes in upper directory
+- Create task branch at session start (llm_task_{session_id})
+- Track changes via git diff (not overlay upper layer)
 - Support garbage detection via LLM review (PRE_COMMIT phase)
-- Clean unmount and branch commit
+- Clean merge back to base branch
 
 Requirements:
-- Linux kernel with OverlayFS support
-- sudo privileges for mount/unmount operations
 - Git repository initialized
 
-Directory Structure:
-    .overlay/
-    ├── upper/{session_id}/   # Changed files
-    ├── work/{session_id}/    # OverlayFS workdir
-    └── merged/{session_id}/  # Mount point
-
 Usage:
-    from tools.overlay_manager import OverlayManager
+    from tools.overlay_manager import BranchManager
 
-    manager = OverlayManager("/path/to/repo")
+    manager = BranchManager("/path/to/repo")
 
     # At session start
     result = await manager.setup_session("session_123")
     # result.branch_name = "llm_task_session_123"
-    # result.merged_path = "/path/to/repo/.overlay/merged/session_123"
 
     # At PRE_COMMIT (garbage detection)
     changes = await manager.get_changes()
@@ -38,155 +37,33 @@ Usage:
     # After review
     await manager.finalize(keep_files=["auth/service.py"], discard_files=["debug.log"])
 
-    # Cleanup
+    # Merge to base branch
+    await manager.merge_to_base()
+
+    # Cleanup (delete task branch without merge)
     await manager.cleanup()
 """
 
 import asyncio
-import fcntl
-import os
-import shutil
 import subprocess
-from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
 
-# =============================================================================
-# Repository Lock for Concurrent Session Protection
-# =============================================================================
-
-class RepoLockError(Exception):
-    """Raised when repository lock cannot be acquired."""
-    pass
-
-
-class RepoLock:
-    """
-    File-based lock for repository-level operations.
-
-    Prevents concurrent git checkout + overlay mount operations.
-    Only the setup phase (checkout + mount) needs to be serialized;
-    once mounted, sessions can work independently.
-    """
-
-    # Class-level lock registry to prevent multiple locks per repo
-    _locks: dict[str, "RepoLock"] = {}
-
-    def __init__(self, repo_path: Path):
-        self.repo_path = repo_path
-        self.lock_file = repo_path / ".overlay" / ".repo.lock"
-        self._fd: int | None = None
-
-    @classmethod
-    def for_repo(cls, repo_path: Path) -> "RepoLock":
-        """Get or create a RepoLock for a repository."""
-        key = str(repo_path.resolve())
-        if key not in cls._locks:
-            cls._locks[key] = cls(repo_path)
-        return cls._locks[key]
-
-    async def acquire(self, timeout: float = 30.0) -> bool:
-        """
-        Acquire the repository lock with timeout.
-
-        Args:
-            timeout: Maximum time to wait for lock (seconds)
-
-        Returns:
-            True if lock acquired, False if timeout
-
-        Raises:
-            RepoLockError if lock file cannot be created
-        """
-        # Ensure lock directory exists
-        self.lock_file.parent.mkdir(parents=True, exist_ok=True)
-
-        start_time = asyncio.get_event_loop().time()
-
-        while True:
-            try:
-                # Open or create lock file
-                self._fd = os.open(
-                    str(self.lock_file),
-                    os.O_RDWR | os.O_CREAT,
-                    0o644
-                )
-
-                # Try non-blocking exclusive lock
-                fcntl.flock(self._fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-
-                # Write lock info for debugging
-                os.write(self._fd, f"locked by pid {os.getpid()}\n".encode())
-                os.fsync(self._fd)
-
-                return True
-
-            except (BlockingIOError, OSError) as e:
-                # Lock held by another process
-                if self._fd is not None:
-                    os.close(self._fd)
-                    self._fd = None
-
-                # Check timeout
-                elapsed = asyncio.get_event_loop().time() - start_time
-                if elapsed >= timeout:
-                    return False
-
-                # Wait and retry
-                await asyncio.sleep(0.1)
-
-    def release(self) -> None:
-        """Release the repository lock."""
-        if self._fd is not None:
-            try:
-                fcntl.flock(self._fd, fcntl.LOCK_UN)
-                os.close(self._fd)
-            except OSError:
-                pass
-            finally:
-                self._fd = None
-
-    @asynccontextmanager
-    async def locked(self, timeout: float = 30.0):
-        """
-        Context manager for acquiring and releasing lock.
-
-        Usage:
-            async with repo_lock.locked():
-                # checkout + mount operations
-
-        Raises:
-            RepoLockError if lock cannot be acquired within timeout
-        """
-        acquired = await self.acquire(timeout)
-        if not acquired:
-            raise RepoLockError(
-                f"Could not acquire repository lock within {timeout}s. "
-                "Another session may be starting. Try again shortly."
-            )
-        try:
-            yield
-        finally:
-            self.release()
-
-
 @dataclass
-class OverlaySetupResult:
-    """Result of overlay setup operation."""
+class BranchSetupResult:
+    """Result of branch setup operation."""
     success: bool
     session_id: str
     branch_name: str
-    merged_path: str
-    upper_path: str
+    base_branch: str
     error: str | None = None
 
 
 @dataclass
 class FileChange:
-    """Represents a single file change in the overlay."""
+    """Represents a single file change."""
     path: str  # Relative path from repo root
     change_type: Literal["added", "modified", "deleted"]
     diff: str | None = None  # Unified diff for text files
@@ -195,12 +72,11 @@ class FileChange:
 
 
 @dataclass
-class OverlayChanges:
-    """All changes captured in the overlay upper directory."""
+class BranchChanges:
+    """All changes in the current branch vs base branch."""
     session_id: str
     changes: list[FileChange] = field(default_factory=list)
     total_files: int = 0
-    total_size_bytes: int = 0
 
 
 @dataclass
@@ -213,125 +89,117 @@ class FinalizeResult:
     error: str | None = None
 
 
-class OverlayManager:
+class BranchManager:
     """
-    Manages OverlayFS for session-based file isolation.
+    Manages git branches for session-based file isolation.
 
-    Each session gets its own overlay mount, capturing all changes
-    in an upper directory for review before commit.
+    Each session gets its own branch, capturing all changes
+    for review before commit and merge.
     """
 
     def __init__(self, repo_path: str):
         """
-        Initialize OverlayManager.
+        Initialize BranchManager.
 
         Args:
             repo_path: Path to the git repository root
         """
         self.repo_path = Path(repo_path).resolve()
-        self.overlay_base = self.repo_path / ".overlay"
 
         # Active session tracking
         self._active_session: str | None = None
         self._branch_name: str | None = None
         self._base_branch: str | None = None  # Branch we started from
-        self._is_mounted: bool = False
 
     @classmethod
-    def _process_exists(cls, pid: int) -> bool:
-        """Check if a process with given PID exists."""
-        try:
-            os.kill(pid, 0)  # Signal 0 doesn't kill, just checks existence
-            return True
-        except OSError:
-            return False
-
-    @classmethod
-    def _parse_lock_file(cls, lock_file: Path) -> int | None:
-        """Parse PID from lock file content."""
-        try:
-            content = lock_file.read_text().strip()
-            # Format: "locked by pid 12345"
-            if "pid" in content:
-                parts = content.split()
-                for i, part in enumerate(parts):
-                    if part == "pid" and i + 1 < len(parts):
-                        return int(parts[i + 1])
-            return None
-        except (ValueError, FileNotFoundError, PermissionError):
-            return None
-
-    @classmethod
-    async def cleanup_stale_sessions(cls, repo_path: str) -> dict:
+    async def is_task_branch_checked_out(cls, repo_path: str) -> dict:
         """
-        Clean up stale overlay sessions from interrupted runs.
+        Check if a llm_task_* branch is currently checked out.
 
-        Call this at startup or when overlay setup fails due to existing mounts.
+        This is used as a guard to prevent accidental parallel sessions.
 
         Args:
             repo_path: Path to the git repository root
 
         Returns:
             {
-                "unmounted": list,
-                "removed_dirs": list,
-                "deleted_branches": list,
-                "errors": list,
-                "lock_info": {  # New in v1.2
-                    "existed": bool,
-                    "released": bool,
-                    "held_by_pid": int | None,
-                    "process_alive": bool,
-                    "manual_kill_command": str | None
-                }
+                "is_task_branch": bool,
+                "current_branch": str,
+                "session_id": str | None  # Extracted from branch name if task branch
             }
         """
         repo = Path(repo_path).resolve()
-        overlay_base = repo / ".overlay"
-        errors = []
-        unmounted = []
-        removed_dirs = []
-        deleted_branches = []
-        lock_info = {
-            "existed": False,
-            "released": False,
-            "held_by_pid": None,
-            "process_alive": False,
-            "manual_kill_command": None,
-        }
 
-        # 1. Unmount any stale mounts in merged/
-        merged_dir = overlay_base / "merged"
-        if merged_dir.exists():
-            for session_dir in merged_dir.iterdir():
-                if session_dir.is_dir():
-                    try:
-                        # Try to unmount
-                        proc = await asyncio.create_subprocess_exec(
-                            "fusermount", "-u", str(session_dir),
-                            stdout=asyncio.subprocess.PIPE,
-                            stderr=asyncio.subprocess.PIPE,
-                        )
-                        await proc.communicate()
-                        if proc.returncode == 0:
-                            unmounted.append(str(session_dir))
-                    except Exception as e:
-                        errors.append(f"Unmount {session_dir}: {e}")
-
-        # 2. Remove stale directories
-        for subdir in ["upper", "work", "merged"]:
-            target = overlay_base / subdir
-            if target.exists():
-                for session_dir in target.iterdir():
-                    if session_dir.is_dir():
-                        try:
-                            shutil.rmtree(session_dir, ignore_errors=True)
-                            removed_dirs.append(str(session_dir))
-                        except Exception as e:
-                            errors.append(f"Remove {session_dir}: {e}")
-
-        # 3. Clean up stale task branches (optional, be careful)
         try:
+            proc = await asyncio.create_subprocess_exec(
+                "git", "rev-parse", "--abbrev-ref", "HEAD",
+                cwd=str(repo),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await proc.communicate()
+
+            if proc.returncode != 0:
+                return {
+                    "is_task_branch": False,
+                    "current_branch": "",
+                    "session_id": None,
+                }
+
+            current_branch = stdout.decode().strip()
+            is_task = current_branch.startswith("llm_task_")
+
+            session_id = None
+            if is_task:
+                # Extract session_id from branch name
+                # Format: llm_task_{session_id} or llm_task_session_{session_id}
+                parts = current_branch.split("_", 2)  # ['llm', 'task', 'session_xxx']
+                if len(parts) >= 3:
+                    session_id = parts[2]
+
+            return {
+                "is_task_branch": is_task,
+                "current_branch": current_branch,
+                "session_id": session_id,
+            }
+
+        except Exception:
+            return {
+                "is_task_branch": False,
+                "current_branch": "",
+                "session_id": None,
+            }
+
+    @classmethod
+    async def cleanup_stale_sessions(cls, repo_path: str) -> dict:
+        """
+        Clean up stale task branches from interrupted runs.
+
+        Args:
+            repo_path: Path to the git repository root
+
+        Returns:
+            {
+                "deleted_branches": list,
+                "errors": list,
+            }
+        """
+        repo = Path(repo_path).resolve()
+        errors = []
+        deleted_branches = []
+
+        try:
+            # Get current branch to avoid deleting it
+            proc = await asyncio.create_subprocess_exec(
+                "git", "rev-parse", "--abbrev-ref", "HEAD",
+                cwd=str(repo),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await proc.communicate()
+            current_branch = stdout.decode().strip() if proc.returncode == 0 else ""
+
+            # List all llm_task_* branches
             proc = await asyncio.create_subprocess_exec(
                 "git", "branch", "--list", "llm_task_*",
                 cwd=str(repo),
@@ -341,309 +209,228 @@ class OverlayManager:
             stdout, _ = await proc.communicate()
 
             if proc.returncode == 0 and stdout:
-                branches = [b.strip().lstrip("* ") for b in stdout.decode().strip().split("\n") if b.strip()]
+                branches = [
+                    b.strip().lstrip("* ")
+                    for b in stdout.decode().strip().split("\n")
+                    if b.strip()
+                ]
                 for branch in branches:
-                    # Only delete if it looks like a stale session branch
-                    if branch.startswith("llm_task_session_"):
-                        try:
-                            proc = await asyncio.create_subprocess_exec(
-                                "git", "branch", "-D", branch,
-                                cwd=str(repo),
-                                stdout=asyncio.subprocess.PIPE,
-                                stderr=asyncio.subprocess.PIPE,
-                            )
-                            await proc.communicate()
-                            if proc.returncode == 0:
-                                deleted_branches.append(branch)
-                        except Exception as e:
-                            errors.append(f"Delete branch {branch}: {e}")
+                    # Skip current branch
+                    if branch == current_branch:
+                        errors.append(f"Skipped {branch}: currently checked out")
+                        continue
+
+                    # Delete branch
+                    try:
+                        proc = await asyncio.create_subprocess_exec(
+                            "git", "branch", "-D", branch,
+                            cwd=str(repo),
+                            stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.PIPE,
+                        )
+                        await proc.communicate()
+                        if proc.returncode == 0:
+                            deleted_branches.append(branch)
+                        else:
+                            errors.append(f"Failed to delete {branch}")
+                    except Exception as e:
+                        errors.append(f"Delete branch {branch}: {e}")
+
         except Exception as e:
             errors.append(f"List branches: {e}")
 
-        # 4. Handle lock file with PID check
-        lock_file = overlay_base / ".repo.lock"
-        if lock_file.exists():
-            lock_info["existed"] = True
-            pid = cls._parse_lock_file(lock_file)
-            lock_info["held_by_pid"] = pid
-
-            if pid is not None and cls._process_exists(pid):
-                # Process is still alive - cannot safely release lock
-                lock_info["process_alive"] = True
-                lock_info["released"] = False
-                lock_info["manual_kill_command"] = f"kill -9 {pid}"
-                errors.append(
-                    f"Lock held by active process (PID: {pid}). "
-                    f"If hung, manually run: kill -9 {pid}"
-                )
-            else:
-                # Process is dead or PID unknown - safe to remove lock
-                try:
-                    lock_file.unlink()
-                    lock_info["released"] = True
-                except Exception as e:
-                    lock_info["released"] = False
-                    errors.append(f"Remove lock file: {e}")
-
         return {
-            "unmounted": unmounted,
-            "removed_dirs": removed_dirs,
             "deleted_branches": deleted_branches,
             "errors": errors,
-            "lock_info": lock_info,
         }
 
-    @property
-    def upper_path(self) -> Path | None:
-        """Get upper directory path for active session."""
-        if self._active_session:
-            return self.overlay_base / "upper" / self._active_session
-        return None
-
-    @property
-    def work_path(self) -> Path | None:
-        """Get work directory path for active session."""
-        if self._active_session:
-            return self.overlay_base / "work" / self._active_session
-        return None
-
-    @property
-    def merged_path(self) -> Path | None:
-        """Get merged mount point for active session."""
-        if self._active_session:
-            return self.overlay_base / "merged" / self._active_session
-        return None
-
-    async def setup_session(self, session_id: str, lock_timeout: float = 30.0) -> OverlaySetupResult:
+    async def setup_session(self, session_id: str) -> BranchSetupResult:
         """
-        Set up Git branch and OverlayFS for a new session.
-
-        This should be called at start_session, BEFORE EXPLORATION phase.
+        Set up Git branch for a new session.
 
         Steps:
-        1. Acquire repository lock (prevents concurrent setup)
-        2. Create new git branch: llm_task_{session_id}
-        3. Create overlay directories
-        4. Mount OverlayFS with current state as lower
-        5. Release lock (other sessions can now start)
+        1. Check if already on a task branch (guard)
+        2. Record current branch as base
+        3. Create and checkout new branch: llm_task_{session_id}
 
         Args:
             session_id: Unique session identifier
-            lock_timeout: Maximum time to wait for lock (seconds)
 
         Returns:
-            OverlaySetupResult with paths and status
-
-        Note:
-            The lock is only held during checkout + mount operations.
-            Once mounted, sessions work independently on their own overlay.
+            BranchSetupResult with branch info and status
         """
         try:
             # Check if already has an active session
-            if self._is_mounted:
-                return OverlaySetupResult(
+            if self._active_session:
+                return BranchSetupResult(
                     success=False,
                     session_id=session_id,
                     branch_name="",
-                    merged_path="",
-                    upper_path="",
+                    base_branch="",
                     error=f"Session {self._active_session} is already active. Call cleanup() first.",
                 )
 
-            # Get repository lock
-            repo_lock = RepoLock.for_repo(self.repo_path)
-
-            try:
-                # Acquire lock with timeout - only for checkout + mount phase
-                async with repo_lock.locked(timeout=lock_timeout):
-                    # Step 0: Get current branch (base branch to merge back to)
-                    base_result = await self._run_git(["rev-parse", "--abbrev-ref", "HEAD"])
-                    if base_result.returncode == 0:
-                        self._base_branch = base_result.stdout.strip()
-                    else:
-                        self._base_branch = "main"  # Fallback
-
-                    # Step 1: Create git branch
-                    branch_name = f"llm_task_{session_id}"
-                    result = await self._run_git(["checkout", "-b", branch_name])
-                    if result.returncode != 0:
-                        # Branch might already exist, try to checkout
-                        result = await self._run_git(["checkout", branch_name])
-                        if result.returncode != 0:
-                            return OverlaySetupResult(
-                                success=False,
-                                session_id=session_id,
-                                branch_name=branch_name,
-                                merged_path="",
-                                upper_path="",
-                                error=f"Failed to create/checkout branch: {result.stderr}",
-                            )
-
-                    self._branch_name = branch_name
-
-                    # Step 2: Create overlay directories
-                    upper = self.overlay_base / "upper" / session_id
-                    work = self.overlay_base / "work" / session_id
-                    merged = self.overlay_base / "merged" / session_id
-
-                    for d in [upper, work, merged]:
-                        d.mkdir(parents=True, exist_ok=True)
-
-                    # Step 3: Mount OverlayFS
-                    mount_result = await self._mount_overlay(upper, work, merged)
-                    if not mount_result:
-                        return OverlaySetupResult(
-                            success=False,
-                            session_id=session_id,
-                            branch_name=branch_name,
-                            merged_path=str(merged),
-                            upper_path=str(upper),
-                            error="Failed to mount OverlayFS. Install with: sudo apt-get install -y fuse-overlayfs",
-                        )
-
-                    # Lock released here - other sessions can now start
-                    # This session continues with its own isolated overlay
-
-            except RepoLockError as e:
-                return OverlaySetupResult(
+            # Guard: Check if already on a task branch
+            guard_result = await self.is_task_branch_checked_out(str(self.repo_path))
+            if guard_result["is_task_branch"]:
+                return BranchSetupResult(
                     success=False,
                     session_id=session_id,
                     branch_name="",
-                    merged_path="",
-                    upper_path="",
-                    error=str(e),
+                    base_branch="",
+                    error=(
+                        f"Already on task branch '{guard_result['current_branch']}'. "
+                        f"Another session may be active (session_id: {guard_result['session_id']}). "
+                        f"Run cleanup_stale_sessions or checkout a different branch first."
+                    ),
                 )
 
+            # Step 1: Get current branch (base branch to merge back to)
+            base_result = await self._run_git(["rev-parse", "--abbrev-ref", "HEAD"])
+            if base_result.returncode == 0:
+                self._base_branch = base_result.stdout.strip()
+            else:
+                self._base_branch = "main"  # Fallback
+
+            # Step 2: Create and checkout new git branch
+            branch_name = f"llm_task_{session_id}"
+            result = await self._run_git(["checkout", "-b", branch_name])
+            if result.returncode != 0:
+                # Branch might already exist, try to checkout
+                result = await self._run_git(["checkout", branch_name])
+                if result.returncode != 0:
+                    return BranchSetupResult(
+                        success=False,
+                        session_id=session_id,
+                        branch_name=branch_name,
+                        base_branch=self._base_branch,
+                        error=f"Failed to create/checkout branch: {result.stderr}",
+                    )
+
+            self._branch_name = branch_name
             self._active_session = session_id
-            self._is_mounted = True
 
-            # Add .overlay to .gitignore if not present
-            await self._ensure_gitignore()
-
-            return OverlaySetupResult(
+            return BranchSetupResult(
                 success=True,
                 session_id=session_id,
                 branch_name=branch_name,
-                merged_path=str(merged),
-                upper_path=str(upper),
+                base_branch=self._base_branch,
             )
 
         except Exception as e:
-            return OverlaySetupResult(
+            return BranchSetupResult(
                 success=False,
                 session_id=session_id,
                 branch_name="",
-                merged_path="",
-                upper_path="",
+                base_branch="",
                 error=str(e),
             )
 
-    async def get_changes(self) -> OverlayChanges:
+    async def get_changes(self) -> BranchChanges:
         """
-        Get all changes captured in the overlay upper directory.
+        Get all changes in current branch compared to base branch.
 
-        This is used in PRE_COMMIT phase for garbage detection.
+        Includes both committed and uncommitted changes.
+        This is critical because LLM edit tools modify working directory
+        directly, not via overlay.
 
         Returns:
-            OverlayChanges with list of all changed files
+            BranchChanges with list of all changed files
         """
-        if not self._active_session or not self.upper_path:
-            return OverlayChanges(session_id="", changes=[], total_files=0)
+        if not self._active_session or not self._base_branch:
+            return BranchChanges(session_id="", changes=[], total_files=0)
 
         changes = []
-        total_size = 0
 
-        upper = self.upper_path
-        if not upper.exists():
-            return OverlayChanges(
+        try:
+            # Get uncommitted changes (working directory vs HEAD)
+            uncommitted_result = await self._run_git([
+                "diff", "--name-status", "HEAD"
+            ])
+
+            # Get committed changes on this branch vs base
+            committed_result = await self._run_git([
+                "diff", "--name-status",
+                f"{self._base_branch}...HEAD"
+            ])
+
+            if committed_result.returncode != 0:
+                # Fall back to direct diff if three-dot fails
+                committed_result = await self._run_git([
+                    "diff", "--name-status",
+                    self._base_branch, "HEAD"
+                ])
+
+            # Combine results (uncommitted changes take precedence)
+            all_changes = {}
+
+            # Add committed changes first
+            if committed_result.returncode == 0 and committed_result.stdout.strip():
+                for line in committed_result.stdout.strip().split("\n"):
+                    if line:
+                        parts = line.split("\t", 1)
+                        if len(parts) >= 2:
+                            all_changes[parts[1]] = parts[0]
+
+            # Add/override with uncommitted changes
+            if uncommitted_result.returncode == 0 and uncommitted_result.stdout.strip():
+                for line in uncommitted_result.stdout.strip().split("\n"):
+                    if line:
+                        parts = line.split("\t", 1)
+                        if len(parts) >= 2:
+                            all_changes[parts[1]] = parts[0]
+
+            # Process each changed file
+            for filepath, status in all_changes.items():
+                # Map git status to change type
+                if status.startswith("A"):
+                    change_type = "added"
+                elif status.startswith("D"):
+                    change_type = "deleted"
+                else:  # M, R, C, etc.
+                    change_type = "modified"
+
+                # Get diff for this file (includes uncommitted changes)
+                diff = None
+                is_binary = False
+
+                if change_type != "deleted":
+                    # First try: working directory vs base branch
+                    diff_result = await self._run_git([
+                        "diff", self._base_branch, "--", filepath
+                    ])
+                    if diff_result.returncode != 0 or not diff_result.stdout.strip():
+                        # Fallback: committed changes only
+                        diff_result = await self._run_git([
+                            "diff", f"{self._base_branch}...HEAD", "--", filepath
+                        ])
+                    if diff_result.returncode == 0:
+                        diff = diff_result.stdout
+                        # Check if binary
+                        if "Binary files" in diff:
+                            is_binary = True
+                            diff = None
+
+                changes.append(FileChange(
+                    path=filepath,
+                    change_type=change_type,
+                    diff=diff,
+                    is_binary=is_binary,
+                    size_bytes=0,
+                ))
+
+            return BranchChanges(
+                session_id=self._active_session,
+                changes=changes,
+                total_files=len(changes),
+            )
+
+        except Exception:
+            return BranchChanges(
                 session_id=self._active_session,
                 changes=[],
                 total_files=0,
             )
-
-        # Walk through upper directory to find all changes
-        for root, dirs, files in os.walk(upper):
-            # Skip OverlayFS metadata
-            dirs[:] = [d for d in dirs if not d.startswith(".")]
-
-            for filename in files:
-                if filename.startswith("."):
-                    continue
-
-                filepath = Path(root) / filename
-                relative_path = filepath.relative_to(upper)
-
-                # Determine change type
-                original_path = self.repo_path / relative_path
-
-                # Check if it's a whiteout file (deletion marker)
-                if filename.startswith(".wh."):
-                    actual_name = filename[4:]  # Remove .wh. prefix
-                    changes.append(FileChange(
-                        path=str(relative_path.parent / actual_name),
-                        change_type="deleted",
-                        diff=None,
-                        is_binary=False,
-                        size_bytes=0,
-                    ))
-                    continue
-
-                # Check if file is new or modified
-                if original_path.exists():
-                    change_type = "modified"
-                else:
-                    change_type = "added"
-
-                # Get file info
-                stat = filepath.stat()
-                size = stat.st_size
-                total_size += size
-
-                # Get diff for text files
-                diff = None
-                is_binary = False
-
-                if size < 1024 * 1024:  # Only diff files < 1MB
-                    try:
-                        with open(filepath, "r", encoding="utf-8") as f:
-                            new_content = f.read()
-
-                        if change_type == "modified" and original_path.exists():
-                            with open(original_path, "r", encoding="utf-8") as f:
-                                old_content = f.read()
-
-                            # Generate unified diff
-                            import difflib
-                            diff_lines = list(difflib.unified_diff(
-                                old_content.splitlines(keepends=True),
-                                new_content.splitlines(keepends=True),
-                                fromfile=f"a/{relative_path}",
-                                tofile=f"b/{relative_path}",
-                            ))
-                            diff = "".join(diff_lines)
-                        else:
-                            # New file - show full content as diff
-                            diff = f"+++ b/{relative_path}\n"
-                            for line in new_content.splitlines():
-                                diff += f"+{line}\n"
-
-                    except (UnicodeDecodeError, PermissionError):
-                        is_binary = True
-
-                changes.append(FileChange(
-                    path=str(relative_path),
-                    change_type=change_type,
-                    diff=diff,
-                    is_binary=is_binary,
-                    size_bytes=size,
-                ))
-
-        return OverlayChanges(
-            session_id=self._active_session,
-            changes=changes,
-            total_files=len(changes),
-            total_size_bytes=total_size,
-        )
 
     async def finalize(
         self,
@@ -654,18 +441,18 @@ class OverlayManager:
         """
         Finalize changes after garbage review.
 
-        This copies approved changes from upper to the repository
-        and commits to the task branch.
+        For discarded files, reverts them to base branch state.
+        Then creates a commit with the kept changes.
 
         Args:
-            keep_files: Files to keep (apply to repo). If None, keep all.
-            discard_files: Files to discard (garbage). If None, discard none.
+            keep_files: Files to keep. If None, keep all.
+            discard_files: Files to discard (revert). If None, discard none.
             commit_message: Commit message. Auto-generated if not provided.
 
         Returns:
             FinalizeResult with commit hash and file lists
         """
-        if not self._active_session or not self.upper_path:
+        if not self._active_session or not self._base_branch:
             return FinalizeResult(
                 success=False,
                 error="No active session",
@@ -686,32 +473,16 @@ class OverlayManager:
 
             files_to_discard = all_files - files_to_keep
 
-            # Apply kept files to repository
-            kept = []
-            for change in changes.changes:
-                if change.path not in files_to_keep:
-                    continue
+            # Revert discarded files to base branch state
+            for filepath in files_to_discard:
+                await self._run_git(["checkout", self._base_branch, "--", filepath])
 
-                src = self.upper_path / change.path
-                dst = self.repo_path / change.path
-
-                if change.change_type == "deleted":
-                    # Handle deletion
-                    if dst.exists():
-                        dst.unlink()
-                        kept.append(change.path)
-                elif src.exists():
-                    # Copy file
-                    dst.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(src, dst)
-                    kept.append(change.path)
-
-            # Git add and commit
-            if kept:
-                await self._run_git(["add"] + kept)
+            # Stage all changes (including reverts)
+            if files_to_keep:
+                await self._run_git(["add", "-A"])
 
                 if commit_message is None:
-                    commit_message = f"Session {self._active_session}: Apply {len(kept)} file(s)"
+                    commit_message = f"Session {self._active_session}: Apply {len(files_to_keep)} file(s)"
 
                 result = await self._run_git(["commit", "-m", commit_message])
 
@@ -727,6 +498,14 @@ class OverlayManager:
                         discarded_files=list(files_to_discard),
                     )
                 else:
+                    # Check if "nothing to commit"
+                    if "nothing to commit" in result.stdout or "nothing to commit" in result.stderr:
+                        return FinalizeResult(
+                            success=True,
+                            commit_hash=None,
+                            kept_files=list(files_to_keep),
+                            discarded_files=list(files_to_discard),
+                        )
                     return FinalizeResult(
                         success=False,
                         error=f"Git commit failed: {result.stderr}",
@@ -754,10 +533,7 @@ class OverlayManager:
 
     async def merge_to_base(self, delete_branch: bool = True) -> dict:
         """
-        Merge task branch back to the base branch (where session started).
-
-        This merges to the branch that was active when setup_session was called,
-        NOT always to main. This allows working on feature branches.
+        Merge task branch back to the base branch.
 
         Args:
             delete_branch: Delete task branch after successful merge (default: True)
@@ -789,10 +565,10 @@ class OverlayManager:
                 "branch_deleted": False,
                 "from_branch": self._branch_name,
                 "to_branch": "",
-                "error": "Base branch not recorded. Session may have been started before v1.3.1.",
+                "error": "Base branch not recorded.",
             }
 
-        llm_task_branch = self._branch_name
+        task_branch = self._branch_name
         target_branch = self._base_branch
 
         try:
@@ -803,21 +579,24 @@ class OverlayManager:
                     "success": False,
                     "merged": False,
                     "branch_deleted": False,
-                    "from_branch": llm_task_branch,
+                    "from_branch": task_branch,
                     "to_branch": target_branch,
                     "error": f"Failed to checkout {target_branch}: {result.stderr}",
                 }
 
             # Merge task branch
-            result = await self._run_git(["merge", "--no-ff", llm_task_branch, "-m", f"Merge {llm_task_branch}"])
+            result = await self._run_git([
+                "merge", "--no-ff", task_branch,
+                "-m", f"Merge {task_branch}"
+            ])
             if result.returncode != 0:
                 # Revert to task branch on failure
-                await self._run_git(["checkout", llm_task_branch])
+                await self._run_git(["checkout", task_branch])
                 return {
                     "success": False,
                     "merged": False,
                     "branch_deleted": False,
-                    "from_branch": llm_task_branch,
+                    "from_branch": task_branch,
                     "to_branch": target_branch,
                     "error": f"Merge failed: {result.stderr}",
                 }
@@ -825,18 +604,22 @@ class OverlayManager:
             # Delete task branch after successful merge
             branch_deleted = False
             if delete_branch:
-                delete_result = await self._run_git(["branch", "-d", llm_task_branch])
+                delete_result = await self._run_git(["branch", "-d", task_branch])
                 branch_deleted = delete_result.returncode == 0
                 if not branch_deleted:
-                    # Try force delete if normal delete fails (shouldn't happen after merge)
-                    delete_result = await self._run_git(["branch", "-D", llm_task_branch])
+                    # Try force delete
+                    delete_result = await self._run_git(["branch", "-D", task_branch])
                     branch_deleted = delete_result.returncode == 0
+
+            # Clear session state
+            self._active_session = None
+            self._branch_name = None
 
             return {
                 "success": True,
                 "merged": True,
                 "branch_deleted": branch_deleted,
-                "from_branch": llm_task_branch,
+                "from_branch": task_branch,
                 "to_branch": target_branch,
                 "error": None,
             }
@@ -846,14 +629,16 @@ class OverlayManager:
                 "success": False,
                 "merged": False,
                 "branch_deleted": False,
-                "from_branch": llm_task_branch,
+                "from_branch": task_branch,
                 "to_branch": target_branch,
                 "error": str(e),
             }
 
     async def cleanup(self) -> bool:
         """
-        Unmount OverlayFS and clean up session directories.
+        Clean up session (checkout base branch, optionally delete task branch).
+
+        This does NOT delete the task branch by default (use merge_to_base for that).
 
         Returns:
             True if cleanup successful
@@ -862,93 +647,16 @@ class OverlayManager:
             return True
 
         try:
-            # Unmount
-            if self._is_mounted and self.merged_path:
-                await self._unmount_overlay()
-
-            # Remove session directories
-            for subdir in ["upper", "work", "merged"]:
-                session_dir = self.overlay_base / subdir / self._active_session
-                if session_dir.exists():
-                    shutil.rmtree(session_dir, ignore_errors=True)
+            # Checkout base branch if we have one
+            if self._base_branch:
+                await self._run_git(["checkout", self._base_branch])
 
             self._active_session = None
-            self._is_mounted = False
+            self._branch_name = None
 
             return True
 
         except Exception:
-            return False
-
-    async def _mount_overlay(self, upper: Path, work: Path, merged: Path) -> bool:
-        """
-        Mount OverlayFS using fuse-overlayfs.
-
-        fuse-overlayfs is preferred because:
-        - No sudo required (FUSE-based)
-        - CoW (Copy-on-Write) for efficiency
-        - Works in user space
-
-        Install: sudo apt-get install -y fuse-overlayfs
-        """
-        # fuse-overlayfs mount command
-        # lowerdir: Original project (read-only)
-        # upperdir: Where changes are written
-        # workdir: Internal use (must be on same filesystem as upperdir)
-        mount_opts = f"lowerdir={self.repo_path},upperdir={upper},workdir={work}"
-
-        try:
-            # Use fuse-overlayfs (no sudo needed)
-            proc = await asyncio.create_subprocess_exec(
-                "fuse-overlayfs",
-                "-o", mount_opts,
-                str(merged),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            _, stderr = await proc.communicate()
-
-            if proc.returncode != 0:
-                # Log error for debugging
-                error_msg = stderr.decode() if stderr else "Unknown error"
-                print(f"fuse-overlayfs mount failed: {error_msg}")
-                return False
-
-            return True
-
-        except FileNotFoundError:
-            print("fuse-overlayfs not found. Install with: sudo apt-get install -y fuse-overlayfs")
-            return False
-
-    async def _unmount_overlay(self) -> bool:
-        """
-        Unmount OverlayFS using fusermount.
-
-        fusermount -u is the standard way to unmount FUSE filesystems.
-        """
-        if not self.merged_path:
-            return True
-
-        try:
-            # Use fusermount -u for FUSE-based overlay
-            proc = await asyncio.create_subprocess_exec(
-                "fusermount", "-u", str(self.merged_path),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            _, stderr = await proc.communicate()
-
-            if proc.returncode == 0:
-                self._is_mounted = False
-                return True
-
-            # Log error for debugging
-            error_msg = stderr.decode() if stderr else "Unknown error"
-            print(f"fusermount unmount failed: {error_msg}")
-            return False
-
-        except FileNotFoundError:
-            print("fusermount not found. This should be installed with fuse-overlayfs.")
             return False
 
     async def _run_git(self, args: list[str]) -> subprocess.CompletedProcess:
@@ -968,316 +676,12 @@ class OverlayManager:
             stderr=stderr.decode() if stderr else "",
         )
 
-    async def _ensure_gitignore(self) -> None:
-        """Ensure .overlay is in .gitignore."""
-        gitignore = self.repo_path / ".gitignore"
-
-        if gitignore.exists():
-            content = gitignore.read_text()
-            if ".overlay/" not in content and ".overlay" not in content:
-                with open(gitignore, "a") as f:
-                    f.write("\n# OverlayFS session directories\n.overlay/\n")
-        else:
-            gitignore.write_text("# OverlayFS session directories\n.overlay/\n")
-
 
 # =============================================================================
-# v1.2.1: BranchManager (Git-only, no OverlayFS)
+# Backward Compatibility Aliases
 # =============================================================================
 
-@dataclass
-class BranchSetupResult:
-    """Result of branch setup operation."""
-    success: bool
-    session_id: str
-    branch_name: str
-    base_branch: str
-    error: str | None = None
-
-
-@dataclass
-class BranchChanges:
-    """All changes in the current branch vs base branch."""
-    session_id: str
-    changes: list[FileChange] = field(default_factory=list)
-    total_files: int = 0
-
-
-class BranchManager:
-    """
-    v1.2.1: Git branch-only manager for session isolation.
-
-    OverlayFS was removed because LLM edit tools use repository root path,
-    not merged_path, so changes were applied directly to lower layer.
-    """
-
-    def __init__(self, repo_path: str):
-        self.repo_path = Path(repo_path).resolve()
-        self._active_session: str | None = None
-        self._branch_name: str | None = None
-        self._base_branch: str | None = None
-
-    @classmethod
-    async def is_task_branch_checked_out(cls, repo_path: str) -> dict:
-        """Check if a llm_task_* branch is currently checked out."""
-        repo = Path(repo_path).resolve()
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                "git", "rev-parse", "--abbrev-ref", "HEAD",
-                cwd=str(repo),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, _ = await proc.communicate()
-            if proc.returncode != 0:
-                return {"is_task_branch": False, "current_branch": "", "session_id": None}
-            current_branch = stdout.decode().strip()
-            is_task = current_branch.startswith("llm_task_")
-            session_id = None
-            if is_task:
-                parts = current_branch.split("_", 2)
-                if len(parts) >= 3:
-                    session_id = parts[2]
-            return {"is_task_branch": is_task, "current_branch": current_branch, "session_id": session_id}
-        except Exception:
-            return {"is_task_branch": False, "current_branch": "", "session_id": None}
-
-    @classmethod
-    async def cleanup_stale_sessions(cls, repo_path: str) -> dict:
-        """Clean up stale task branches from interrupted runs."""
-        repo = Path(repo_path).resolve()
-        errors = []
-        deleted_branches = []
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                "git", "rev-parse", "--abbrev-ref", "HEAD",
-                cwd=str(repo),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, _ = await proc.communicate()
-            current_branch = stdout.decode().strip() if proc.returncode == 0 else ""
-
-            proc = await asyncio.create_subprocess_exec(
-                "git", "branch", "--list", "llm_task_*",
-                cwd=str(repo),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, _ = await proc.communicate()
-            if proc.returncode == 0 and stdout:
-                branches = [b.strip().lstrip("* ") for b in stdout.decode().strip().split("\n") if b.strip()]
-                for branch in branches:
-                    if branch == current_branch:
-                        errors.append(f"Skipped {branch}: currently checked out")
-                        continue
-                    try:
-                        proc = await asyncio.create_subprocess_exec(
-                            "git", "branch", "-D", branch,
-                            cwd=str(repo),
-                            stdout=asyncio.subprocess.PIPE,
-                            stderr=asyncio.subprocess.PIPE,
-                        )
-                        await proc.communicate()
-                        if proc.returncode == 0:
-                            deleted_branches.append(branch)
-                        else:
-                            errors.append(f"Failed to delete {branch}")
-                    except Exception as e:
-                        errors.append(f"Delete branch {branch}: {e}")
-        except Exception as e:
-            errors.append(f"List branches: {e}")
-        return {"deleted_branches": deleted_branches, "errors": errors}
-
-    async def setup_session(self, session_id: str) -> BranchSetupResult:
-        """Set up Git branch for a new session."""
-        try:
-            if self._active_session:
-                return BranchSetupResult(
-                    success=False, session_id=session_id, branch_name="", base_branch="",
-                    error=f"Session {self._active_session} is already active."
-                )
-
-            guard_result = await self.is_task_branch_checked_out(str(self.repo_path))
-            if guard_result["is_task_branch"]:
-                return BranchSetupResult(
-                    success=False, session_id=session_id, branch_name="", base_branch="",
-                    error=f"Already on task branch '{guard_result['current_branch']}'."
-                )
-
-            base_result = await self._run_git(["rev-parse", "--abbrev-ref", "HEAD"])
-            self._base_branch = base_result.stdout.strip() if base_result.returncode == 0 else "main"
-
-            branch_name = f"llm_task_{session_id}"
-            result = await self._run_git(["checkout", "-b", branch_name])
-            if result.returncode != 0:
-                result = await self._run_git(["checkout", branch_name])
-                if result.returncode != 0:
-                    return BranchSetupResult(
-                        success=False, session_id=session_id, branch_name=branch_name,
-                        base_branch=self._base_branch, error=f"Failed to create/checkout branch: {result.stderr}"
-                    )
-
-            self._branch_name = branch_name
-            self._active_session = session_id
-            return BranchSetupResult(
-                success=True, session_id=session_id, branch_name=branch_name, base_branch=self._base_branch
-            )
-        except Exception as e:
-            return BranchSetupResult(success=False, session_id=session_id, branch_name="", base_branch="", error=str(e))
-
-    async def get_changes(self) -> BranchChanges:
-        """Get all changes in current branch compared to base branch (including uncommitted)."""
-        if not self._active_session or not self._base_branch:
-            return BranchChanges(session_id="", changes=[], total_files=0)
-
-        changes = []
-        try:
-            # Get uncommitted changes (working directory vs HEAD)
-            uncommitted_result = await self._run_git(["diff", "--name-status", "HEAD"])
-            # Get committed changes on this branch vs base
-            committed_result = await self._run_git(["diff", "--name-status", f"{self._base_branch}...HEAD"])
-            if committed_result.returncode != 0:
-                committed_result = await self._run_git(["diff", "--name-status", self._base_branch, "HEAD"])
-
-            all_changes = {}
-            if committed_result.returncode == 0 and committed_result.stdout.strip():
-                for line in committed_result.stdout.strip().split("\n"):
-                    if line:
-                        parts = line.split("\t", 1)
-                        if len(parts) >= 2:
-                            all_changes[parts[1]] = parts[0]
-            if uncommitted_result.returncode == 0 and uncommitted_result.stdout.strip():
-                for line in uncommitted_result.stdout.strip().split("\n"):
-                    if line:
-                        parts = line.split("\t", 1)
-                        if len(parts) >= 2:
-                            all_changes[parts[1]] = parts[0]
-
-            for filepath, status in all_changes.items():
-                if status.startswith("A"):
-                    change_type = "added"
-                elif status.startswith("D"):
-                    change_type = "deleted"
-                else:
-                    change_type = "modified"
-
-                diff = None
-                is_binary = False
-                if change_type != "deleted":
-                    diff_result = await self._run_git(["diff", self._base_branch, "--", filepath])
-                    if diff_result.returncode != 0 or not diff_result.stdout.strip():
-                        diff_result = await self._run_git(["diff", f"{self._base_branch}...HEAD", "--", filepath])
-                    if diff_result.returncode == 0:
-                        diff = diff_result.stdout
-                        if "Binary files" in diff:
-                            is_binary = True
-                            diff = None
-
-                changes.append(FileChange(
-                    path=filepath, change_type=change_type, diff=diff, is_binary=is_binary, size_bytes=0
-                ))
-
-            return BranchChanges(session_id=self._active_session, changes=changes, total_files=len(changes))
-        except Exception:
-            return BranchChanges(session_id=self._active_session, changes=[], total_files=0)
-
-    async def finalize(self, keep_files: list[str] | None = None, discard_files: list[str] | None = None,
-                       commit_message: str | None = None) -> FinalizeResult:
-        """Finalize changes after garbage review."""
-        if not self._active_session or not self._base_branch:
-            return FinalizeResult(success=False, error="No active session")
-        try:
-            changes = await self.get_changes()
-            all_files = {c.path for c in changes.changes}
-            if keep_files is not None:
-                files_to_keep = set(keep_files)
-            else:
-                files_to_keep = all_files - set(discard_files or [])
-            files_to_discard = all_files - files_to_keep
-
-            for filepath in files_to_discard:
-                await self._run_git(["checkout", self._base_branch, "--", filepath])
-
-            if files_to_keep:
-                await self._run_git(["add", "-A"])
-                if commit_message is None:
-                    commit_message = f"Session {self._active_session}: Apply {len(files_to_keep)} file(s)"
-                result = await self._run_git(["commit", "-m", commit_message])
-                if result.returncode == 0:
-                    hash_result = await self._run_git(["rev-parse", "HEAD"])
-                    commit_hash = hash_result.stdout.strip() if hash_result.returncode == 0 else None
-                    return FinalizeResult(success=True, commit_hash=commit_hash,
-                                          kept_files=list(files_to_keep), discarded_files=list(files_to_discard))
-                elif "nothing to commit" in result.stdout or "nothing to commit" in result.stderr:
-                    return FinalizeResult(success=True, commit_hash=None,
-                                          kept_files=list(files_to_keep), discarded_files=list(files_to_discard))
-                else:
-                    return FinalizeResult(success=False, error=f"Git commit failed: {result.stderr}",
-                                          kept_files=list(files_to_keep), discarded_files=list(files_to_discard))
-            else:
-                return FinalizeResult(success=True, commit_hash=None, kept_files=[], discarded_files=list(files_to_discard))
-        except Exception as e:
-            return FinalizeResult(success=False, error=str(e))
-
-    @property
-    def base_branch(self) -> str | None:
-        return self._base_branch
-
-    async def merge_to_base(self, delete_branch: bool = True) -> dict:
-        """Merge task branch back to the base branch."""
-        if not self._branch_name:
-            return {"success": False, "merged": False, "branch_deleted": False, "from_branch": "", "to_branch": "", "error": "No active branch"}
-        if not self._base_branch:
-            return {"success": False, "merged": False, "branch_deleted": False, "from_branch": self._branch_name, "to_branch": "", "error": "Base branch not recorded."}
-
-        task_branch = self._branch_name
-        target_branch = self._base_branch
-        try:
-            result = await self._run_git(["checkout", target_branch])
-            if result.returncode != 0:
-                return {"success": False, "merged": False, "branch_deleted": False, "from_branch": task_branch, "to_branch": target_branch, "error": f"Failed to checkout {target_branch}: {result.stderr}"}
-
-            result = await self._run_git(["merge", "--no-ff", task_branch, "-m", f"Merge {task_branch}"])
-            if result.returncode != 0:
-                await self._run_git(["checkout", task_branch])
-                return {"success": False, "merged": False, "branch_deleted": False, "from_branch": task_branch, "to_branch": target_branch, "error": f"Merge failed: {result.stderr}"}
-
-            branch_deleted = False
-            if delete_branch:
-                delete_result = await self._run_git(["branch", "-d", task_branch])
-                branch_deleted = delete_result.returncode == 0
-                if not branch_deleted:
-                    delete_result = await self._run_git(["branch", "-D", task_branch])
-                    branch_deleted = delete_result.returncode == 0
-
-            self._active_session = None
-            self._branch_name = None
-            return {"success": True, "merged": True, "branch_deleted": branch_deleted, "from_branch": task_branch, "to_branch": target_branch, "error": None}
-        except Exception as e:
-            return {"success": False, "merged": False, "branch_deleted": False, "from_branch": task_branch, "to_branch": target_branch, "error": str(e)}
-
-    async def cleanup(self) -> bool:
-        """Clean up session (checkout base branch)."""
-        if not self._active_session:
-            return True
-        try:
-            if self._base_branch:
-                await self._run_git(["checkout", self._base_branch])
-            self._active_session = None
-            self._branch_name = None
-            return True
-        except Exception:
-            return False
-
-    async def _run_git(self, args: list[str]) -> subprocess.CompletedProcess:
-        """Run a git command."""
-        proc = await asyncio.create_subprocess_exec(
-            "git", *args, cwd=str(self.repo_path),
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await proc.communicate()
-        return subprocess.CompletedProcess(
-            args=["git"] + args, returncode=proc.returncode,
-            stdout=stdout.decode() if stdout else "", stderr=stderr.decode() if stderr else "",
-        )
+# Keep old names for backward compatibility
+OverlayManager = BranchManager
+OverlaySetupResult = BranchSetupResult
+OverlayChanges = BranchChanges
