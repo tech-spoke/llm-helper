@@ -2016,6 +2016,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             session.quality_revert_count += 1
             if session.quality_revert_count > session.quality_review_max_revert:
                 # Force completion - max reverts exceeded
+                session.quality_review_completed = True  # Allow merge_to_base
                 result = {
                     "success": True,
                     "issues_found": True,
