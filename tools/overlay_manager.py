@@ -255,6 +255,180 @@ class BranchManager:
             }
 
     @classmethod
+    async def list_stale_branches(cls, repo_path: str) -> dict:
+        """
+        List all llm_task_* branches that might be stale.
+
+        v1.6: Used by begin_phase_gate for stale branch warning.
+
+        Args:
+            repo_path: Path to the git repository root
+
+        Returns:
+            {
+                "current_branch": str,
+                "is_on_task_branch": bool,
+                "stale_branches": [
+                    {
+                        "name": str,
+                        "session_id": str | None,
+                        "base_branch": str | None,
+                        "has_changes": bool,
+                        "commit_count": int
+                    }
+                ]
+            }
+        """
+        repo = Path(repo_path).resolve()
+        stale_branches = []
+
+        try:
+            # Get current branch
+            proc = await asyncio.create_subprocess_exec(
+                "git", "rev-parse", "--abbrev-ref", "HEAD",
+                cwd=str(repo),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await proc.communicate()
+            current_branch = stdout.decode().strip() if proc.returncode == 0 else ""
+            is_on_task_branch = current_branch.startswith("llm_task_")
+
+            # List all llm_task_* branches
+            proc = await asyncio.create_subprocess_exec(
+                "git", "branch", "--list", "llm_task_*",
+                cwd=str(repo),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await proc.communicate()
+
+            if proc.returncode == 0 and stdout:
+                branches = [
+                    b.strip().lstrip("* ")
+                    for b in stdout.decode().strip().split("\n")
+                    if b.strip()
+                ]
+
+                for branch in branches:
+                    # Parse branch info
+                    parsed = cls.parse_task_branch(branch)
+                    session_id = parsed["session_id"] if parsed else None
+                    base_branch = parsed["base_branch"] if parsed else None
+
+                    # Check if branch has changes compared to base
+                    has_changes = False
+                    commit_count = 0
+
+                    if base_branch:
+                        # Count commits ahead of base
+                        proc = await asyncio.create_subprocess_exec(
+                            "git", "rev-list", "--count",
+                            f"{base_branch}..{branch}",
+                            cwd=str(repo),
+                            stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.PIPE,
+                        )
+                        stdout, _ = await proc.communicate()
+                        if proc.returncode == 0:
+                            try:
+                                commit_count = int(stdout.decode().strip())
+                                has_changes = commit_count > 0
+                            except ValueError:
+                                pass
+
+                    stale_branches.append({
+                        "name": branch,
+                        "session_id": session_id,
+                        "base_branch": base_branch,
+                        "has_changes": has_changes,
+                        "commit_count": commit_count,
+                    })
+
+            return {
+                "current_branch": current_branch,
+                "is_on_task_branch": is_on_task_branch,
+                "stale_branches": stale_branches,
+            }
+
+        except Exception as e:
+            return {
+                "current_branch": "",
+                "is_on_task_branch": False,
+                "stale_branches": [],
+                "error": str(e),
+            }
+
+    @classmethod
+    async def delete_branch(cls, repo_path: str, branch_name: str, force: bool = True) -> dict:
+        """
+        Delete a specific branch.
+
+        v1.6: Used by record_outcome to delete failed session branches.
+
+        Args:
+            repo_path: Path to the git repository root
+            branch_name: Name of branch to delete
+            force: Use -D (force) instead of -d
+
+        Returns:
+            {
+                "success": bool,
+                "deleted": str | None,
+                "error": str | None
+            }
+        """
+        repo = Path(repo_path).resolve()
+
+        try:
+            # Check if this is the current branch
+            proc = await asyncio.create_subprocess_exec(
+                "git", "rev-parse", "--abbrev-ref", "HEAD",
+                cwd=str(repo),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await proc.communicate()
+            current_branch = stdout.decode().strip() if proc.returncode == 0 else ""
+
+            if current_branch == branch_name:
+                return {
+                    "success": False,
+                    "deleted": None,
+                    "error": f"Cannot delete current branch '{branch_name}'. Checkout another branch first.",
+                }
+
+            # Delete the branch
+            delete_flag = "-D" if force else "-d"
+            proc = await asyncio.create_subprocess_exec(
+                "git", "branch", delete_flag, branch_name,
+                cwd=str(repo),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _, stderr = await proc.communicate()
+
+            if proc.returncode == 0:
+                return {
+                    "success": True,
+                    "deleted": branch_name,
+                    "error": None,
+                }
+            else:
+                return {
+                    "success": False,
+                    "deleted": None,
+                    "error": stderr.decode().strip() if stderr else "Unknown error",
+                }
+
+        except Exception as e:
+            return {
+                "success": False,
+                "deleted": None,
+                "error": str(e),
+            }
+
+    @classmethod
     async def cleanup_stale_sessions(cls, repo_path: str) -> dict:
         """
         Clean up stale task branches from interrupted runs.

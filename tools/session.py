@@ -131,6 +131,7 @@ class Phase(Enum):
     IMPACT_ANALYSIS = auto()  # Phase 4: analyze impact before implementation (v1.1)
     READY = auto()            # Phase 5: implementation allowed
     PRE_COMMIT = auto()       # Phase 6: garbage detection before commit (v1.2)
+    QUALITY_REVIEW = auto()   # Phase 7: quality check before merge (v1.5)
 
 
 class SemanticReason(Enum):
@@ -929,6 +930,11 @@ class SessionState:
     verification_failure_count: int = 0  # POST_IMPLEMENTATION_VERIFICATION failures
     intervention_count: int = 0  # Number of interventions triggered
     failure_history: list[dict] = field(default_factory=list)  # History of failures for analysis
+
+    # v1.5: Quality Review
+    quality_revert_count: int = 0  # Number of reverts from QUALITY_REVIEW to READY
+    quality_review_enabled: bool = True  # Whether quality review is enabled (--no-quality sets this to False)
+    quality_review_max_revert: int = 3  # Max revert count before forced completion
 
     def record_tool_call(
         self,

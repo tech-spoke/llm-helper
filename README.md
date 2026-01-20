@@ -1,6 +1,6 @@
 # Code Intelligence MCP Server
 
-> **Current Version: v1.3**
+> **Current Version: v1.5**
 
 An MCP server that provides Cursor IDE-like code intelligence capabilities using open source tools.
 
@@ -36,9 +36,11 @@ And have a mechanism to learn from failures.
 | Project Isolation | Independent learning data for each project |
 | Essential Context (v1.1) | Auto-provide design docs and project rules at session start |
 | Impact Analysis (v1.1) | Enforce impact verification before READY phase |
-| Garbage Isolation (v1.2) | Isolate changes with OverlayFS + Git branch, bulk discard with --clean |
+| Garbage Isolation (v1.2) | Isolate changes with Git branch, bulk discard with --clean |
 | Document Research (v1.3) | Sub-agent research of design docs for task-specific rules |
 | Markup Cross-Reference (v1.3) | Lightweight CSS/HTML/JS cross-reference analysis |
+| Intervention System (v1.4) | Retry-based intervention for stuck verification loops |
+| Quality Review (v1.5) | Post-implementation quality check with retry loop |
 
 ---
 
@@ -84,36 +86,56 @@ And have a mechanism to learn from failures.
 
 ---
 
-## Phase Gates
+## Processing Flow
 
-### Complete Flow
+Processing consists of 3 layers:
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│  Flag Check → Failure Check → Intent → Session Start → QueryFrame           │
+│  1. Preparation (Skill controlled)                                          │
+│     Flag Check → Failure Check → Intent → Session Start                    │
+│     → DOCUMENT_RESEARCH → QueryFrame                                       │
+│     ← skip DOCUMENT_RESEARCH with --no-doc-research                        │
 └─────────────────────────────────────────────────────────────────────────────┘
                                     ↓
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│  EXPLORATION → Symbol Validation → SEMANTIC* → VERIFICATION* → IMPACT       │
-│       ↓              ↓                ↓             ↓            ↓          │
-│  code-intel     Embedding         semantic     code verify   analyze_impact │
-│   tools         (NL→Symbol)        search      (hypo→fact)   (impact)       │
-│                                   (hypothesis)                              │
-│                                                                             │
-│  * SEMANTIC/VERIFICATION only when confidence=low                           │
-│  ← Skip this entire block with --quick / -g=n                               │
+│  2. Phase Gates (Server enforced)                                           │
+│     EXPLORATION → SEMANTIC* → VERIFICATION* → IMPACT_ANALYSIS → READY      │
+│     → POST_IMPL_VERIFY → PRE_COMMIT → QUALITY_REVIEW                       │
+│     ← --quick skips exploration, --no-verify/--no-quality skip each phase  │
 └─────────────────────────────────────────────────────────────────────────────┘
                                     ↓
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│  READY (impl) → POST_IMPLEMENTATION_VERIFICATION → PRE_COMMIT → Merge       │
-│       ↓                    ↓                           ↓           ↓        │
-│  Edit/Write           Run verifier prompt          Review changes  Merge    │
-│  (explored files only)  (Playwright/pytest)        Discard garbage to main  │
-│                                                                             │
-│  ← Skip VERIFICATION with --no-verify                                       │
-│  ← Loop back to READY on verification failure                               │
+│  3. Completion                                                              │
+│     Finalize & Merge                                                       │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
+
+### 1. Preparation (Skill controlled)
+
+Controlled by skill prompt (code.md). Server not involved.
+
+| Step | Description | Skip |
+|------|-------------|------|
+| Flag Check | Parse command options (`--quick`, etc.) | - |
+| Failure Check | Auto-detect previous failure, record to OutcomeLog | - |
+| Intent | Classify as IMPLEMENT / MODIFY / INVESTIGATE / QUESTION | - |
+| Session Start | Start session, get project_rules, create Git branch | - |
+| **DOCUMENT_RESEARCH** | Sub-agent researches design docs, extracts mandatory_rules | `--no-doc-research` |
+| QueryFrame | Decompose request into structured slots with Quote verification | - |
+
+### 2. Phase Gates (Server enforced)
+
+MCP server enforces phase transitions. LLM cannot skip arbitrarily.
+
+#### Phase Matrix
+
+| Option | Explore | Implement | Verify | Intervene | Garbage | Quality | Branch |
+|--------|:-------:|:---------:|:------:|:---------:|:-------:|:-------:|:------:|
+| (default) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `--no-verify` | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | ✅ |
+| `--no-quality` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
+| `--quick` / `-q` | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
 
 ### Tool Permissions by Phase
 
@@ -165,15 +187,16 @@ And have a mechanism to learn from failures.
 | `revert_to_exploration` | Return to EXPLORATION |
 | `update_context` | Update context summaries (v1.1) |
 
-### Garbage Detection (v1.2)
+### Garbage Detection & Quality Review (v1.2, v1.5)
 
 | Tool | Purpose |
 |------|---------|
 | `submit_for_review` | Transition to PRE_COMMIT phase |
 | `review_changes` | Show all file changes |
 | `finalize_changes` | Keep/discard files and commit |
+| `submit_quality_review` | Submit quality review result (v1.5) |
 | `merge_to_base` | Merge task branch to base branch |
-| `cleanup_stale_overlays` | Clean up interrupted sessions |
+| `cleanup_stale_sessions` | Clean up interrupted sessions |
 
 ### Improvement Cycle
 
@@ -352,16 +375,17 @@ Restart to reload the MCP server.
 
 ### What Changes
 
-| Item | v1.0 | v1.1 | v1.2 | v1.3 |
-|------|------|------|------|------|
-| Phases | 4 | 5 (IMPACT_ANALYSIS added) | 6 (PRE_COMMIT added) | 6 (DOCUMENT_RESEARCH step added) |
-| context.yml | None | Auto-generated | Auto-generated | doc_research added |
-| Design docs summary | None | Auto-provided at session start | Same | Sub-agent research |
-| Project rules | Manual CLAUDE.md reference | Auto-provided at session start | Same | Two-layer context |
-| Garbage isolation | None | None | OverlayFS + Git branch | Same |
-| Markup analysis | None | Relaxation only | Same | Cross-reference detection |
-| verifiers/ | None | None | None | Verification prompts |
-| doc_research/ | None | None | None | Research prompts |
+| Item | v1.0 | v1.1 | v1.2 | v1.3 | v1.4 | v1.5 |
+|------|------|------|------|------|------|------|
+| Phases | 4 | 5 | 6 | 6 | 6 | 7 (QUALITY_REVIEW) |
+| context.yml | None | Auto-generated | Auto-generated | doc_research added | Same | Same |
+| Design docs summary | None | Auto-provided | Same | Sub-agent research | Same | Same |
+| Garbage isolation | None | None | Git branch | Same | Same | Same |
+| Intervention | None | None | None | None | Retry-based | Same |
+| Quality review | None | None | None | None | None | Retry loop |
+| verifiers/ | None | None | None | Verification prompts | Same | Same |
+| interventions/ | None | None | None | None | Intervention prompts | Same |
+| review_prompts/ | None | None | None | None | None | Quality prompts |
 
 ### No Changes Required
 
@@ -385,34 +409,34 @@ The `context.yml` file will be automatically created on next session start.
 
 | Long | Short | Description |
 |------|-------|-------------|
-| `--no-verify` | - | Skip verification |
+| `--no-verify` | - | Skip verification (and intervention) |
+| `--no-quality` | - | Skip quality review (v1.5) |
 | `--only-verify` | `-v` | Run verification only (skip implementation) |
-| `--gate=LEVEL` | `-g=LEVEL` | Gate level: h(igh), m(iddle), l(ow), a(uto), n(one) |
-| `--quick` | `-q` | Skip exploration phases (= `-g=n`) |
+| `--quick` | `-q` | Minimal mode: implement + verify only (no branch) |
 | `--doc-research=PROMPTS` | - | Specify document research prompts (v1.3) |
 | `--no-doc-research` | - | Skip document research (v1.3) |
-| `--clean` | `-c` | Cleanup stale overlays |
+| `--clean` | `-c` | Cleanup stale sessions |
 | `--rebuild` | `-r` | Force full re-index |
 
-**Default behavior:** gate=high + implementation + verification (full mode)
+**Default behavior:** full mode (explore + implement + verify + garbage + quality)
 
 #### Examples
 
 ```bash
-# Full mode (default): gate=high + doc-research + impl + verify
+# Full mode (default): explore + implement + verify + garbage + quality
 /code add login feature
 
-# Skip verification
+# Skip verification (and intervention)
 /code --no-verify fix this bug
+
+# Skip quality review only
+/code --no-quality fix simple typo
 
 # Verification only (check existing implementation)
 /code -v sample/hello.html
 
-# Quick mode (skip exploration, impl + verify only)
+# Quick mode: implement + verify only (no branch, no garbage, no quality)
 /code -q change the button color to blue
-
-# Set gate level explicitly
-/code -g=m add password validation
 
 # Document research with specific prompts (v1.3)
 /code --doc-research=security add authentication
@@ -420,7 +444,7 @@ The `context.yml` file will be automatically created on next session start.
 # Skip document research (v1.3)
 /code --no-doc-research fix typo
 
-# Cleanup stale overlays
+# Cleanup stale sessions
 /code -c
 
 # Force full re-index
@@ -436,11 +460,8 @@ To discard files created in the previous session and start over:
 ```
 
 With `-c` / `--clean`:
-- Discards changes in current OverlayFS session
 - Deletes Git branches (`llm_task_*`)
 - Starts a new session from clean state
-
-**Note**: OverlayFS features are disabled if `fuse-overlayfs` is not installed.
 
 #### Normal Execution Flow
 
@@ -449,15 +470,19 @@ The skill automatically:
 2. Failure check (auto-detect and record previous failures)
 3. Intent determination
 4. Session start (auto-sync, essential context)
-5. DOCUMENT_RESEARCH (v1.3 - sub-agent doc research) ← skip with `--no-doc-research`
+5. DOCUMENT_RESEARCH (v1.3) ← skip with `--no-doc-research`
 6. QueryFrame extraction and verification
-7. EXPLORATION (find_definitions, find_references, etc.) ← skip with `--quick` / `-g=n`
-8. Symbol verification (Embedding) ← skip with `--quick` / `-g=n`
-9. SEMANTIC if needed ← skip with `--quick` / `-g=n`
-10. VERIFICATION (hypothesis verification) ← skip with `--quick` / `-g=n`
-11. IMPACT ANALYSIS (v1.1 - analyze affected files) ← skip with `--quick` / `-g=n`
+7. EXPLORATION ← skip with `--quick`
+8. Symbol verification (Embedding) ← skip with `--quick`
+9. SEMANTIC if needed ← skip with `--quick`
+10. VERIFICATION (hypothesis verification) ← skip with `--quick`
+11. IMPACT ANALYSIS ← skip with `--quick`
 12. READY (implementation)
 13. POST_IMPLEMENTATION_VERIFICATION ← skip with `--no-verify`
+14. INTERVENTION (v1.4) ← triggered on 3 consecutive verify failures
+15. GARBAGE DETECTION ← skip with `--quick`
+16. QUALITY REVIEW (v1.5) ← skip with `--no-quality` or `--quick`
+17. Finalize & Merge
 
 ### Direct tool invocation
 
@@ -501,7 +526,6 @@ At `/code` start, automatically determines if current request indicates "previou
 | ripgrep (rg) | Yes | search_text, find_references |
 | universal-ctags | Yes | find_definitions, get_symbols |
 | Python 3.10+ | Yes | Server |
-| fuse-overlayfs | No | Garbage isolation (v1.2, Linux only) |
 
 ### Python Packages
 
@@ -579,8 +603,10 @@ For version history and detailed changes, see:
 
 | Version | Description | Link |
 |---------|-------------|------|
+| v1.5 | Quality Review with retry loop | [v1.5](docs/updates/v1.5.md) |
+| v1.4 | Intervention System | [v1.4](docs/updates/v1.4.md) |
 | v1.3 | Document Research, Markup Cross-Reference | [v1.3](docs/updates/v1.3.md) |
-| v1.2 | OverlayFS, Gate Levels | [v1.2](docs/updates/v1.2.md) |
+| v1.2 | Git Branch Isolation | [v1.2](docs/updates/v1.2.md) |
 | v1.1 | Impact Analysis, Context Provider | [v1.1](docs/updates/v1.1.md) |
 
 ---

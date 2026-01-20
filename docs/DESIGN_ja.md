@@ -1,6 +1,6 @@
-# Code Intelligence MCP Server - 設計ドキュメント v1.3
+# Code Intelligence MCP Server - 設計ドキュメント v1.5
 
-> このドキュメントは v1.3 時点の完全なシステム仕様を記述しています。
+> このドキュメントは v1.5 時点の完全なシステム仕様を記述しています。
 > バージョン履歴については [CHANGELOG](#changelog) を参照してください。
 
 ---
@@ -53,7 +53,9 @@ LLM に決めさせない。従わないと進めない設計にする。
 | **改善サイクル** | DecisionLog + OutcomeLog による失敗からの学習 |
 | **プロジェクト分離** | プロジェクトごとに独立した学習データ |
 | **2層コンテキスト** | 静的プロジェクトルール + 動的タスク固有ルール |
-| **ゴミ検出** | OverlayFS でコミット前に変更をレビュー |
+| **ゴミ検出** | Git ブランチでコミット前に変更をレビュー |
+| **介入システム** | 検証ループにハマった時のリトライベース介入（v1.4） |
+| **品質レビュー** | 実装後の品質チェック、修正後は再チェック必須（v1.5） |
 
 ---
 
@@ -101,31 +103,84 @@ LLM に決めさせない。従わないと進めない設計にする。
 
 ---
 
-## フェーズゲート
+## 処理フロー
 
-システムは実装を6つのフェーズに分割し、各遷移時にサーバーが検証します。
+処理は3つのレイヤーで構成されます。
 
 ```
-EXPLORATION → SEMANTIC → VERIFICATION → IMPACT_ANALYSIS → READY → PRE_COMMIT
-     │            │            │               │              │          │
-     │            │            │               │              │          └─ レビュー＆コミット
-     │            │            │               │              └─ 実装許可
-     │            │            │               └─ 変更影響を検証
-     │            │            └─ 仮説をコードで検証
-     │            └─ 不足情報をセマンティック検索
-     └─ ツールでコードベースを探索
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  1. 準備フェーズ（Skill 制御）                                              │
+│     Flag Check → Failure Check → Intent → Session Start                    │
+│     → DOCUMENT_RESEARCH → QueryFrame                                       │
+│     ← --no-doc-research でスキップ可                                       │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    ↓
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  2. フェーズゲート（Server 強制）                                           │
+│     EXPLORATION → SEMANTIC* → VERIFICATION* → IMPACT_ANALYSIS → READY      │
+│     → POST_IMPL_VERIFY → PRE_COMMIT → QUALITY_REVIEW                       │
+│     ← --quick で探索スキップ、--no-verify/--no-quality で各フェーズスキップ │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    ↓
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  3. 完了                                                                    │
+│     Finalize & Merge                                                       │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### フェーズ詳細
+### 1. 準備フェーズ（Skill 制御）
+
+Skill プロンプト（code.md）が制御。サーバーは関与しない。
+
+| ステップ | 内容 | スキップ |
+|---------|------|---------|
+| Flag Check | コマンドオプション（`--quick` 等）をパース | - |
+| Failure Check | 前回セッションが失敗したか自動検出、OutcomeLog に記録 | - |
+| Intent Classification | IMPLEMENT / MODIFY / INVESTIGATE / QUESTION を判定 | - |
+| Session Start | セッション開始、project_rules 取得、Git ブランチ作成 | - |
+| **DOCUMENT_RESEARCH** | サブエージェントで設計ドキュメントを調査、mandatory_rules 抽出 | `--no-doc-research` |
+| QueryFrame Setup | ユーザー要求を構造化スロットに分解、Quote 検証 | - |
+
+**DOCUMENT_RESEARCH の詳細:**
+- Claude Code の Task ツール（Explore エージェント）を使用
+- `docs/` 配下のドキュメントを調査
+- タスク固有のルール・制約・依存関係を抽出
+- `mandatory_rules` として後続フェーズで参照
+
+### 2. フェーズゲート（Server 強制）
+
+MCP サーバーがフェーズ遷移を強制。LLM が勝手にスキップできない。
+
+#### フェーズマトリックス
+
+| オプション | 探索 | 実装 | 検証 | 介入 | ゴミ取 | 品質 | ブランチ |
+|-----------|:----:|:----:|:----:|:----:|:------:|:----:|:-------:|
+| (デフォルト) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `--no-verify` | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | ✅ |
+| `--no-quality` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
+| `--quick` / `-q` | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
+
+#### フェーズ詳細
 
 | フェーズ | 目的 | 許可ツール | 遷移条件 |
 |---------|------|-----------|----------|
-| EXPLORATION | コードベース理解 | query, find_definitions, find_references, search_text, analyze_structure | サーバー評価 "high" |
+| EXPLORATION | コードベース理解 | query, find_definitions, find_references, search_text | サーバー評価 "high" |
 | SEMANTIC | 情報ギャップを埋める | semantic_search | submit_semantic 完了 |
 | VERIFICATION | 仮説を検証 | 全探索ツール | submit_verification 完了 |
 | IMPACT_ANALYSIS | 変更影響を確認 | analyze_impact | 全 must_verify ファイル確認済み |
 | READY | 実装 | Edit, Write（探索済みファイルのみ） | - |
-| PRE_COMMIT | 変更レビュー | review_changes, finalize_changes | Overlay 有効時 |
+| POST_IMPL_VERIFY | 動作確認 | Playwright, pytest 等 | 検証成功（3回失敗で介入発動） |
+| PRE_COMMIT | ゴミ検出 | review_changes, finalize_changes | ゴミ除去完了 |
+| QUALITY_REVIEW | 品質チェック | submit_quality_review（Edit/Write 禁止） | 問題なし → 完了、問題あり → READY 差し戻し |
+
+### 3. 完了
+
+- `merge_to_base` でタスクブランチを元のブランチにマージ
+- Git ブランチを削除
+
+---
+
+## フェーズ詳細
 
 ### マークアップ緩和
 
@@ -242,15 +297,16 @@ doc_research:
 | `revert_to_exploration` | EXPLORATION フェーズに戻る |
 | `validate_symbol_relevance` | Embedding でシンボル関連性を検証 |
 
-### ゴミ検出（v1.2）
+### ゴミ検出 & 品質レビュー（v1.2, v1.5）
 
 | ツール | 説明 |
 |--------|------|
 | `submit_for_review` | PRE_COMMIT フェーズへ遷移 |
 | `review_changes` | 全ファイル変更を表示 |
 | `finalize_changes` | keep/discard してコミット |
+| `submit_quality_review` | 品質レビュー結果を報告（v1.5） |
 | `merge_to_base` | タスクブランチを元のブランチにマージ |
-| `cleanup_stale_overlays` | 中断セッションをクリーンアップ |
+| `cleanup_stale_sessions` | 中断セッションをクリーンアップ |
 
 ### インデックス & 学習
 
@@ -269,13 +325,13 @@ doc_research:
 
 | Long | Short | 説明 |
 |------|-------|------|
-| `--no-verify` | - | 実装後の検証をスキップ |
+| `--no-verify` | - | 検証をスキップ（介入もスキップ） |
+| `--no-quality` | - | 品質レビューをスキップ（v1.5） |
 | `--only-verify` | `-v` | 検証のみ実行 |
-| `--gate=LEVEL` | `-g=LEVEL` | ゲートレベル: h(igh), m(iddle), l(ow), a(uto), n(one) |
-| `--quick` | `-q` | 探索をスキップ（= `-g=n`） |
+| `--quick` | `-q` | 最小モード: 実装+検証のみ（ブランチなし） |
 | `--doc-research=PROMPTS` | - | 調査プロンプトを指定 |
 | `--no-doc-research` | - | ドキュメント調査をスキップ |
-| `--clean` | `-c` | stale オーバーレイをクリーンアップ |
+| `--clean` | `-c` | stale セッションをクリーンアップ |
 | `--rebuild` | `-r` | 全インデックスを強制再構築 |
 
 ### 実行フロー
@@ -327,13 +383,20 @@ Step 9: READY
 Step 9.5: POST_IMPLEMENTATION_VERIFICATION
     ├─ ファイルタイプに基づき verifier を選択
     ├─ verifier プロンプトを実行（.code-intel/verifiers/）
-    └─ 失敗時は Step 9 に戻る（--no-verify でスキップ）
+    ├─ 失敗時は Step 9 に戻る
+    └─ 3回連続失敗で介入発動（v1.4）
 
-Step 10: PRE_COMMIT（overlay 有効時）
-    ├─ review_changes
+Step 10: PRE_COMMIT（ゴミ検出）
+    ├─ review_changes（garbage_detection.md）
     └─ finalize_changes (keep/discard)
 
-Step 11: Merge（オプション）
+Step 10.5: QUALITY_REVIEW（v1.5）
+    ├─ quality_review.md に基づき品質チェック
+    ├─ 問題発見 → submit_quality_review(issues_found=true) → Step 9 (READY) に差し戻し
+    │            → 修正 → Step 9.5 → Step 10 → Step 10.5（再チェック）
+    └─ 問題なし → submit_quality_review(issues_found=false) → merge_to_base へ
+
+Step 11: Finalize
     └─ merge_to_base（元のブランチへ）
 ```
 
@@ -526,9 +589,11 @@ class DocResearchConfig:
     ↓
 [READY] → [check_write_target] → [Edit/Write]
     ↓
-[POST_IMPL_VERIFY] → [verifiers/*.md]
+[POST_IMPL_VERIFY] → [verifiers/*.md] → (3回失敗で介入)
     ↓
 [PRE_COMMIT] → [review_changes] → [finalize_changes]
+    ↓
+[QUALITY_REVIEW] → [quality_review.md] → (修正後は再チェック)
     ↓
 [merge_to_base]（元のブランチへ）
 ```
@@ -557,8 +622,10 @@ get_improvement_insights(limit=100)
 
 | Version | Description | Link |
 |---------|-------------|------|
+| v1.5 | Quality Review（品質レビュー） | [v1.5](updates/v1.5_ja.md) |
+| v1.4 | Intervention System（介入システム） | [v1.4](updates/v1.4_ja.md) |
 | v1.3 | Document Research, Markup Cross-Reference | [v1.3](updates/v1.3_ja.md) |
-| v1.2 | OverlayFS, Gate Levels | [v1.2](updates/v1.2_ja.md) |
+| v1.2 | Git Branch Isolation | [v1.2](updates/v1.2_ja.md) |
 | v1.1 | Impact Analysis, Context Provider | [v1.1](updates/v1.1_ja.md) |
 
 ドキュメント管理ルールは [DOCUMENTATION_RULES.md](DOCUMENTATION_RULES.md) を参照。

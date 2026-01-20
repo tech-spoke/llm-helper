@@ -547,9 +547,9 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="start_session",
             description="Start a new code implementation session with phase-gated execution. "
-                        "After calling this, extract QueryFrame using the prompt, then call set_query_frame. "
-                        "v1.2: Optional enable_overlay for garbage detection via OverlayFS. "
-                        "v1.2: gate_level controls exploration phase requirements (none skips to READY).",
+                        "v1.6: Preparation phase only. Branch creation moved to begin_phase_gate. "
+                        "After calling this, call begin_phase_gate to start phase gates. "
+                        "gate_level controls exploration phase requirements (none skips to READY).",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -567,19 +567,48 @@ async def list_tools() -> list[Tool]:
                         "description": "Project root path for agreements and learned_pairs (default: '.')",
                         "default": ".",
                     },
-                    "enable_overlay": {
-                        "type": "boolean",
-                        "description": "v1.2: Enable OverlayFS for garbage detection. Creates task branch and mounts overlay. Requires fuse-overlayfs.",
-                        "default": False,
-                    },
                     "gate_level": {
                         "type": "string",
                         "enum": ["high", "middle", "low", "auto", "none"],
-                        "description": "v1.2: Gate level for exploration phases. 'none' skips exploration and goes directly to READY (--quick / -g=n).",
+                        "description": "Gate level for exploration phases. 'none' skips exploration and goes directly to READY (--quick / -g=n).",
                         "default": "high",
+                    },
+                    "skip_quality": {
+                        "type": "boolean",
+                        "description": "v1.5: Skip QUALITY_REVIEW phase (--no-quality flag)",
+                        "default": False,
                     },
                 },
                 "required": ["intent", "query"],
+            },
+        ),
+        # v1.6: Phase gate start (separated from start_session)
+        Tool(
+            name="begin_phase_gate",
+            description="v1.6: Start phase gate and create task branch. Call after start_session. "
+                        "If stale branches exist, returns error with recovery options (user must decide). "
+                        "Use skip_branch=true for --quick mode. "
+                        "Use resume_current=true to continue on current branch (for 'Continue as-is' option).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "session_id": {
+                        "type": "string",
+                        "description": "Session ID from start_session",
+                    },
+                    "skip_branch": {
+                        "type": "boolean",
+                        "description": "Skip branch creation (for --quick mode). Transitions directly to READY.",
+                        "default": False,
+                    },
+                    "resume_current": {
+                        "type": "boolean",
+                        "description": "Continue on current branch without creating new one (for 'Continue as-is' option). "
+                                       "If on llm_task_* branch, continues there. Otherwise creates new branch and ignores stale branches.",
+                        "default": False,
+                    },
+                },
+                "required": ["session_id"],
             },
         ),
         Tool(
@@ -877,11 +906,38 @@ async def list_tools() -> list[Tool]:
                 "required": ["reviewed_files"],
             },
         ),
+        # v1.5: Quality Review
+        Tool(
+            name="submit_quality_review",
+            description="v1.5: Report quality review results. "
+                        "Call after reviewing changes in QUALITY_REVIEW phase. "
+                        "If issues found, reverts to READY phase for fixes. "
+                        "If no issues, allows proceed to merge_to_base.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "issues_found": {
+                        "type": "boolean",
+                        "description": "Whether any quality issues were found",
+                    },
+                    "issues": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of issues found (required if issues_found=true). Each item should be 'description in file:line' format.",
+                    },
+                    "notes": {
+                        "type": "string",
+                        "description": "Additional notes or comments",
+                    },
+                },
+                "required": ["issues_found"],
+            },
+        ),
         Tool(
             name="merge_to_base",
             description="Merge task branch back to the base branch (where session started). "
                         "Automatically uses the branch that was active when start_session was called. "
-                        "Call after finalize_changes to complete the workflow.",
+                        "Call after finalize_changes (or submit_quality_review if enabled) to complete the workflow.",
             inputSchema={
                 "type": "object",
                 "properties": {},
@@ -1264,8 +1320,13 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         intent = arguments["intent"]
         query = arguments["query"]
         repo_path = arguments.get("repo_path", ".")
-        enable_overlay = arguments.get("enable_overlay", False)
         gate_level = arguments.get("gate_level", "high")
+        skip_quality = arguments.get("skip_quality", False)
+
+        # v1.6: enable_overlay parameter removed (branch creation moved to begin_phase_gate)
+        # For backward compatibility, accept but ignore it
+        if "enable_overlay" in arguments:
+            pass  # Ignored in v1.6
 
         session = session_manager.create_session(
             intent=intent,
@@ -1274,16 +1335,20 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             gate_level=gate_level,
         )
 
+        # v1.5: Set quality review enabled/disabled
+        session.quality_review_enabled = not skip_quality
+
         # Get extraction prompt for QueryFrame
         extraction_prompt = QueryDecomposer.get_extraction_prompt(query)
 
-        # v1.2: Determine message based on gate_level
+        # v1.6: Phase is now None (unset) until begin_phase_gate is called
+        # For backward compatibility with gate_level="none", set READY directly
         if gate_level == "none":
-            phase_message = f"Session started with gate=none. Exploration skipped, Phase: {session.phase.name} (READY)"
+            phase_message = f"Session started with gate=none. Phase: {session.phase.name} (READY)"
             next_step_message = "Proceed directly to implementation. Call set_query_frame for context, then Edit/Write."
         else:
-            phase_message = f"Session started. Phase: {session.phase.name}"
-            next_step_message = "Extract slots from query using the prompt, then call set_query_frame."
+            phase_message = f"Session started. v1.6: Call begin_phase_gate to start phase gates."
+            next_step_message = "Extract slots from query using the prompt, call set_query_frame, then call begin_phase_gate."
 
         result = {
             "success": True,
@@ -1291,8 +1356,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             "intent": session.intent,
             "current_phase": session.phase.name,
             "allowed_tools": session.get_allowed_tools(),
-            "repo_path": session.repo_path,  # v3.8
-            "gate_level": gate_level,  # v1.2
+            "repo_path": session.repo_path,
+            "gate_level": gate_level,
             "message": phase_message,
             # v3.6: QueryFrame extraction
             "query_frame": {
@@ -1300,46 +1365,9 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 "extraction_prompt": extraction_prompt,
                 "next_step": next_step_message,
             },
+            # v1.6: Next step indicator
+            "next_step": "Call begin_phase_gate to start phase gates" if gate_level != "none" else None,
         }
-
-        # v1.2.1: Git branch integration for garbage detection (OverlayFS removed)
-        if enable_overlay:
-            try:
-                branch_manager = BranchManager(repo_path)
-                setup_result = await branch_manager.setup_session(session.session_id)
-
-                if setup_result.success:
-                    # Store branch info in session
-                    session.overlay_enabled = True
-                    session.overlay_branch = setup_result.branch_name
-
-                    # Cache branch manager for this session
-                    _branch_managers[session.session_id] = branch_manager
-
-                    result["overlay"] = {
-                        "enabled": True,
-                        "branch": setup_result.branch_name,
-                        "base_branch": setup_result.base_branch,
-                        "note": "Task branch created. Changes tracked via git diff. "
-                                "v1.2.1: OverlayFS removed, using git branch only.",
-                    }
-                else:
-                    result["overlay"] = {
-                        "enabled": False,
-                        "error": setup_result.error,
-                        "note": "Branch setup failed. Proceeding without garbage detection.",
-                    }
-            except Exception as e:
-                result["overlay"] = {
-                    "enabled": False,
-                    "error": str(e),
-                    "note": "Branch setup failed. Proceeding without garbage detection.",
-                }
-        else:
-            result["overlay"] = {
-                "enabled": False,
-                "note": "Overlay not enabled. Set enable_overlay=true to enable garbage detection.",
-            }
 
         # v1.1: Essential context provision (design docs + project rules)
         # v1.3: Also includes doc_research configuration
@@ -1452,6 +1480,140 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 "Then call submit_understanding."
             )
         return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+
+    elif name == "begin_phase_gate":
+        # v1.6: Start phase gate (separated from start_session)
+        session_id = arguments["session_id"]
+        skip_branch = arguments.get("skip_branch", False)
+        resume_current = arguments.get("resume_current", False)
+
+        session = session_manager.get_session(session_id)
+        if session is None:
+            result = {
+                "success": False,
+                "error": "session_not_found",
+                "message": f"Session {session_id} not found. Call start_session first.",
+            }
+            return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+
+        repo_path = session.repo_path
+
+        # Check for stale branches (unless resume_current=true)
+        if not resume_current:
+            stale_info = await BranchManager.list_stale_branches(repo_path)
+            stale_branches = stale_info.get("stale_branches", [])
+            is_on_task_branch = stale_info.get("is_on_task_branch", False)
+
+            # If not on task branch and stale branches exist, block and require user decision
+            if not is_on_task_branch and stale_branches:
+                result = {
+                    "success": False,
+                    "error": "stale_branches_detected",
+                    "stale_branches": {
+                        "branches": stale_branches,
+                        "message": "Previous task branches exist. User action required.",
+                    },
+                    "recovery_options": {
+                        "delete": "Run cleanup_stale_sessions, then retry begin_phase_gate",
+                        "merge": "Run merge_to_base for each branch, then retry begin_phase_gate",
+                        "continue": "Call begin_phase_gate(resume_current=true) to leave stale branches and continue",
+                    },
+                }
+                return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+
+        # Handle skip_branch (--quick mode)
+        if skip_branch:
+            # Transition directly to READY without creating branch
+            session.phase = Phase.READY
+            session.overlay_enabled = False
+
+            result = {
+                "success": True,
+                "phase": "READY",
+                "branch": {
+                    "created": False,
+                    "reason": "skip_branch=true (quick mode)",
+                },
+            }
+            return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+
+        # Handle resume_current
+        if resume_current:
+            current_info = await BranchManager.is_task_branch_checked_out(repo_path)
+
+            if current_info.get("is_task_branch"):
+                # Already on a task branch - continue there
+                session.phase = Phase.EXPLORATION
+                session.overlay_enabled = True
+                session.overlay_branch = current_info["current_branch"]
+
+                result = {
+                    "success": True,
+                    "phase": "EXPLORATION",
+                    "branch": {
+                        "created": False,
+                        "resumed": True,
+                        "name": current_info["current_branch"],
+                        "reason": "resume_current=true (continuing on current task branch)",
+                    },
+                }
+                return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+            else:
+                # Not on task branch - create new one, but note stale branches are ignored
+                stale_info = await BranchManager.list_stale_branches(repo_path)
+                ignored_branches = [b["name"] for b in stale_info.get("stale_branches", [])]
+
+                # Fall through to create new branch, but include stale_branches_ignored in response
+                pass
+
+        # Create new branch (normal flow or resume_current on non-task branch)
+        try:
+            branch_manager = BranchManager(repo_path)
+            setup_result = await branch_manager.setup_session(session.session_id)
+
+            if setup_result.success:
+                session.phase = Phase.EXPLORATION
+                session.overlay_enabled = True
+                session.overlay_branch = setup_result.branch_name
+
+                # Cache branch manager for this session
+                _branch_managers[session.session_id] = branch_manager
+
+                result = {
+                    "success": True,
+                    "phase": "EXPLORATION",
+                    "branch": {
+                        "created": True,
+                        "name": setup_result.branch_name,
+                        "base_branch": setup_result.base_branch,
+                    },
+                }
+
+                # If resume_current was used but we created new branch, note ignored branches
+                if resume_current:
+                    stale_info = await BranchManager.list_stale_branches(repo_path)
+                    # Re-fetch since we just created a new branch
+                    ignored = [b["name"] for b in stale_info.get("stale_branches", [])
+                               if b["name"] != setup_result.branch_name]
+                    if ignored:
+                        result["branch"]["stale_branches_ignored"] = ignored
+
+                return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+            else:
+                result = {
+                    "success": False,
+                    "error": "branch_setup_failed",
+                    "message": setup_result.error,
+                }
+                return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+
+        except Exception as e:
+            result = {
+                "success": False,
+                "error": "branch_setup_exception",
+                "message": str(e),
+            }
+            return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
     elif name == "set_query_frame":
         # v3.6: Set QueryFrame from LLM extraction
@@ -1727,11 +1889,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 }
                 for c in changes.changes
             ],
-            "review_prompt": (
-                "Review each change and decide: keep (necessary for the task) or discard (garbage). "
-                "Garbage indicators: debug logs, console.log, commented code, test files not requested, "
-                "unrelated modifications, temporary hacks."
-            ),
+            "review_prompt": "Read .code-intel/review_prompts/garbage_detection.md and follow its instructions to review each change.",
         }
         return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
@@ -1787,21 +1945,103 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         )
 
         if finalize_result.success:
-            result = {
-                "success": True,
-                "commit_hash": finalize_result.commit_hash,
-                "kept_files": finalize_result.kept_files,
-                "discarded_files": finalize_result.discarded_files,
-                "branch": session.overlay_branch,
-                "message": f"Changes finalized. Committed to {session.overlay_branch}.",
-                "next_step": "Call merge_to_base to merge back to original branch, or record_outcome to record result.",
-            }
+            # v1.5: Transition to QUALITY_REVIEW phase (if enabled)
+            if session.quality_review_enabled:
+                session.phase = Phase.QUALITY_REVIEW
+                result = {
+                    "success": True,
+                    "commit_hash": finalize_result.commit_hash,
+                    "kept_files": finalize_result.kept_files,
+                    "discarded_files": finalize_result.discarded_files,
+                    "branch": session.overlay_branch,
+                    "phase": "QUALITY_REVIEW",
+                    "message": f"Changes finalized. Committed to {session.overlay_branch}. Now in QUALITY_REVIEW phase.",
+                    "next_step": "Read .code-intel/review_prompts/quality_review.md and follow instructions. Call submit_quality_review when done.",
+                }
+            else:
+                # Quality review disabled (--no-quality)
+                result = {
+                    "success": True,
+                    "commit_hash": finalize_result.commit_hash,
+                    "kept_files": finalize_result.kept_files,
+                    "discarded_files": finalize_result.discarded_files,
+                    "branch": session.overlay_branch,
+                    "message": f"Changes finalized. Committed to {session.overlay_branch}. Quality review skipped.",
+                    "next_step": "Call merge_to_base to merge back to original branch, or record_outcome to record result.",
+                }
         else:
             result = {
                 "success": False,
                 "error": finalize_result.error,
                 "kept_files": finalize_result.kept_files,
                 "discarded_files": finalize_result.discarded_files,
+            }
+
+        return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+
+    elif name == "submit_quality_review":
+        # v1.5: Quality Review phase handler
+        session = session_manager.get_active_session()
+        if session is None:
+            result = {"error": "no_active_session", "message": "No active session."}
+            return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+
+        if session.phase != Phase.QUALITY_REVIEW:
+            result = {
+                "error": "phase_blocked",
+                "current_phase": session.phase.name,
+                "message": f"submit_quality_review only allowed in QUALITY_REVIEW phase, current: {session.phase.name}",
+            }
+            return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+
+        issues_found = arguments.get("issues_found", False)
+        issues = arguments.get("issues", [])
+        notes = arguments.get("notes")
+
+        if issues_found:
+            # Validate issues list
+            if not issues:
+                result = {
+                    "error": "issues_required",
+                    "message": "issues_found=true requires non-empty issues list",
+                }
+                return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+
+            # Check max revert count
+            session.quality_revert_count += 1
+            if session.quality_revert_count > session.quality_review_max_revert:
+                # Force completion - max reverts exceeded
+                result = {
+                    "success": True,
+                    "issues_found": True,
+                    "forced_completion": True,
+                    "issues": issues,
+                    "revert_count": session.quality_revert_count,
+                    "message": f"Max revert count ({session.quality_review_max_revert}) exceeded. Forcing completion.",
+                    "warning": "Quality issues may remain unresolved.",
+                    "next_action": "Call merge_to_base to complete",
+                }
+                return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+
+            # Revert to READY phase for fixes
+            session.phase = Phase.READY
+            result = {
+                "success": True,
+                "issues_found": True,
+                "issues": issues,
+                "revert_count": session.quality_revert_count,
+                "next_action": "Fix the issues in READY phase, then re-run verification",
+                "phase": "READY",
+                "message": "Reverted to READY phase. Fix issues and proceed through POST_IMPL_VERIFY → PRE_COMMIT → QUALITY_REVIEW.",
+            }
+        else:
+            # No issues - ready for merge
+            result = {
+                "success": True,
+                "issues_found": False,
+                "notes": notes,
+                "message": "Quality review passed. Ready for merge.",
+                "next_action": "Call merge_to_base to complete",
             }
 
         return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
@@ -1816,6 +2056,16 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             result = {
                 "error": "task_branch_not_enabled",
                 "message": "Task branch not enabled. Cannot merge without enable_overlay=true.",
+            }
+            return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+
+        # v1.5: Check if QUALITY_REVIEW is required but not completed
+        if session.quality_review_enabled and session.phase == Phase.QUALITY_REVIEW:
+            result = {
+                "error": "quality_review_required",
+                "current_phase": session.phase.name,
+                "message": "QUALITY_REVIEW phase not completed. Call submit_quality_review first.",
+                "next_action": "Read .code-intel/review_prompts/quality_review.md and call submit_quality_review",
             }
             return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
@@ -2074,6 +2324,62 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
             except Exception as e:
                 result["cache_error"] = str(e)
+
+        # v1.6: Auto-delete branch on failure
+        if arguments["outcome"] == "failure":
+            try:
+                # Determine repo_path
+                repo_path = "."
+                if session:
+                    repo_path = session.repo_path
+
+                # Find and delete the branch for this session
+                stale_info = await BranchManager.list_stale_branches(repo_path)
+                target_branch = None
+
+                for branch in stale_info.get("stale_branches", []):
+                    if branch.get("session_id") == session_id:
+                        target_branch = branch["name"]
+                        break
+
+                if target_branch:
+                    # Check if we're currently on this branch
+                    current_branch = stale_info.get("current_branch", "")
+                    if current_branch == target_branch:
+                        # Need to checkout base branch first
+                        parsed = BranchManager.parse_task_branch(target_branch)
+                        base_branch = parsed.get("base_branch") if parsed else "main"
+                        if base_branch:
+                            checkout_proc = await asyncio.create_subprocess_exec(
+                                "git", "checkout", base_branch,
+                                cwd=repo_path,
+                                stdout=asyncio.subprocess.PIPE,
+                                stderr=asyncio.subprocess.PIPE,
+                            )
+                            await checkout_proc.communicate()
+
+                    # Delete the branch
+                    delete_result = await BranchManager.delete_branch(repo_path, target_branch, force=True)
+
+                    result["branch_cleanup"] = {
+                        "attempted": True,
+                        "deleted": delete_result.get("deleted"),
+                        "message": "Failed session branch deleted automatically." if delete_result.get("success")
+                                   else f"Branch deletion failed: {delete_result.get('error')}",
+                    }
+                else:
+                    result["branch_cleanup"] = {
+                        "attempted": True,
+                        "deleted": None,
+                        "message": "No branch found for session (may have been deleted already).",
+                    }
+            except Exception as e:
+                result["branch_cleanup"] = {
+                    "attempted": True,
+                    "deleted": None,
+                    "error": str(e),
+                    "message": "Branch cleanup failed with exception.",
+                }
 
         return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 

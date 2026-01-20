@@ -1,4 +1,4 @@
-# /code - Code Implementation Agent v1.3
+# /code - Code Implementation Agent v1.6
 
 You are a code implementation agent. You understand user instructions, investigate the codebase, and perform implementations or modifications.
 
@@ -13,9 +13,10 @@ You are a code implementation agent. You understand user instructions, investiga
 │  Step -1: Flag Check                                                        │
 │  Step 0: Failure Check (Auto-failure Detection)                             │
 │  Step 1: Intent Classification                                              │
-│  Step 2: Session Start (+ Essential Context + Overlay)                      │
+│  Step 2: Session Start (+ Essential Context)                                │
 │  Step 2.5: DOCUMENT_RESEARCH [v1.3]  ← skip with --no-doc-research          │
 │  Step 3: QueryFrame Setup                                                   │
+│  Step 3.5: Begin Phase Gate [v1.6]  ← stale branch warning here             │
 └─────────────────────────────────────────────────────────────────────────────┘
                                     ↓
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -34,9 +35,11 @@ You are a code implementation agent. You understand user instructions, investiga
 │      ↓                                                                      │
 │  Step 9.5: POST_IMPLEMENTATION_VERIFICATION    ← skip with --no-verify      │
 │      ↓ (loop back to Step 9 on failure)                                     │
-│  Step 10: PRE_COMMIT (Garbage Detection) [if overlay enabled]               │
+│  Step 10: PRE_COMMIT (Garbage Detection)                                    │
 │      ↓                                                                      │
-│  Step 11: Finalize & Merge [if overlay enabled]                             │
+│  Step 10.5: QUALITY_REVIEW [v1.5]  ← skip with --no-quality or --quick      │
+│      ↓                                                                      │
+│  Step 11: Finalize & Merge                                                  │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -47,9 +50,10 @@ You are a code implementation agent. You understand user instructions, investiga
 | -1 | Flag Check | Parse command options (--quick, --no-verify, etc.) |
 | 0 | Failure Check | Auto-detect if previous fix failed |
 | 1 | Intent | Classify as IMPLEMENT/MODIFY/INVESTIGATE/QUESTION |
-| 2 | Session Start | Initialize session, load context, setup overlay |
+| 2 | Session Start | Initialize session, load context (no branch yet) |
 | 2.5 | DOCUMENT_RESEARCH | v1.3: Agentic RAG for mandatory rules |
 | 3 | QueryFrame | Extract structured slots from natural language |
+| 3.5 | Begin Phase Gate | v1.6: Create branch, handle stale branch warning |
 | 4 | EXPLORATION | Explore codebase with code-intel tools |
 | 5 | Symbol Validation | Verify NL→Symbol relevance via Embedding |
 | 6 | SEMANTIC | Semantic search for missing info (if needed) |
@@ -58,6 +62,7 @@ You are a code implementation agent. You understand user instructions, investiga
 | 9 | READY | Implementation allowed (Edit/Write) |
 | 9.5 | POST_IMPL_VERIFY | Run verifier prompts (Playwright/pytest) |
 | 10 | PRE_COMMIT | Review changes, discard garbage |
+| 10.5 | QUALITY_REVIEW | v1.5: Quality check before merge |
 | 11 | Finalize | Commit and merge to main |
 
 ---
@@ -78,8 +83,10 @@ You are a code implementation agent. You understand user instructions, investiga
 | `--quick` | `-q` | Skip exploration phases (= `--gate=none`) |
 | `--doc-research=PROMPTS` | - | Specify document research prompts (comma-separated) |
 | `--no-doc-research` | - | Skip document research phase |
+| `--no-quality` | - | Skip quality review phase (v1.5) |
+| `--no-intervention` | `-ni` | Skip intervention system (v1.4) |
 
-**Default behavior (no flags):** gate=high + implementation + verification (full mode)
+**Default behavior (no flags):** gate=high + implementation + verification + quality review (full mode)
 
 **Flag processing:**
 
@@ -123,7 +130,17 @@ You are a code implementation agent. You understand user instructions, investiga
    - Skip DOCUMENT_RESEARCH phase (Step 2.5)
    - Continue to Step 0
 
-**If NO flag detected:** Proceed to Step 0 with defaults (gate=high, verify=true, doc-research=context.yml default).
+9. **If `--no-quality` detected:**
+   - Skip QUALITY_REVIEW phase (Step 10.5)
+   - After PRE_COMMIT, proceed directly to merge_to_base
+   - Continue to Step 0
+
+10. **If `--no-intervention` or `-ni` detected:**
+    - Skip intervention system (v1.4)
+    - Verification failures will not trigger intervention prompts
+    - Continue to Step 0
+
+**If NO flag detected:** Proceed to Step 0 with defaults (gate=high, verify=true, quality=true, intervention=true, doc-research=context.yml default).
 
 ---
 
@@ -204,13 +221,12 @@ Analyze user instructions and output in the following format:
 
 ## Step 2: Session Start
 
-**IMPORTANT: Always set `enable_overlay: true` for garbage detection (v1.2 feature).**
+**v1.6: Preparation phase only. Branch creation moved to Step 3.5 (begin_phase_gate).**
 
 ```
 mcp__code-intel__start_session
   intent: "IMPLEMENT"
   query: "user's original request"
-  enable_overlay: true  # REQUIRED: Enable garbage detection
 ```
 
 **Response:**
@@ -229,29 +245,11 @@ mcp__code-intel__start_session
   },
   "context_update_required": {...},
   "query_frame": {...},
-  "overlay": {
-    "enabled": true,
-    "branch": "llm_task_abc123",
-    "merged_path": "/path/to/.overlay/merged/abc123",
-    "upper_path": "/path/to/.overlay/upper/abc123",
-    "note": "All file operations should use merged_path as working directory."
-  }
+  "next_step": "Call begin_phase_gate to start phase gates"
 }
 ```
 
-### v1.2: OverlayFS Integration
-
-**When `enable_overlay: true`:**
-1. Creates git branch: `llm_task_{session_id}`
-2. Mounts OverlayFS with current state as lower
-3. All changes are captured in `upper_path`
-4. Changes can be reviewed before commit (PRE_COMMIT phase)
-
-**Requirements:**
-- `fuse-overlayfs` installed: `sudo apt-get install -y fuse-overlayfs`
-- Git repository initialized
-
-**Note:** If overlay setup fails, session continues without overlay. Garbage detection will not be available.
+**Note:** Branch creation is now handled in Step 3.5 (begin_phase_gate). This separation allows for stale branch detection and user intervention before creating a new branch.
 
 ### Step 2.1: Context Update (if needed)
 
@@ -470,6 +468,107 @@ mcp__code-intel__set_query_frame
 | HIGH | MODIFY + issue unknown | Strict: all slots must be filled |
 | MEDIUM | IMPLEMENT or partially unknown | Standard requirements |
 | LOW | INVESTIGATE or all info available | Minimal OK |
+
+---
+
+## Step 3.5: Begin Phase Gate (v1.6)
+
+**Purpose:** Start phase gates and create task branch. Handles stale branch detection.
+
+```
+mcp__code-intel__begin_phase_gate
+  session_id: "session_id from step 2"
+  skip_branch: false  # true for --quick mode
+```
+
+### Normal Response (no stale branches)
+
+```json
+{
+  "success": true,
+  "phase": "EXPLORATION",
+  "branch": {
+    "created": true,
+    "name": "llm_task_abc123_from_main",
+    "base_branch": "main"
+  }
+}
+```
+
+### Stale Branch Detected Response
+
+If `success: false` and `error: "stale_branches_detected"`:
+
+```json
+{
+  "success": false,
+  "error": "stale_branches_detected",
+  "stale_branches": {
+    "branches": [
+      {
+        "name": "llm_task_xyz_from_main",
+        "session_id": "xyz",
+        "base_branch": "main",
+        "has_changes": true,
+        "commit_count": 3
+      }
+    ],
+    "message": "Previous task branches exist. User action required."
+  },
+  "recovery_options": {
+    "delete": "Run cleanup_stale_sessions, then retry begin_phase_gate",
+    "merge": "Run merge_to_base for each branch, then retry begin_phase_gate",
+    "continue": "Call begin_phase_gate(resume_current=true) to leave stale branches and continue"
+  }
+}
+```
+
+### Handling Stale Branch Warning
+
+**Use AskUserQuestion to get user decision:**
+
+```
+AskUserQuestion:
+  question: "Previous task branches exist. What would you like to do?"
+  header: "Stale branch"
+  options:
+    - label: "Delete and continue"
+      description: "Discard previous changes and start clean"
+    - label: "Merge and continue"
+      description: "Incorporate previous changes into current branch first"
+    - label: "Continue as-is"
+      description: "Keep previous branches and start new session"
+```
+
+**Based on user choice:**
+
+| Choice | Action |
+|--------|--------|
+| Delete and continue | `cleanup_stale_sessions` → retry `begin_phase_gate` |
+| Merge and continue | `merge_to_base` for each → retry `begin_phase_gate` |
+| Continue as-is | `begin_phase_gate(resume_current=true)` |
+
+### skip_branch=true (--quick mode)
+
+For `--quick` mode, skip branch creation:
+
+```
+mcp__code-intel__begin_phase_gate
+  session_id: "session_id"
+  skip_branch: true
+```
+
+Response:
+```json
+{
+  "success": true,
+  "phase": "READY",
+  "branch": {
+    "created": false,
+    "reason": "skip_branch=true (quick mode)"
+  }
+}
+```
 
 ---
 
@@ -924,6 +1023,107 @@ mcp__code-intel__finalize_changes
 
 ---
 
+## Step 10.5: QUALITY_REVIEW Phase (v1.5)
+
+**When executed:** After PRE_COMMIT (finalize_changes), before merge_to_base
+
+**Skip conditions:**
+- `--no-quality` flag specified
+- `--quick` / `-q` mode (no branch, no garbage detection, so quality review unnecessary)
+
+**Purpose:** Post-PRE_COMMIT, pre-merge quality check based on `.code-intel/review_prompts/quality_review.md`
+
+### 10.5.1: Execute Quality Review
+
+1. Read `.code-intel/review_prompts/quality_review.md`
+
+2. Review changes following the checklist:
+
+| Category | Check Items |
+|----------|-------------|
+| Code Quality | Unused imports, dead code, duplicate code |
+| Conventions | CLAUDE.md rules, naming conventions, file structure |
+| Security | Hardcoded secrets, sensitive data in logs, input validation |
+| Performance | N+1 queries, unnecessary loops, memory leaks |
+
+### 10.5.2: Report Results
+
+**When issues found:**
+```
+mcp__code-intel__submit_quality_review
+  issues_found: true
+  issues: [
+    "Unused import 'os' in auth/service.py:3",
+    "console.log left in auth/service.js:45",
+    "Missing type hints in validate_user function"
+  ]
+```
+
+**Response (revert to READY):**
+```json
+{
+  "success": true,
+  "issues_found": true,
+  "issues": ["..."],
+  "next_action": "Fix the issues in READY phase, then re-run verification",
+  "phase": "READY",
+  "message": "Reverted to READY phase. Fix issues and proceed through POST_IMPL_VERIFY → PRE_COMMIT → QUALITY_REVIEW."
+}
+```
+
+**When no issues:**
+```
+mcp__code-intel__submit_quality_review
+  issues_found: false
+  notes: "All checks passed"
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "issues_found": false,
+  "message": "Quality review passed. Ready for merge.",
+  "next_action": "Call merge_to_base to complete"
+}
+```
+
+### 10.5.3: Handle Revert
+
+**When issues found → Reverted to READY:**
+1. Fix the issues in READY phase
+2. Re-traverse: POST_IMPL_VERIFY → PRE_COMMIT → QUALITY_REVIEW
+3. Repeat until no issues found
+
+**Important:** Fixes are forbidden in QUALITY_REVIEW phase. Always report → revert → fix in READY.
+
+### 10.5.4: Error Handling
+
+**max_revert_count exceeded (default: 3):**
+```json
+{
+  "success": true,
+  "issues_found": true,
+  "forced_completion": true,
+  "message": "Max revert count (3) exceeded. Forcing completion.",
+  "warning": "Quality issues may remain unresolved.",
+  "next_action": "Call merge_to_base to complete"
+}
+```
+
+**quality_review.md not found:**
+```json
+{
+  "success": true,
+  "skipped": true,
+  "warning": "quality_review.md not found at .code-intel/review_prompts/quality_review.md",
+  "message": "Quality review skipped. Proceeding to merge.",
+  "next_action": "Call merge_to_base to complete"
+}
+```
+
+---
+
 ## Step 11: Merge to Base (v1.2, Optional)
 
 **Purpose:** Merge task branch back to the base branch (where session started)
@@ -1086,6 +1286,12 @@ mcp__code-intel__sync_index
 # Skip document research
 /code --no-doc-research fix typo in README
 
+# Skip quality review (quick commit)
+/code --no-quality fix simple typo
+
+# Skip intervention system
+/code -ni fix obvious bug
+
 # Cleanup stale overlays
 /code -c
 
@@ -1103,6 +1309,8 @@ mcp__code-intel__sync_index
 | `--quick` | `-q` | Skip exploration (= `-g=n`) |
 | `--doc-research=PROMPTS` | - | Document research prompts (comma-separated) |
 | `--no-doc-research` | - | Skip document research phase |
+| `--no-quality` | - | Skip quality review phase (v1.5) |
+| `--no-intervention` | `-ni` | Skip intervention system (v1.4) |
 | `--clean` | `-c` | Cleanup stale overlays |
 | `--rebuild` | `-r` | Force full re-index of all indexes |
 
