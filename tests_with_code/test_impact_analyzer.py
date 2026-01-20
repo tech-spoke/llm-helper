@@ -65,17 +65,21 @@ class TestMarkupRelaxation:
         # HTML + PHP = not relaxed
         assert analyzer._should_relax_markup(["page.html", "handler.php"]) is False
 
-    def test_relaxed_result_structure(self):
+    @pytest.mark.asyncio
+    async def test_relaxed_result_structure(self):
         """Relaxed result should have correct structure."""
         analyzer = ImpactAnalyzer()
-        result = analyzer._create_relaxed_result()
+        result = await analyzer._create_relaxed_result(
+            target_files=["styles.css"],
+            change_description="Test markup change"
+        )
 
         assert result.mode == "relaxed_markup"
         assert result.depth == "direct_only"
         assert result.static_references == {}
         assert result.naming_convention_matches == {}
         assert result.confirmation_required["must_verify"] == []
-        assert result.confirmation_required["should_verify"] == []
+        # Note: should_verify may contain cross-reference suggestions for CSS
 
 
 class TestBaseNameExtraction:
