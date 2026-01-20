@@ -1994,7 +1994,12 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             }
             return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
-        issues_found = arguments.get("issues_found", False)
+        issues_found_raw = arguments.get("issues_found", False)
+        # Handle string "true"/"false" from MCP clients
+        if isinstance(issues_found_raw, str):
+            issues_found = issues_found_raw.lower() == "true"
+        else:
+            issues_found = bool(issues_found_raw)
         issues = arguments.get("issues", [])
         notes = arguments.get("notes")
 
