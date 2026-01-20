@@ -6,6 +6,7 @@ allowing all session changes to be tracked and reviewed before commit.
 
 v1.2 Original: OverlayFS + Git Integration
 v1.2.1: Git branch only (OverlayFS removed)
+v1.2.2: Branch naming with base branch info (llm_task_{timestamp}_from_{base})
 
 Rationale for removing OverlayFS:
 - LLM edit tools use repository root path, not merged_path
@@ -13,10 +14,11 @@ Rationale for removing OverlayFS:
 - Without parallel execution benefit, git branch alone is sufficient
 
 Features:
-- Create task branch at session start (llm_task_{session_id})
+- Create task branch at session start (llm_task_{timestamp}_from_{base})
 - Track changes via git diff (not overlay upper layer)
 - Support garbage detection via LLM review (PRE_COMMIT phase)
 - Clean merge back to base branch
+- Base branch encoded in branch name (no external file needed)
 
 Requirements:
 - Git repository initialized
@@ -45,8 +47,10 @@ Usage:
 """
 
 import asyncio
+import re
 import subprocess
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
@@ -111,6 +115,84 @@ class BranchManager:
         self._branch_name: str | None = None
         self._base_branch: str | None = None  # Branch we started from
 
+    # =========================================================================
+    # v1.2.2: Branch Naming Utilities
+    # =========================================================================
+
+    @staticmethod
+    def _encode_branch_name(base_branch: str) -> str:
+        """
+        Encode branch name for use in task branch name.
+        Replaces '/' with '__' to create valid git branch names.
+
+        Examples:
+            main -> main
+            feature/login -> feature__login
+            release/v1.0 -> release__v1.0
+        """
+        return base_branch.replace("/", "__")
+
+    @staticmethod
+    def _decode_branch_name(encoded: str) -> str:
+        """
+        Decode branch name from task branch name.
+        Replaces '__' back to '/'.
+
+        Examples:
+            main -> main
+            feature__login -> feature/login
+        """
+        return encoded.replace("__", "/")
+
+    @classmethod
+    def _generate_branch_name(cls, session_id: str, base_branch: str) -> str:
+        """
+        Generate task branch name with base branch info.
+
+        Format: llm_task_{timestamp}_from_{encoded_base}
+
+        Args:
+            session_id: Session identifier (used as timestamp)
+            base_branch: Base branch to encode
+
+        Returns:
+            Branch name like 'llm_task_20260120_114303_from_main'
+        """
+        encoded_base = cls._encode_branch_name(base_branch)
+        return f"llm_task_{session_id}_from_{encoded_base}"
+
+    @classmethod
+    def parse_task_branch(cls, branch_name: str) -> dict | None:
+        """
+        Parse task branch name to extract session_id and base_branch.
+
+        Args:
+            branch_name: Branch name to parse
+
+        Returns:
+            {"session_id": str, "base_branch": str} or None if not a task branch
+        """
+        # Pattern: llm_task_{session_id}_from_{encoded_base}
+        match = re.match(r"llm_task_([^_]+(?:_[^_]+)?)_from_(.+)$", branch_name)
+        if match:
+            session_id = match.group(1)
+            encoded_base = match.group(2)
+            return {
+                "session_id": session_id,
+                "base_branch": cls._decode_branch_name(encoded_base),
+            }
+
+        # Legacy format: llm_task_{session_id} (without _from_)
+        # For backward compatibility
+        legacy_match = re.match(r"llm_task_(.+)$", branch_name)
+        if legacy_match and "_from_" not in branch_name:
+            return {
+                "session_id": legacy_match.group(1),
+                "base_branch": None,  # Unknown for legacy format
+            }
+
+        return None
+
     @classmethod
     async def is_task_branch_checked_out(cls, repo_path: str) -> dict:
         """
@@ -150,17 +232,19 @@ class BranchManager:
             is_task = current_branch.startswith("llm_task_")
 
             session_id = None
+            base_branch = None
             if is_task:
-                # Extract session_id from branch name
-                # Format: llm_task_{session_id} or llm_task_session_{session_id}
-                parts = current_branch.split("_", 2)  # ['llm', 'task', 'session_xxx']
-                if len(parts) >= 3:
-                    session_id = parts[2]
+                # Use parse_task_branch for consistent parsing
+                parsed = cls.parse_task_branch(current_branch)
+                if parsed:
+                    session_id = parsed["session_id"]
+                    base_branch = parsed["base_branch"]
 
             return {
                 "is_task_branch": is_task,
                 "current_branch": current_branch,
                 "session_id": session_id,
+                "base_branch": base_branch,  # v1.2.2: Include base branch info
             }
 
         except Exception:
@@ -292,8 +376,8 @@ class BranchManager:
             else:
                 self._base_branch = "main"  # Fallback
 
-            # Step 2: Create and checkout new git branch
-            branch_name = f"llm_task_{session_id}"
+            # Step 2: Create and checkout new git branch (v1.2.2: with base branch info)
+            branch_name = self._generate_branch_name(session_id, self._base_branch)
             result = await self._run_git(["checkout", "-b", branch_name])
             if result.returncode != 0:
                 # Branch might already exist, try to checkout
