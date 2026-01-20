@@ -937,6 +937,16 @@ class SessionState:
     quality_review_max_revert: int = 3  # Max revert count before forced completion
     quality_review_completed: bool = False  # Whether quality review passed (issues_found=false)
 
+    @property
+    def gate_level(self) -> str:
+        """Get gate level for exploration phases."""
+        return self._gate_level
+
+    @gate_level.setter
+    def gate_level(self, value: str) -> None:
+        """Set gate level for exploration phases."""
+        self._gate_level = value
+
     def record_tool_call(
         self,
         tool: str,
