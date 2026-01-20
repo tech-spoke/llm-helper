@@ -976,6 +976,55 @@ async def list_tools() -> list[Tool]:
                 "properties": {},
             },
         ),
+        # v1.4: Intervention System Tools
+        Tool(
+            name="record_verification_failure",
+            description="Record a verification failure for intervention system tracking. "
+                        "Call this when POST_IMPLEMENTATION_VERIFICATION fails. "
+                        "After 3 failures, intervention is triggered with guidance to select appropriate intervention prompt.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "error_message": {
+                        "type": "string",
+                        "description": "What differed from expectation (e.g., 'logo not displayed, color still #ff0000')",
+                    },
+                    "problem_location": {
+                        "type": "string",
+                        "description": "Where the problem was found (e.g., 'inside header element, .btn-primary class')",
+                    },
+                    "observed_values": {
+                        "type": "string",
+                        "description": "Specific values observed (e.g., 'actual color is #333333, element not found')",
+                    },
+                },
+                "required": ["error_message", "problem_location", "observed_values"],
+            },
+        ),
+        Tool(
+            name="record_intervention_used",
+            description="Record that an intervention prompt was used. "
+                        "Call this after reading and following an intervention prompt from .code-intel/interventions/.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "prompt_name": {
+                        "type": "string",
+                        "description": "Name of intervention prompt used (e.g., 'step_back', 'user_escalation')",
+                    },
+                },
+                "required": ["prompt_name"],
+            },
+        ),
+        Tool(
+            name="get_intervention_status",
+            description="Get current intervention system status. "
+                        "Shows verification failure count, intervention count, and whether escalation is required.",
+            inputSchema={
+                "type": "object",
+                "properties": {},
+            },
+        ),
         Tool(
             name="validate_symbol_relevance",
             description="Validate relevance between natural language term and code symbols. "
@@ -1840,6 +1889,66 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                     f"If hung, run: {lock_info.get('manual_kill_command')}"
                 )
 
+        return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+
+    # =========================================================================
+    # v1.4: Intervention System Handlers
+    # =========================================================================
+
+    elif name == "record_verification_failure":
+        # Record verification failure for intervention tracking
+        session = session_manager.get_active_session()
+        if not session:
+            return [TextContent(
+                type="text",
+                text=json.dumps({
+                    "error": "No active session. Start a session first.",
+                }, ensure_ascii=False),
+            )]
+
+        failure_info = {
+            "phase": "POST_IMPLEMENTATION_VERIFICATION",
+            "error_message": arguments["error_message"],
+            "problem_location": arguments["problem_location"],
+            "observed_values": arguments["observed_values"],
+            "attempt_number": session.verification_failure_count + 1,
+        }
+
+        result = session.record_verification_failure(failure_info)
+        return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+
+    elif name == "record_intervention_used":
+        # Record that an intervention prompt was used
+        session = session_manager.get_active_session()
+        if not session:
+            return [TextContent(
+                type="text",
+                text=json.dumps({
+                    "error": "No active session. Start a session first.",
+                }, ensure_ascii=False),
+            )]
+
+        prompt_name = arguments["prompt_name"]
+        result = session.record_intervention_used(prompt_name)
+
+        # Reset verification failure count after intervention
+        session.reset_verification_failures()
+        result["verification_failures_reset"] = True
+
+        return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+
+    elif name == "get_intervention_status":
+        # Get current intervention system status
+        session = session_manager.get_active_session()
+        if not session:
+            return [TextContent(
+                type="text",
+                text=json.dumps({
+                    "error": "No active session. Start a session first.",
+                }, ensure_ascii=False),
+            )]
+
+        result = session.get_intervention_status()
         return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
     elif name == "record_outcome":
