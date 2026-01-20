@@ -917,8 +917,8 @@ async def list_tools() -> list[Tool]:
                 "type": "object",
                 "properties": {
                     "issues_found": {
-                        "type": "boolean",
-                        "description": "Whether any quality issues were found",
+                        "type": ["boolean", "string"],
+                        "description": "Whether any quality issues were found (true/false or 'true'/'false')",
                     },
                     "issues": {
                         "type": "array",
