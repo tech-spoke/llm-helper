@@ -935,6 +935,7 @@ class SessionState:
     quality_revert_count: int = 0  # Number of reverts from QUALITY_REVIEW to READY
     quality_review_enabled: bool = True  # Whether quality review is enabled (--no-quality sets this to False)
     quality_review_max_revert: int = 3  # Max revert count before forced completion
+    quality_review_completed: bool = False  # Whether quality review passed (issues_found=false)
 
     def record_tool_call(
         self,

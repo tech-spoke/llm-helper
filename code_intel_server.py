@@ -2035,7 +2035,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 "message": "Reverted to READY phase. Fix issues and proceed through POST_IMPL_VERIFY → PRE_COMMIT → QUALITY_REVIEW.",
             }
         else:
-            # No issues - ready for merge
+            # No issues - mark quality review as completed and ready for merge
+            session.quality_review_completed = True
             result = {
                 "success": True,
                 "issues_found": False,
@@ -2060,7 +2061,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
         # v1.5: Check if QUALITY_REVIEW is required but not completed
-        if session.quality_review_enabled and session.phase == Phase.QUALITY_REVIEW:
+        if session.quality_review_enabled and session.phase == Phase.QUALITY_REVIEW and not session.quality_review_completed:
             result = {
                 "error": "quality_review_required",
                 "current_phase": session.phase.name,
