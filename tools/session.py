@@ -925,6 +925,11 @@ class SessionState:
     tool_calls: list[dict] = field(default_factory=list)
     phase_history: list[dict] = field(default_factory=list)
 
+    # v1.4: Intervention System
+    verification_failure_count: int = 0  # POST_IMPLEMENTATION_VERIFICATION failures
+    intervention_count: int = 0  # Number of interventions triggered
+    failure_history: list[dict] = field(default_factory=list)  # History of failures for analysis
+
     def record_tool_call(
         self,
         tool: str,
@@ -1735,6 +1740,148 @@ class SessionState:
 
         return status
 
+    # =========================================================================
+    # v1.4: Intervention System Methods
+    # =========================================================================
+
+    def record_verification_failure(self, failure_info: dict) -> dict:
+        """
+        Record a verification failure for intervention tracking.
+
+        Args:
+            failure_info: {
+                "phase": str,  # Phase where failure occurred (e.g., "POST_IMPLEMENTATION_VERIFICATION")
+                "error_message": str,  # What differed from expectation
+                "problem_location": str,  # Where the problem was found
+                "observed_values": str,  # Actual values observed
+                "attempt_number": int,  # Which attempt this was
+            }
+
+        Returns:
+            {"recorded": bool, "failure_count": int, "intervention_triggered": bool, "intervention_data": dict | None}
+        """
+        self.verification_failure_count += 1
+
+        # Add to failure history
+        failure_record = {
+            "count": self.verification_failure_count,
+            "timestamp": datetime.now().isoformat(),
+            **failure_info,
+        }
+        self.failure_history.append(failure_record)
+
+        # Check if intervention should be triggered (threshold = 3)
+        intervention_triggered = self.verification_failure_count >= 3
+
+        result = {
+            "recorded": True,
+            "failure_count": self.verification_failure_count,
+            "intervention_triggered": intervention_triggered,
+            "intervention_data": None,
+        }
+
+        if intervention_triggered:
+            result["intervention_data"] = self._get_intervention_data()
+
+        return result
+
+    def _get_intervention_data(self) -> dict:
+        """
+        Get intervention data when threshold is reached.
+
+        Returns data needed for LLM to select and follow intervention prompt.
+        """
+        # Force user_escalation after 2 interventions
+        force_user_escalation = self.intervention_count >= 2
+
+        return {
+            "failure_count": self.verification_failure_count,
+            "intervention_count": self.intervention_count,
+            "force_user_escalation": force_user_escalation,
+            "failure_history": self.failure_history[-3:],  # Last 3 failures
+            "available_prompts": [
+                "structure_review",  # Layout/positioning issues
+                "hypothesis_review",  # Error messages changing
+                "step_back",  # General stuck state
+                "user_escalation",  # Escalate to user (mandatory after 2 interventions)
+            ],
+            "prompt_selection_guide": {
+                "structure_review": "Select when layout/positioning adjustments are repeating",
+                "hypothesis_review": "Select when error messages change each time",
+                "step_back": "Select for general stuck state",
+                "user_escalation": "MANDATORY if intervention_count >= 2, otherwise select when other interventions haven't helped",
+            },
+            "instructions": (
+                "1. Analyze failure_history to understand the pattern\n"
+                "2. Select appropriate intervention prompt from available_prompts\n"
+                "3. Read the intervention prompt from .code-intel/interventions/{selected}.md\n"
+                "4. Follow the instructions in the prompt\n"
+                "5. If force_user_escalation is true, MUST use user_escalation.md"
+            ),
+        }
+
+    def record_intervention_used(self, prompt_name: str) -> dict:
+        """
+        Record that an intervention prompt was used.
+
+        Args:
+            prompt_name: Name of the intervention prompt used (e.g., "step_back")
+
+        Returns:
+            {"recorded": bool, "intervention_count": int}
+        """
+        self.intervention_count += 1
+
+        # Record in phase history
+        self.phase_history.append({
+            "action": "intervention",
+            "prompt_name": prompt_name,
+            "intervention_count": self.intervention_count,
+            "verification_failures_at_trigger": self.verification_failure_count,
+            "timestamp": datetime.now().isoformat(),
+        })
+
+        return {
+            "recorded": True,
+            "intervention_count": self.intervention_count,
+            "message": f"Intervention '{prompt_name}' recorded. Total interventions: {self.intervention_count}",
+        }
+
+    def reset_verification_failures(self) -> dict:
+        """
+        Reset verification failure count after successful verification.
+
+        Called when verification passes after intervention.
+
+        Returns:
+            {"reset": bool, "previous_count": int}
+        """
+        previous_count = self.verification_failure_count
+        self.verification_failure_count = 0
+
+        return {
+            "reset": True,
+            "previous_count": previous_count,
+            "message": "Verification failure count reset after successful verification.",
+        }
+
+    def get_intervention_status(self) -> dict:
+        """
+        Get current intervention system status.
+
+        Returns:
+            Status of verification failures and interventions.
+        """
+        return {
+            "verification_failure_count": self.verification_failure_count,
+            "intervention_count": self.intervention_count,
+            "intervention_threshold": 3,
+            "force_escalation_threshold": 2,
+            "near_intervention": self.verification_failure_count >= 2,
+            "requires_user_escalation": self.intervention_count >= 2,
+            "failure_history_count": len(self.failure_history),
+        }
+
     def to_dict(self) -> dict:
         """Full serialization for logging."""
         return {
@@ -1759,6 +1906,12 @@ class SessionState:
             } if self.overlay_enabled else None,
             "tool_calls": self.tool_calls,
             "phase_history": self.phase_history,
+            # v1.4: Intervention System
+            "intervention": {
+                "verification_failure_count": self.verification_failure_count,
+                "intervention_count": self.intervention_count,
+                "failure_history": self.failure_history,
+            },
         }
 
 
