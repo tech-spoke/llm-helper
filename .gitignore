@@ -47,3 +47,6 @@ docs/qiita/
 
 # OverlayFS session directories
 .overlay/
+
+# Sample/test files
+sample/
