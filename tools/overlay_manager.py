@@ -638,6 +638,15 @@ class BranchManager:
                         if len(parts) >= 2:
                             all_changes[parts[1]] = parts[0]
 
+            # Add untracked files (new files not yet staged)
+            untracked_result = await self._run_git([
+                "ls-files", "--others", "--exclude-standard"
+            ])
+            if untracked_result.returncode == 0 and untracked_result.stdout.strip():
+                for filepath in untracked_result.stdout.strip().split("\n"):
+                    if filepath and filepath not in all_changes:
+                        all_changes[filepath] = "A"  # Mark as added
+
             # Process each changed file
             for filepath, status in all_changes.items():
                 # Map git status to change type
@@ -662,12 +671,23 @@ class BranchManager:
                         diff_result = await self._run_git([
                             "diff", f"{self._base_branch}...HEAD", "--", filepath
                         ])
-                    if diff_result.returncode == 0:
+                    if diff_result.returncode == 0 and diff_result.stdout.strip():
                         diff = diff_result.stdout
                         # Check if binary
                         if "Binary files" in diff:
                             is_binary = True
                             diff = None
+                    elif change_type == "added":
+                        # Untracked file: generate diff manually
+                        diff_result = await self._run_git([
+                            "diff", "--no-index", "/dev/null", filepath
+                        ])
+                        # --no-index returns 1 for differences, which is expected
+                        if diff_result.stdout.strip():
+                            diff = diff_result.stdout
+                            if "Binary files" in diff:
+                                is_binary = True
+                                diff = None
 
                 changes.append(FileChange(
                     path=filepath,
