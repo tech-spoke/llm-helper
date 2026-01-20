@@ -1947,17 +1947,36 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         if finalize_result.success:
             # v1.5: Transition to QUALITY_REVIEW phase (if enabled)
             if session.quality_review_enabled:
-                session.phase = Phase.QUALITY_REVIEW
-                result = {
-                    "success": True,
-                    "commit_hash": finalize_result.commit_hash,
-                    "kept_files": finalize_result.kept_files,
-                    "discarded_files": finalize_result.discarded_files,
-                    "branch": session.overlay_branch,
-                    "phase": "QUALITY_REVIEW",
-                    "message": f"Changes finalized. Committed to {session.overlay_branch}. Now in QUALITY_REVIEW phase.",
-                    "next_step": "Read .code-intel/review_prompts/quality_review.md and follow instructions. Call submit_quality_review when done.",
-                }
+                # Check if quality_review.md exists
+                repo_path = session.repo_path or "."
+                quality_review_path = Path(repo_path) / ".code-intel" / "review_prompts" / "quality_review.md"
+
+                if not quality_review_path.exists():
+                    # Skip QUALITY_REVIEW if prompt file is missing
+                    session.quality_review_completed = True
+                    result = {
+                        "success": True,
+                        "commit_hash": finalize_result.commit_hash,
+                        "kept_files": finalize_result.kept_files,
+                        "discarded_files": finalize_result.discarded_files,
+                        "branch": session.overlay_branch,
+                        "skipped": True,
+                        "warning": f"quality_review.md not found at {quality_review_path}",
+                        "message": "Quality review skipped. Proceeding to merge.",
+                        "next_action": "Call merge_to_base to complete",
+                    }
+                else:
+                    session.phase = Phase.QUALITY_REVIEW
+                    result = {
+                        "success": True,
+                        "commit_hash": finalize_result.commit_hash,
+                        "kept_files": finalize_result.kept_files,
+                        "discarded_files": finalize_result.discarded_files,
+                        "branch": session.overlay_branch,
+                        "phase": "QUALITY_REVIEW",
+                        "message": f"Changes finalized. Committed to {session.overlay_branch}. Now in QUALITY_REVIEW phase.",
+                        "next_step": "Read .code-intel/review_prompts/quality_review.md and follow instructions. Call submit_quality_review when done.",
+                    }
             else:
                 # Quality review disabled (--no-quality)
                 result = {
