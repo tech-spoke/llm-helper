@@ -1543,13 +1543,17 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
             if current_info.get("is_task_branch"):
                 # Already on a task branch - continue there
-                session.phase = Phase.EXPLORATION
+                # Check gate_level to determine starting phase
+                if session.gate_level == "none":
+                    session.phase = Phase.READY
+                else:
+                    session.phase = Phase.EXPLORATION
                 session.overlay_enabled = True
                 session.overlay_branch = current_info["current_branch"]
 
                 result = {
                     "success": True,
-                    "phase": "EXPLORATION",
+                    "phase": session.phase.name,
                     "branch": {
                         "created": False,
                         "resumed": True,
@@ -1572,7 +1576,11 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             setup_result = await branch_manager.setup_session(session.session_id)
 
             if setup_result.success:
-                session.phase = Phase.EXPLORATION
+                # Check gate_level to determine starting phase
+                if session.gate_level == "none":
+                    session.phase = Phase.READY
+                else:
+                    session.phase = Phase.EXPLORATION
                 session.overlay_enabled = True
                 session.overlay_branch = setup_result.branch_name
 
@@ -1581,7 +1589,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
                 result = {
                     "success": True,
-                    "phase": "EXPLORATION",
+                    "phase": session.phase.name,
                     "branch": {
                         "created": True,
                         "name": setup_result.branch_name,
