@@ -376,7 +376,7 @@ Step 1: Intent 分類
 
 Step 2: セッション開始
     ├─ context.yml から project_rules をロード
-    ├─ OverlayFS をセットアップ（有効時）
+    ├─ タスクブランチをセットアップ（有効時）
     └─ ChromaDB を同期（必要時）
 
 Step 2.5: DOCUMENT_RESEARCH (v1.3)
@@ -460,7 +460,7 @@ Step 11: Finalize
 | Universal Ctags | Yes | シンボル定義 |
 | ripgrep | Yes | コード検索 |
 | tree-sitter | Yes | 構造分析 |
-| fuse-overlayfs | No | ゴミ検出（Linux） |
+| git | Yes | ブランチ分離 |
 
 ### Step 1: サーバーセットアップ（初回のみ）
 
@@ -573,7 +573,7 @@ last_synced: "2025-01-18T10:00:00"
 | ChromaDB Manager | `tools/chromadb_manager.py` | Forest/Map 管理 |
 | ImpactAnalyzer | `tools/impact_analyzer.py` | 変更影響分析 |
 | ContextProvider | `tools/context_provider.py` | プロジェクトルール & ドキュメント調査 |
-| OverlayManager | `tools/overlay_manager.py` | ゴミ検出 |
+| BranchManager | `tools/branch_manager.py` | Gitブランチ分離 |
 
 ### 主要データ構造
 
@@ -583,7 +583,7 @@ class SessionState:
     intent: str           # IMPLEMENT/MODIFY/INVESTIGATE/QUESTION
     phase: Phase          # 現在のフェーズ
     query_frame: QueryFrame
-    overlay_enabled: bool
+    task_branch_enabled: bool
     gate_level: str       # high/middle/low/auto/none
 
 class Phase(Enum):

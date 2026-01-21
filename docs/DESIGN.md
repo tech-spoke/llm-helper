@@ -445,7 +445,7 @@ Post-implementation verification uses verifier prompts stored in `.code-intel/ve
 | Universal Ctags | Yes | Symbol definitions |
 | ripgrep | Yes | Code search |
 | tree-sitter | Yes | Structure analysis |
-| fuse-overlayfs | No | Garbage detection (Linux) |
+| git | Yes | Branch isolation |
 
 ### Step 1: Server Setup (once)
 
@@ -558,7 +558,7 @@ last_synced: "2025-01-18T10:00:00"
 | ChromaDB Manager | `tools/chromadb_manager.py` | Forest/Map management |
 | ImpactAnalyzer | `tools/impact_analyzer.py` | Change impact analysis |
 | ContextProvider | `tools/context_provider.py` | Project rules & doc research |
-| OverlayManager | `tools/overlay_manager.py` | Garbage detection |
+| BranchManager | `tools/branch_manager.py` | Git branch isolation |
 
 ### Key Data Structures
 
@@ -568,7 +568,7 @@ class SessionState:
     intent: str           # IMPLEMENT/MODIFY/INVESTIGATE/QUESTION
     phase: Phase          # Current phase
     query_frame: QueryFrame
-    overlay_enabled: bool
+    task_branch_enabled: bool
     gate_level: str       # high/middle/low/auto/none
 
 class Phase(Enum):

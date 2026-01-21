@@ -979,7 +979,7 @@ mcp__code-intel__revert_to_exploration
 
 ## Step 10: PRE_COMMIT Phase (v1.2, Garbage Detection)
 
-**When executed:** After implementation in READY phase, when overlay is enabled
+**When executed:** After implementation in READY phase, when task branch is enabled
 
 **Purpose:** Review all changes before commit to detect and discard garbage (debug logs, commented code, unrelated modifications)
 
@@ -1051,8 +1051,7 @@ mcp__code-intel__finalize_changes
   "kept_files": ["auth/service.py"],
   "discarded_files": ["debug.log"],
   "branch": "llm_task_session_123",
-  "overlay_cleaned": true,
-  "message": "Changes finalized. Committed to llm_task_session_123. Overlay unmounted."
+  "message": "Changes finalized. Committed to llm_task_session_123."
 }
 ```
 
@@ -1214,9 +1213,9 @@ mcp__code-intel__get_session_status
 
 ## Flags
 
-### /code --clean - Cleanup stale overlays
+### /code --clean - Cleanup stale branches
 
-Clean up stale overlay sessions from interrupted runs.
+Clean up stale task branches from interrupted runs.
 
 ```
 /code --clean
@@ -1224,7 +1223,7 @@ Clean up stale overlay sessions from interrupted runs.
 
 **Action:**
 ```
-mcp__code-intel__cleanup_stale_overlays
+mcp__code-intel__cleanup_stale_branches
   repo_path: "."
 ```
 
@@ -1232,10 +1231,8 @@ mcp__code-intel__cleanup_stale_overlays
 ```json
 {
   "success": true,
-  "unmounted": [".overlay/merged/session_123"],
-  "removed_dirs": [".overlay/upper/session_123", ...],
   "deleted_branches": ["llm_task_session_123"],
-  "message": "Cleaned up 1 stale mounts, 3 directories, 1 branches."
+  "message": "Cleaned up 1 stale branches."
 }
 ```
 
@@ -1330,7 +1327,7 @@ mcp__code-intel__sync_index
 # Skip intervention system
 /code -ni fix obvious bug
 
-# Cleanup stale overlays
+# Cleanup stale branches
 /code -c
 
 # Force full re-index of all components
@@ -1350,7 +1347,7 @@ mcp__code-intel__sync_index
 | `--no-doc-research` | - | Skip document research phase |
 | `--no-quality` | - | Skip quality review phase (v1.5) |
 | `--no-intervention` | `-ni` | Skip intervention system (v1.4) |
-| `--clean` | `-c` | Cleanup stale overlays |
+| `--clean` | `-c` | Cleanup stale branches |
 | `--rebuild` | `-r` | Force full re-index of all indexes |
 
 ## Arguments

@@ -594,7 +594,7 @@ llm-helper/
 │   ├── outcome_log.py      ← Improvement cycle log
 │   ├── context_provider.py ← Essential context (v1.1)
 │   ├── impact_analyzer.py  ← Impact analysis (v1.1)
-│   ├── overlay_manager.py  ← OverlayFS garbage isolation (v1.2)
+│   ├── branch_manager.py   ← Git branch isolation (v1.2)
 │   └── ...
 ├── setup.sh                ← Server setup
 ├── init-project.sh         ← Project initialization

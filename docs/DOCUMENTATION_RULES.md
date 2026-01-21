@@ -157,7 +157,7 @@ For version history and detailed changes, see:
 | Version | Description | Link |
 |---------|-------------|------|
 | v1.3 | Document Research, Markup Cross-Reference | [v1.3](updates/v1.3.md) |
-| v1.2 | OverlayFS, Gate Levels | [v1.2](updates/v1.2.md) |
+| v1.2 | Git Branch Isolation, Gate Levels | [v1.2](updates/v1.2.md) |
 | v1.1 | Impact Analysis, Context Provider | [v1.1](updates/v1.1.md) |
 ```
 
@@ -170,7 +170,7 @@ For version history and detailed changes, see:
 | Version | Description | Link |
 |---------|-------------|------|
 | v1.3 | Document Research, Markup Cross-Reference | [v1.3](updates/v1.3_ja.md) |
-| v1.2 | OverlayFS, Gate Levels | [v1.2](updates/v1.2_ja.md) |
+| v1.2 | Git Branch Isolation, Gate Levels | [v1.2](updates/v1.2_ja.md) |
 | v1.1 | Impact Analysis, Context Provider | [v1.1](updates/v1.1_ja.md) |
 ```
 

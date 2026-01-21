@@ -572,7 +572,7 @@ llm-helper/
 │   ├── outcome_log.py      ← 改善サイクルログ
 │   ├── context_provider.py ← 必須コンテキスト（v1.1）
 │   ├── impact_analyzer.py  ← 影響範囲分析（v1.1）
-│   ├── overlay_manager.py  ← OverlayFS ゴミ分離（v1.2）
+│   ├── branch_manager.py   ← Git ブランチ分離（v1.2）
 │   └── ...
 ├── setup.sh                ← サーバーセットアップ
 ├── init-project.sh         ← プロジェクト初期化
