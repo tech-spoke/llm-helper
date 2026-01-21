@@ -298,50 +298,54 @@ cp /path/to/llm-helper/.claude/commands/*.md /path/to/your-project/.claude/comma
 
 ### Step 5: Claude Code を再起動
 
-MCP サーバーを読み込むために再起動。初回セッション開始時に自動的にインデックスが構築されます。
+MCP サーバーを読み込むために再起動。
 
-### Step 6: 必須コンテキスト（v1.1、自動）
+### Step 6: context.yml のカスタマイズ（任意）
 
-設計ドキュメントとプロジェクトルールは**自動検出・自動要約**されます。
-
-**動作の流れ:**
-1. 初回 `sync_index` 時、サーバーが設計ドキュメントとプロジェクトルールを自動検出
-2. 検出したソースで `.code-intel/context.yml` を作成
-3. ドキュメント内容 + プロンプトを LLM に返す
-4. LLM が要約を生成し、`update_context` ツールで保存
-5. 以降の同期では変更を検出し、必要に応じて要約を再生成
-
-**自動検出パス:**
-- 設計ドキュメント: `docs/architecture/`, `docs/design/`, `docs/`
-- プロジェクトルール: `CLAUDE.md`, `.claude/CLAUDE.md`, `CONTRIBUTING.md`
-
-**手動カスタマイズ（任意）:**
-
-`.code-intel/context.yml` を編集して `extra_notes`（ソースドキュメントにない暗黙知）を追加できます：
+`.code-intel/context.yml` ファイルで各種動作を制御できます。必要に応じてカスタマイズしてください：
 
 ```yaml
-essential_docs:
-  source: "docs/architecture"
-  summaries:
-    - file: "overview.md"
-      path: "docs/architecture/overview.md"
-      summary: "..."                     # ← LLM が自動生成
-      extra_notes: |                     # ← 任意: 暗黙知を追加
-        - 例外: 単純な CRUD は Service 層をバイパス可
-
+# プロジェクトルール（自動検出: CLAUDE.md, .claude/CLAUDE.md, CONTRIBUTING.md）
 project_rules:
   source: "CLAUDE.md"
-  summary: "..."                         # ← LLM が自動生成
-  extra_notes: |                         # ← 任意: 暗黙知を追加
-    - /old 配下のレガシーコードはこのルールを無視してよい
+
+# analyze_impact 用のドキュメント検索設定
+document_search:
+  include_patterns:
+    - "**/*.md"
+    - "**/README*"
+    - "**/docs/**/*"
+  exclude_patterns:
+    - "node_modules/**"
+    - "vendor/**"
+    - ".git/**"
+
+# v1.3: ドキュメント調査の設定
+doc_research:
+  enabled: true
+  docs_path:
+    - "docs/"
+  default_prompts:
+    - "default.md"
+
+# v1.4: 介入システムの設定
+interventions:
+  enabled: true
+  prompts_dir: "interventions/"
+  threshold: 3  # 介入発動までの失敗回数
+
+# 検証者の設定
+verifiers:
+  suggest_improvements: true
 ```
 
-| フィールド | 説明 |
+| セクション | 説明 |
 |-----------|------|
-| `source` | 自動検出されたソースパス |
-| `summary` | LLM が自動生成 |
-| `extra_notes` | 手動追加（再生成時も保持される） |
-| `content_hash` | 変更検知用（自動生成） |
+| `project_rules` | プロジェクトルールのソースファイル（自動検出） |
+| `document_search` | 影響範囲分析時のドキュメント検索パターン |
+| `doc_research` | ドキュメント調査の設定（v1.3） |
+| `interventions` | 介入システムの設定（v1.4） |
+| `verifiers` | 検証者の動作設定 |
 
 ---
 
