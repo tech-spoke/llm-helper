@@ -57,7 +57,7 @@ from tools.chromadb_manager import (
     ChromaDBManager, SearchResult, SearchHit,
     CHROMADB_AVAILABLE,
 )
-from tools.overlay_manager import BranchManager
+from tools.branch_manager import BranchManager
 
 
 # Create MCP server, router, and session manager
@@ -87,12 +87,12 @@ def _get_or_recreate_branch_manager(session, repo_path: str) -> BranchManager | 
         return branch_manager
 
     # Recreate from session state
-    if not session.overlay_branch:
+    if not session.task_branch_name:
         return None
 
     branch_manager = BranchManager(repo_path)
     branch_manager._active_session = session.session_id
-    branch_manager._branch_name = session.overlay_branch
+    branch_manager._branch_name = session.task_branch_name
 
     # Determine base branch
     try:
@@ -863,7 +863,7 @@ async def list_tools() -> list[Tool]:
             name="submit_for_review",
             description="Transition from READY to PRE_COMMIT phase for garbage detection. "
                         "Call this after implementation is complete to review changes before commit. "
-                        "Requires overlay to be enabled.",
+                        "Requires task branch to be enabled.",
             inputSchema={
                 "type": "object",
                 "properties": {},
@@ -871,7 +871,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="review_changes",
-            description="Get all changes captured in the overlay for garbage review. "
+            description="Get all changes captured in the task branch for garbage review. "
                         "Returns list of changed files with diffs for LLM to review.",
             inputSchema={
                 "type": "object",
@@ -944,10 +944,10 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
-            name="cleanup_stale_overlays",
-            description="Clean up stale overlay sessions from interrupted runs. "
-                        "Use when overlay mounts or task branches remain after session interruption. "
-                        "Unmounts stale overlays and deletes orphaned task branches.",
+            name="cleanup_stale_branches",
+            description="Clean up stale task branches from interrupted runs. "
+                        "Use when task branches remain after session interruption. "
+                        "Deletes orphaned llm_task_* branches.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -1323,10 +1323,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         gate_level = arguments.get("gate_level", "high")
         skip_quality = arguments.get("skip_quality", False)
 
-        # v1.6: enable_overlay parameter removed (branch creation moved to begin_phase_gate)
-        # For backward compatibility, accept but ignore it
-        if "enable_overlay" in arguments:
-            pass  # Ignored in v1.6
+        # v1.6: enable_overlay/enable_branch parameter removed (branch creation moved to begin_phase_gate)
+        # These parameters are no longer used
 
         session = session_manager.create_session(
             intent=intent,
@@ -1525,7 +1523,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         if skip_branch:
             # Transition directly to READY without creating branch
             session.phase = Phase.READY
-            session.overlay_enabled = False
+            session.task_branch_enabled = False
 
             result = {
                 "success": True,
@@ -1548,8 +1546,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                     session.phase = Phase.READY
                 else:
                     session.phase = Phase.EXPLORATION
-                session.overlay_enabled = True
-                session.overlay_branch = current_info["current_branch"]
+                session.task_branch_enabled = True
+                session.task_branch_name = current_info["current_branch"]
 
                 result = {
                     "success": True,
@@ -1581,8 +1579,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                     session.phase = Phase.READY
                 else:
                     session.phase = Phase.EXPLORATION
-                session.overlay_enabled = True
-                session.overlay_branch = setup_result.branch_name
+                session.task_branch_enabled = True
+                session.task_branch_name = setup_result.branch_name
 
                 # Cache branch manager for this session
                 _branch_managers[session.session_id] = branch_manager
@@ -1865,10 +1863,10 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             }
             return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
-        if not session.overlay_enabled:
+        if not session.task_branch_enabled:
             result = {
                 "error": "task_branch_not_enabled",
-                "message": "Task branch not enabled. Cannot review changes without enable_overlay=true.",
+                "message": "Task branch not enabled. Cannot review changes.",
             }
             return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
@@ -1878,7 +1876,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         if branch_manager is None:
             result = {
                 "error": "branch_manager_not_found",
-                "message": "Branch manager not found and cannot be recreated (no overlay_branch in session).",
+                "message": "Branch manager not found and cannot be recreated (no task_branch_name in session).",
             }
             return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
@@ -1915,10 +1913,10 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             }
             return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
-        if not session.overlay_enabled:
+        if not session.task_branch_enabled:
             result = {
                 "error": "task_branch_not_enabled",
-                "message": "Task branch not enabled. Cannot finalize changes without enable_overlay=true.",
+                "message": "Task branch not enabled. Cannot finalize changes.",
             }
             return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
@@ -1928,7 +1926,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         if branch_manager is None:
             result = {
                 "error": "branch_manager_not_found",
-                "message": "Branch manager not found and cannot be recreated (no overlay_branch in session).",
+                "message": "Branch manager not found and cannot be recreated (no task_branch_name in session).",
             }
             return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
@@ -1967,7 +1965,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                         "commit_hash": finalize_result.commit_hash,
                         "kept_files": finalize_result.kept_files,
                         "discarded_files": finalize_result.discarded_files,
-                        "branch": session.overlay_branch,
+                        "branch": session.task_branch_name,
                         "skipped": True,
                         "warning": f"quality_review.md not found at {quality_review_path}",
                         "message": "Quality review skipped. Proceeding to merge.",
@@ -1980,9 +1978,9 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                         "commit_hash": finalize_result.commit_hash,
                         "kept_files": finalize_result.kept_files,
                         "discarded_files": finalize_result.discarded_files,
-                        "branch": session.overlay_branch,
+                        "branch": session.task_branch_name,
                         "phase": "QUALITY_REVIEW",
-                        "message": f"Changes finalized. Committed to {session.overlay_branch}. Now in QUALITY_REVIEW phase.",
+                        "message": f"Changes finalized. Committed to {session.task_branch_name}. Now in QUALITY_REVIEW phase.",
                         "next_step": "Read .code-intel/review_prompts/quality_review.md and follow instructions. Call submit_quality_review when done.",
                     }
             else:
@@ -1992,8 +1990,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                     "commit_hash": finalize_result.commit_hash,
                     "kept_files": finalize_result.kept_files,
                     "discarded_files": finalize_result.discarded_files,
-                    "branch": session.overlay_branch,
-                    "message": f"Changes finalized. Committed to {session.overlay_branch}. Quality review skipped.",
+                    "branch": session.task_branch_name,
+                    "message": f"Changes finalized. Committed to {session.task_branch_name}. Quality review skipped.",
                     "next_step": "Call merge_to_base to merge back to original branch, or record_outcome to record result.",
                 }
         else:
@@ -2086,10 +2084,10 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             result = {"error": "no_active_session", "message": "No active session."}
             return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
-        if not session.overlay_enabled:
+        if not session.task_branch_enabled:
             result = {
                 "error": "task_branch_not_enabled",
-                "message": "Task branch not enabled. Cannot merge without enable_overlay=true.",
+                "message": "Task branch not enabled. Cannot merge.",
             }
             return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
@@ -2109,7 +2107,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         if branch_manager is None:
             result = {
                 "error": "branch_manager_not_found",
-                "message": "Branch manager not found and cannot be recreated (no overlay_branch in session).",
+                "message": "Branch manager not found and cannot be recreated (no task_branch_name in session).",
             }
             return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
@@ -2142,7 +2140,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
         return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
-    elif name == "cleanup_stale_overlays":
+    elif name == "cleanup_stale_branches":
         # v1.2.1: Clean up stale task branches from interrupted runs
         repo_path = arguments.get("repo_path", ".")
 

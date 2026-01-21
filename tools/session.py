@@ -908,11 +908,9 @@ class SessionState:
     impact_analysis: ImpactAnalysisResult | None = None  # v1.1
     pre_commit_review: PreCommitReviewResult | None = None  # v1.2
 
-    # v1.2: Overlay management
-    overlay_branch: str | None = None  # Git branch name (task_{session_id})
-    overlay_merged_path: str | None = None  # Path to merged directory
-    overlay_upper_path: str | None = None  # Path to upper directory (changes)
-    overlay_enabled: bool = False  # Whether overlay is active
+    # v1.2: Task branch management (renamed from overlay in v1.2.1)
+    task_branch_name: str | None = None  # Git branch name (llm_task_{session_id}_from_{base})
+    task_branch_enabled: bool = False  # Whether task branch is active
 
     # v1.2: Gate level for exploration phases
     _gate_level: str = field(default="high", init=False)  # high, middle, low, auto, none
@@ -1632,11 +1630,11 @@ class SessionState:
                 "message": f"Cannot submit for review in phase {self.phase.name}. Must be in READY phase.",
             }
 
-        if not self.overlay_enabled:
+        if not self.task_branch_enabled:
             return {
                 "success": False,
                 "next_phase": self.phase.name,
-                "message": "Overlay not enabled. submit_for_review requires overlay to be active.",
+                "message": "Task branch not enabled. submit_for_review requires task branch to be active.",
             }
 
         # Record phase transition
@@ -1743,12 +1741,11 @@ class SessionState:
             "tool_calls_count": len(self.tool_calls),
         }
 
-        # v1.2: Add overlay info if enabled
-        if self.overlay_enabled:
-            status["overlay"] = {
+        # v1.2: Add task branch info if enabled
+        if self.task_branch_enabled:
+            status["task_branch"] = {
                 "enabled": True,
-                "branch": self.overlay_branch,
-                "merged_path": self.overlay_merged_path,
+                "branch": self.task_branch_name,
             }
 
         # v1.2: Add PRE_COMMIT info if available
@@ -1915,12 +1912,10 @@ class SessionState:
             "verification": self.verification.to_dict() if self.verification else None,
             "impact_analysis": self.impact_analysis.to_dict() if self.impact_analysis else None,
             "pre_commit_review": self.pre_commit_review.to_dict() if self.pre_commit_review else None,
-            "overlay": {
-                "enabled": self.overlay_enabled,
-                "branch": self.overlay_branch,
-                "merged_path": self.overlay_merged_path,
-                "upper_path": self.overlay_upper_path,
-            } if self.overlay_enabled else None,
+            "task_branch": {
+                "enabled": self.task_branch_enabled,
+                "branch": self.task_branch_name,
+            } if self.task_branch_enabled else None,
             "tool_calls": self.tool_calls,
             "phase_history": self.phase_history,
             # v1.4: Intervention System
