@@ -488,15 +488,17 @@ The `context.yml` file will be automatically created on next session start.
 
 #### --clean Option (v1.2)
 
-To discard files created in the previous session and start over:
+Clean up stale task branches from interrupted sessions:
 
 ```
 /code -c
 ```
 
 With `-c` / `--clean`:
-- Deletes Git branches (`llm_task_*`)
-- Starts a new session from clean state
+- If currently on a `llm_task_*` branch, checks out to the base branch first
+  - Base branch is extracted from branch name: `llm_task_{session}_from_{base}` → `{base}`
+- Deletes all `llm_task_*` branches
+- Use after session interruption (Ctrl+C, crash, etc.) to start fresh
 
 #### Normal Execution Flow
 

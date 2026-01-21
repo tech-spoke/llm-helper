@@ -326,14 +326,14 @@ doc_research:
 | `finalize_changes` | keep/discard してコミット |
 | `submit_quality_review` | 品質レビュー結果を報告（v1.5） |
 | `merge_to_base` | タスクブランチを元のブランチにマージ |
-| `cleanup_stale_sessions` | 中断セッションをクリーンアップ |
+| `cleanup_stale_branches` | 中断セッションをクリーンアップ |
 
 ### ブランチライフサイクル（v1.6）
 
 | ツール | 説明 |
 |--------|------|
 | `begin_phase_gate` | フェーズゲート開始、ブランチ作成（stale チェック付き） |
-| `cleanup_stale_sessions` | stale ブランチを削除 |
+| `cleanup_stale_branches` | ベースブランチにチェックアウトし、全 `llm_task_*` ブランチを削除 |
 
 ### インデックス & 学習
 
@@ -359,7 +359,7 @@ doc_research:
 | `--quick` | `-q` | 最小モード: 探索スキップ、ブランチなし |
 | `--doc-research=PROMPTS` | - | 調査プロンプトを指定 |
 | `--no-doc-research` | - | ドキュメント調査をスキップ |
-| `--clean` | `-c` | stale セッションをクリーンアップ |
+| `--clean` | `-c` | ベースブランチにチェックアウトし、stale な `llm_task_*` ブランチを削除 |
 | `--rebuild` | `-r` | 全インデックスを強制再構築 |
 
 ### 実行フロー

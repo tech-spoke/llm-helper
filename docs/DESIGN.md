@@ -311,14 +311,14 @@ doc_research:
 | `finalize_changes` | Keep/discard files and commit |
 | `submit_quality_review` | Report quality review result (v1.5) |
 | `merge_to_base` | Merge task branch to base branch |
-| `cleanup_stale_sessions` | Clean up interrupted sessions |
+| `cleanup_stale_branches` | Clean up interrupted sessions |
 
 ### Branch Lifecycle (v1.6)
 
 | Tool | Description |
 |------|-------------|
 | `begin_phase_gate` | Start phase gates, create branch (with stale branch check) |
-| `cleanup_stale_sessions` | Delete stale branches |
+| `cleanup_stale_branches` | Checkout to base branch, delete all `llm_task_*` branches |
 
 ### Index & Learning
 
@@ -346,7 +346,7 @@ doc_research:
 | `--doc-research=PROMPTS` | - | Specify research prompts |
 | `--no-doc-research` | - | Skip document research |
 | `--no-intervention` | `-ni` | Skip intervention system (v1.4) |
-| `--clean` | `-c` | Cleanup stale sessions |
+| `--clean` | `-c` | Checkout to base branch, delete stale `llm_task_*` branches |
 | `--rebuild` | `-r` | Force full re-index |
 
 ### Execution Flow
