@@ -424,6 +424,10 @@ class BranchManager:
         """
         Clean up stale task branches from interrupted runs.
 
+        If currently on a llm_task_* branch, extracts base branch from
+        the branch name (llm_task_{session}_from_{base}) and checks out
+        to base branch before deleting.
+
         Args:
             repo_path: Path to the git repository root
 
@@ -431,14 +435,16 @@ class BranchManager:
             {
                 "deleted_branches": list,
                 "errors": list,
+                "checked_out_to": str or None (if switched branch),
             }
         """
         repo = Path(repo_path).resolve()
         errors = []
         deleted_branches = []
+        checked_out_to = None
 
         try:
-            # Get current branch to avoid deleting it
+            # Get current branch
             proc = await asyncio.create_subprocess_exec(
                 "git", "rev-parse", "--abbrev-ref", "HEAD",
                 cwd=str(repo),
@@ -447,6 +453,41 @@ class BranchManager:
             )
             stdout, _ = await proc.communicate()
             current_branch = stdout.decode().strip() if proc.returncode == 0 else ""
+
+            # If currently on a llm_task_* branch, checkout to base branch first
+            if current_branch.startswith("llm_task_"):
+                # Extract base branch from name: llm_task_{session}_from_{base}
+                # e.g., llm_task_session_123_from_main -> main
+                # e.g., llm_task_session_123_from_feature/foo -> feature/foo
+                if "_from_" in current_branch:
+                    base_branch = current_branch.split("_from_", 1)[1]
+                else:
+                    # Fallback to main if pattern doesn't match
+                    base_branch = "main"
+
+                # Checkout to base branch
+                proc = await asyncio.create_subprocess_exec(
+                    "git", "checkout", base_branch,
+                    cwd=str(repo),
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, stderr = await proc.communicate()
+                if proc.returncode == 0:
+                    checked_out_to = base_branch
+                else:
+                    # Try 'master' as fallback
+                    proc = await asyncio.create_subprocess_exec(
+                        "git", "checkout", "master",
+                        cwd=str(repo),
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                    )
+                    stdout, stderr = await proc.communicate()
+                    if proc.returncode == 0:
+                        checked_out_to = "master"
+                    else:
+                        errors.append(f"Failed to checkout to {base_branch}: {stderr.decode().strip()}")
 
             # List all llm_task_* branches
             proc = await asyncio.create_subprocess_exec(
@@ -463,9 +504,20 @@ class BranchManager:
                     for b in stdout.decode().strip().split("\n")
                     if b.strip()
                 ]
+
+                # Re-check current branch after potential checkout
+                proc = await asyncio.create_subprocess_exec(
+                    "git", "rev-parse", "--abbrev-ref", "HEAD",
+                    cwd=str(repo),
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, _ = await proc.communicate()
+                current_branch_now = stdout.decode().strip() if proc.returncode == 0 else ""
+
                 for branch in branches:
-                    # Skip current branch
-                    if branch == current_branch:
+                    # Skip if still on this branch (checkout failed)
+                    if branch == current_branch_now:
                         errors.append(f"Skipped {branch}: currently checked out")
                         continue
 
@@ -488,10 +540,14 @@ class BranchManager:
         except Exception as e:
             errors.append(f"List branches: {e}")
 
-        return {
+        result = {
             "deleted_branches": deleted_branches,
             "errors": errors,
         }
+        if checked_out_to:
+            result["checked_out_to"] = checked_out_to
+
+        return result
 
     async def setup_session(self, session_id: str) -> BranchSetupResult:
         """

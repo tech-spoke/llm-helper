@@ -2146,30 +2146,22 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
         cleanup_result = await BranchManager.cleanup_stale_sessions(repo_path)
 
-        # Extract lock_info for detailed reporting
-        lock_info = cleanup_result.get("lock_info", {})
+        deleted_count = len(cleanup_result.get("deleted_branches", []))
+        checked_out_to = cleanup_result.get("checked_out_to")
+
+        message = f"Cleaned up {deleted_count} stale branches."
+        if checked_out_to:
+            message = f"Checked out to '{checked_out_to}'. " + message
 
         result = {
             "success": True,
-            "unmounted": cleanup_result.get("unmounted", []),
-            "removed_dirs": cleanup_result.get("removed_dirs", []),
             "deleted_branches": cleanup_result.get("deleted_branches", []),
             "errors": cleanup_result.get("errors", []),
-            "lock_info": lock_info,
-            "message": f"Cleaned up {len(cleanup_result.get('unmounted', []))} stale mounts, "
-                      f"{len(cleanup_result.get('removed_dirs', []))} directories, "
-                      f"{len(cleanup_result.get('deleted_branches', []))} branches.",
+            "message": message,
         }
 
-        # Add lock-specific message if lock was encountered
-        if lock_info.get("existed"):
-            if lock_info.get("released"):
-                result["message"] += " Lock file released (process was dead)."
-            elif lock_info.get("process_alive"):
-                result["message"] += (
-                    f" WARNING: Lock held by active process (PID: {lock_info.get('held_by_pid')}). "
-                    f"If hung, run: {lock_info.get('manual_kill_command')}"
-                )
+        if checked_out_to:
+            result["checked_out_to"] = checked_out_to
 
         return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
