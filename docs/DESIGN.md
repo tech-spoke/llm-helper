@@ -1,6 +1,6 @@
-# Code Intelligence MCP Server - Design Document v1.3
+# Code Intelligence MCP Server - Design Document v1.6
 
-> This document describes the complete system specification as of v1.3.
+> This document describes the complete system specification as of v1.6.
 > For version history, see [CHANGELOG](#changelog).
 
 ---
@@ -50,10 +50,14 @@ And have a mechanism to learn from failures.
 | **Quote Verification** | Validates LLM-extracted quotes against original query |
 | **Embedding Verification** | Objective NL→Symbol relevance via vector similarity |
 | **Write Restriction** | Only explored files can be modified |
+| **Parallel Execution Guard** | Blocks other /code calls during active session (1 project = 1 session) |
 | **Improvement Cycle** | Learn from failures via DecisionLog + OutcomeLog |
 | **Project Isolation** | Independent learning data per project |
 | **Two-Layer Context** | Static project rules + dynamic task-specific rules |
-| **Garbage Detection** | OverlayFS isolates changes for review before commit |
+| **Garbage Detection** | Git branch isolates changes for review before commit |
+| **Intervention System** | Retry-based intervention for stuck verification loops (v1.4) |
+| **Quality Review** | Post-implementation quality check with revert-to-READY loop (v1.5) |
+| **Branch Lifecycle** | Stale branch warnings, auto-deletion on failure (v1.6) |
 
 ---
 
@@ -101,22 +105,72 @@ And have a mechanism to learn from failures.
 
 ---
 
-## Phase Gates
+## Processing Flow
 
-The system divides implementation into 6 phases with server verification at each transition.
+Processing consists of 3 layers:
 
 ```
-EXPLORATION → SEMANTIC → VERIFICATION → IMPACT_ANALYSIS → READY → PRE_COMMIT
-     │            │            │               │              │          │
-     │            │            │               │              │          └─ Review & commit
-     │            │            │               │              └─ Implementation allowed
-     │            │            │               └─ Verify change impact
-     │            │            └─ Verify hypotheses with code
-     │            └─ Semantic search for missing info
-     └─ Explore codebase with tools
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  1. Preparation (Skill controlled)                                          │
+│     Flag Check → Failure Check → Intent → Session Start                    │
+│     → DOCUMENT_RESEARCH → QueryFrame                                       │
+│     ← skip DOCUMENT_RESEARCH with --no-doc-research                        │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    ↓
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  2. Phase Gate Start (v1.6)                                                 │
+│     begin_phase_gate → [Stale branches?] → [User intervention] → Continue  │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    ↓
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  3. Phase Gates (Server enforced)                                           │
+│     EXPLORATION → SEMANTIC* → VERIFICATION* → IMPACT_ANALYSIS → READY      │
+│     → POST_IMPL_VERIFY → PRE_COMMIT → QUALITY_REVIEW                       │
+│     ← --quick skips exploration, --no-verify/--no-quality skip each phase  │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    ↓
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  4. Completion                                                              │
+│     Finalize & Merge                                                       │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Phase Details
+### 1. Preparation (Skill controlled)
+
+Controlled by skill prompt (code.md). Server not involved.
+
+| Step | Description | Skip |
+|------|-------------|------|
+| Flag Check | Parse command options (`--quick`, etc.) | - |
+| Failure Check | Auto-detect previous failure, record to OutcomeLog | - |
+| Intent | Classify as IMPLEMENT / MODIFY / INVESTIGATE / QUESTION | - |
+| Session Start | Start session, get project_rules (no branch yet) | - |
+| **DOCUMENT_RESEARCH** | Sub-agent researches design docs, extracts mandatory_rules | `--no-doc-research` |
+| QueryFrame | Decompose request into structured slots with Quote verification | - |
+
+### 2. Phase Gate Start (v1.6)
+
+After preparation, `begin_phase_gate` creates the task branch and starts phase gates.
+
+**Stale Branch Detection:**
+- If `llm_task_*` branches exist while not on a task branch, user intervention is required
+- Three options: Delete, Merge, or Continue as-is
+
+### 3. Phase Gates (Server enforced)
+
+MCP server enforces phase transitions. LLM cannot skip arbitrarily.
+
+#### Phase Matrix
+
+| Option | Explore | Implement | Verify | Intervene | Garbage | Quality | Branch |
+|--------|:-------:|:---------:|:------:|:---------:|:-------:|:-------:|:------:|
+| (default) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `--no-verify` | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | ✅ |
+| `--no-quality` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
+| `--fast` / `-f` | ❌ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
+| `--quick` / `-q` | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
+
+#### Phase Details
 
 | Phase | Purpose | Allowed Tools | Transition Condition |
 |-------|---------|---------------|---------------------|
@@ -125,26 +179,32 @@ EXPLORATION → SEMANTIC → VERIFICATION → IMPACT_ANALYSIS → READY → PRE_
 | VERIFICATION | Verify hypotheses | All exploration tools | submit_verification completed |
 | IMPACT_ANALYSIS | Check change impact | analyze_impact | All must_verify files confirmed |
 | READY | Implementation | Edit, Write (explored files only) | - |
-| PRE_COMMIT | Review changes | review_changes, finalize_changes | Overlay enabled |
+| POST_IMPL_VERIFY | Run verification | Verifier prompts (Playwright, pytest) | Success (3 failures trigger intervention) |
+| PRE_COMMIT | Review changes | review_changes, finalize_changes | Garbage removed |
+| QUALITY_REVIEW | Quality check | submit_quality_review (Edit/Write forbidden) | No issues → complete, Issues → revert to READY |
 
 ### Markup Relaxation
 
-Pure markup files have relaxed requirements:
+When targeting only pure markup files (HTML, CSS, etc.), EXPLORATION phase requirements are relaxed.
+
+**What relaxation means:**
+- Code exploration can be mostly skipped (text search only is OK)
+- Symbol definition and reference analysis not required
+- Faster progression to implementation phase
 
 | Extensions | Relaxation |
 |------------|------------|
 | `.html`, `.htm`, `.css`, `.scss`, `.sass`, `.less`, `.md` | ✅ Applied |
 | `.blade.php`, `.vue`, `.jsx`, `.tsx`, `.svelte` | ❌ Not applied (contains logic) |
 
-**Relaxed requirements:**
-- `symbols_identified`: Not required
-- `find_definitions`/`find_references`: Not required
-- `search_text` alone is sufficient
+**v1.3 Addition - Cross-Reference Detection:**
 
-**v1.3 Addition**: Even in relaxed mode, cross-references are detected:
-- CSS → HTML: Class/ID usage
-- HTML → CSS: Style definitions
-- HTML → JS: getElementById, querySelector
+Even in relaxed mode, IMPACT_ANALYSIS detects related files:
+- Modifying CSS → Detects HTML files using that class/ID
+- Modifying HTML → Detects CSS files with style definitions
+- Modifying HTML → Detects JS files with DOM operations
+
+These are reported as `should_verify` (recommended to check).
 
 ---
 
@@ -242,15 +302,23 @@ doc_research:
 | `revert_to_exploration` | Return to EXPLORATION phase |
 | `validate_symbol_relevance` | Verify symbol relevance via embedding |
 
-### Garbage Detection (v1.2)
+### Garbage Detection & Quality Review (v1.2, v1.5)
 
 | Tool | Description |
 |------|-------------|
 | `submit_for_review` | Transition to PRE_COMMIT phase |
 | `review_changes` | Show all file changes |
 | `finalize_changes` | Keep/discard files and commit |
+| `submit_quality_review` | Report quality review result (v1.5) |
 | `merge_to_base` | Merge task branch to base branch |
-| `cleanup_stale_overlays` | Clean up interrupted sessions |
+| `cleanup_stale_sessions` | Clean up interrupted sessions |
+
+### Branch Lifecycle (v1.6)
+
+| Tool | Description |
+|------|-------------|
+| `begin_phase_gate` | Start phase gates, create branch (with stale branch check) |
+| `cleanup_stale_sessions` | Delete stale branches |
 
 ### Index & Learning
 
@@ -269,13 +337,16 @@ doc_research:
 
 | Long | Short | Description |
 |------|-------|-------------|
-| `--no-verify` | - | Skip post-implementation verification |
+| `--no-verify` | - | Skip post-implementation verification (and intervention) |
+| `--no-quality` | - | Skip quality review (v1.5) |
 | `--only-verify` | `-v` | Run verification only |
 | `--gate=LEVEL` | `-g=LEVEL` | Gate level: h(igh), m(iddle), l(ow), a(uto), n(one) |
-| `--quick` | `-q` | Skip exploration (= `-g=n`) |
+| `--fast` | `-f` | Skip exploration with branch (= `-g=n` + branch) |
+| `--quick` | `-q` | Skip exploration, no branch (= `-g=n` + `skip_branch`) |
 | `--doc-research=PROMPTS` | - | Specify research prompts |
 | `--no-doc-research` | - | Skip document research |
-| `--clean` | `-c` | Cleanup stale overlays |
+| `--no-intervention` | `-ni` | Skip intervention system (v1.4) |
+| `--clean` | `-c` | Cleanup stale sessions |
 | `--rebuild` | `-r` | Force full re-index |
 
 ### Execution Flow
@@ -292,7 +363,6 @@ Step 1: Intent Classification
 
 Step 2: Session Start
     ├─ Load project_rules from context.yml
-    ├─ Setup OverlayFS (if enabled)
     └─ Sync ChromaDB (if needed)
 
 Step 2.5: DOCUMENT_RESEARCH (v1.3)
@@ -301,6 +371,11 @@ Step 2.5: DOCUMENT_RESEARCH (v1.3)
 
 Step 3: QueryFrame Setup
     └─ Extract structured slots with quote verification
+
+Step 3.5: Begin Phase Gate (v1.6)
+    ├─ Check for stale branches
+    ├─ User intervention if stale branches exist
+    └─ Create task branch
 
 Step 4: EXPLORATION
     ├─ Use find_definitions, find_references, etc.
@@ -327,13 +402,19 @@ Step 9: READY
 Step 9.5: POST_IMPLEMENTATION_VERIFICATION
     ├─ Select verifier based on file types
     ├─ Run verifier prompts (.code-intel/verifiers/)
-    └─ Loop back to Step 9 on failure (skip with --no-verify)
+    ├─ Loop back to Step 9 on failure
+    └─ Intervention on 3 consecutive failures (v1.4)
 
-Step 10: PRE_COMMIT (if overlay enabled)
+Step 10: PRE_COMMIT (garbage detection)
     ├─ review_changes
     └─ finalize_changes (keep/discard)
 
-Step 11: Merge (optional)
+Step 10.5: QUALITY_REVIEW (v1.5)
+    ├─ quality_review.md checklist
+    ├─ Issues found → revert to READY → re-traverse
+    └─ No issues → proceed to merge
+
+Step 11: Merge
     └─ merge_to_base (to original branch)
 ```
 
@@ -516,6 +597,8 @@ class DocResearchConfig:
     ↓
 [set_query_frame] → [QueryFrame with quote verification]
     ↓
+[begin_phase_gate] → [Stale branch check] → [Branch created]
+    ↓
 [EXPLORATION] → [find_definitions/references] → [submit_understanding]
     ↓
 [Symbol Validation] → [Embedding similarity check]
@@ -526,9 +609,11 @@ class DocResearchConfig:
     ↓
 [READY] → [check_write_target] → [Edit/Write]
     ↓
-[POST_IMPL_VERIFY] → [verifiers/*.md]
+[POST_IMPL_VERIFY] → [verifiers/*.md] → (3 failures → intervention)
     ↓
 [PRE_COMMIT] → [review_changes] → [finalize_changes]
+    ↓
+[QUALITY_REVIEW] → [quality_review.md] → (revert on issues)
     ↓
 [merge_to_base] (to original branch)
 ```
@@ -557,8 +642,11 @@ For version history and detailed changes:
 
 | Version | Description | Link |
 |---------|-------------|------|
+| v1.6 | Branch Lifecycle (stale warning, begin_phase_gate) | [v1.6](updates/v1.6.md) |
+| v1.5 | Quality Review (revert-to-READY loop) | [v1.5](updates/v1.5.md) |
+| v1.4 | Intervention System | [v1.4](updates/v1.4.md) |
 | v1.3 | Document Research, Markup Cross-Reference | [v1.3](updates/v1.3.md) |
-| v1.2 | OverlayFS, Gate Levels | [v1.2](updates/v1.2.md) |
+| v1.2 | Git Branch Isolation | [v1.2](updates/v1.2.md) |
 | v1.1 | Impact Analysis, Context Provider | [v1.1](updates/v1.1.md) |
 
 For documentation rules, see [DOCUMENTATION_RULES.md](DOCUMENTATION_RULES.md).

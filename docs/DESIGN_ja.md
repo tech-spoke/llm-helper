@@ -1,6 +1,6 @@
-# Code Intelligence MCP Server - 設計ドキュメント v1.5
+# Code Intelligence MCP Server - 設計ドキュメント v1.6
 
-> このドキュメントは v1.5 時点の完全なシステム仕様を記述しています。
+> このドキュメントは v1.6 時点の完全なシステム仕様を記述しています。
 > バージョン履歴については [CHANGELOG](#changelog) を参照してください。
 
 ---
@@ -50,12 +50,14 @@ LLM に決めさせない。従わないと進めない設計にする。
 | **Quote 検証** | LLM が抽出した引用を元のクエリと照合 |
 | **Embedding 検証** | ベクトル類似度による客観的な NL→Symbol 関連性評価 |
 | **書き込み制限** | 探索済みファイルのみ修正可能 |
+| **並列実行ガード** | セッション中は他の /code 呼び出しをブロック（1プロジェクト1セッション） |
 | **改善サイクル** | DecisionLog + OutcomeLog による失敗からの学習 |
 | **プロジェクト分離** | プロジェクトごとに独立した学習データ |
 | **2層コンテキスト** | 静的プロジェクトルール + 動的タスク固有ルール |
 | **ゴミ検出** | Git ブランチでコミット前に変更をレビュー |
 | **介入システム** | 検証ループにハマった時のリトライベース介入（v1.4） |
 | **品質レビュー** | 実装後の品質チェック、修正後は再チェック必須（v1.5） |
+| **ブランチライフサイクル** | stale ブランチ警告、失敗時自動削除、begin_phase_gate 分離（v1.6） |
 
 ---
 
@@ -116,6 +118,11 @@ LLM に決めさせない。従わないと進めない設計にする。
 └─────────────────────────────────────────────────────────────────────────────┘
                                     ↓
 ┌─────────────────────────────────────────────────────────────────────────────┐
+│  1.5. フェーズゲート開始（v1.6）                                            │
+│     begin_phase_gate → [Stale ブランチ?] → [ユーザー介入] → 継続           │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    ↓
+┌─────────────────────────────────────────────────────────────────────────────┐
 │  2. フェーズゲート（Server 強制）                                           │
 │     EXPLORATION → SEMANTIC* → VERIFICATION* → IMPACT_ANALYSIS → READY      │
 │     → POST_IMPL_VERIFY → PRE_COMMIT → QUALITY_REVIEW                       │
@@ -137,7 +144,7 @@ Skill プロンプト（code.md）が制御。サーバーは関与しない。
 | Flag Check | コマンドオプション（`--quick` 等）をパース | - |
 | Failure Check | 前回セッションが失敗したか自動検出、OutcomeLog に記録 | - |
 | Intent Classification | IMPLEMENT / MODIFY / INVESTIGATE / QUESTION を判定 | - |
-| Session Start | セッション開始、project_rules 取得、Git ブランチ作成 | - |
+| Session Start | セッション開始、project_rules 取得（ブランチ作成は v1.6 で分離） | - |
 | **DOCUMENT_RESEARCH** | サブエージェントで設計ドキュメントを調査、mandatory_rules 抽出 | `--no-doc-research` |
 | QueryFrame Setup | ユーザー要求を構造化スロットに分解、Quote 検証 | - |
 
@@ -146,6 +153,14 @@ Skill プロンプト（code.md）が制御。サーバーは関与しない。
 - `docs/` 配下のドキュメントを調査
 - タスク固有のルール・制約・依存関係を抽出
 - `mandatory_rules` として後続フェーズで参照
+
+### 1.5. フェーズゲート開始（v1.6）
+
+準備フェーズの後、`begin_phase_gate` がタスクブランチを作成しフェーズゲートを開始。
+
+**Stale ブランチ検出:**
+- タスクブランチ上にいない状態で `llm_task_*` ブランチが存在する場合、ユーザー介入が必要
+- 3つの選択肢: 削除、マージ、そのまま継続
 
 ### 2. フェーズゲート（Server 強制）
 
@@ -158,6 +173,7 @@ MCP サーバーがフェーズ遷移を強制。LLM が勝手にスキップで
 | (デフォルト) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `--no-verify` | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | ✅ |
 | `--no-quality` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
+| `--fast` / `-f` | ❌ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
 | `--quick` / `-q` | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
 
 #### フェーズ詳細
@@ -184,22 +200,26 @@ MCP サーバーがフェーズ遷移を強制。LLM が勝手にスキップで
 
 ### マークアップ緩和
 
-純粋なマークアップファイルは要件が緩和されます：
+純粋なマークアップファイル（HTML、CSS等）のみを対象とする場合、EXPLORATION フェーズの要件が緩和されます。
+
+**緩和の意味:**
+- コード探索をほぼスキップできる（テキスト検索のみでOK）
+- シンボル定義や参照の調査が不要
+- 素早く実装フェーズに進める
 
 | 拡張子 | 緩和 |
 |--------|------|
 | `.html`, `.htm`, `.css`, `.scss`, `.sass`, `.less`, `.md` | ✅ 適用 |
 | `.blade.php`, `.vue`, `.jsx`, `.tsx`, `.svelte` | ❌ 非適用（ロジックを含む） |
 
-**緩和される要件:**
-- `symbols_identified`: 不要
-- `find_definitions`/`find_references`: 不要
-- `search_text` のみで可
+**v1.3 追加 - クロスリファレンス検出:**
 
-**v1.3 追加**: 緩和モードでもクロスリファレンスを検出：
-- CSS → HTML: クラス/ID の使用箇所
-- HTML → CSS: スタイル定義
-- HTML → JS: getElementById, querySelector
+緩和モードでも、影響範囲分析（IMPACT_ANALYSIS）では関連ファイルを検出します：
+- CSS を修正 → そのクラス/ID を使う HTML ファイルを検出
+- HTML を修正 → スタイル定義のある CSS ファイルを検出
+- HTML を修正 → DOM 操作する JS ファイルを検出
+
+これらは `should_verify`（確認推奨）として報告されます。
 
 ---
 
@@ -308,6 +328,13 @@ doc_research:
 | `merge_to_base` | タスクブランチを元のブランチにマージ |
 | `cleanup_stale_sessions` | 中断セッションをクリーンアップ |
 
+### ブランチライフサイクル（v1.6）
+
+| ツール | 説明 |
+|--------|------|
+| `begin_phase_gate` | フェーズゲート開始、ブランチ作成（stale チェック付き） |
+| `cleanup_stale_sessions` | stale ブランチを削除 |
+
 ### インデックス & 学習
 
 | ツール | 説明 |
@@ -328,7 +355,8 @@ doc_research:
 | `--no-verify` | - | 検証をスキップ（介入もスキップ） |
 | `--no-quality` | - | 品質レビューをスキップ（v1.5） |
 | `--only-verify` | `-v` | 検証のみ実行 |
-| `--quick` | `-q` | 最小モード: 実装+検証のみ（ブランチなし） |
+| `--fast` | `-f` | 高速モード: 探索スキップ、ブランチあり |
+| `--quick` | `-q` | 最小モード: 探索スキップ、ブランチなし |
 | `--doc-research=PROMPTS` | - | 調査プロンプトを指定 |
 | `--no-doc-research` | - | ドキュメント調査をスキップ |
 | `--clean` | `-c` | stale セッションをクリーンアップ |
@@ -357,6 +385,11 @@ Step 2.5: DOCUMENT_RESEARCH (v1.3)
 
 Step 3: QueryFrame 設定
     └─ Quote 検証付きで構造化スロットを抽出
+
+Step 3.5: Begin Phase Gate（v1.6）
+    ├─ stale ブランチをチェック
+    ├─ stale ブランチ存在時はユーザー介入
+    └─ タスクブランチ作成
 
 Step 4: EXPLORATION
     ├─ find_definitions, find_references 等を使用
@@ -579,6 +612,8 @@ class DocResearchConfig:
     ↓
 [set_query_frame] → [Quote 検証付き QueryFrame]
     ↓
+[begin_phase_gate] → [stale ブランチチェック] → [ブランチ作成]
+    ↓
 [EXPLORATION] → [find_definitions/references] → [submit_understanding]
     ↓
 [Symbol Validation] → [Embedding 類似度チェック]
@@ -622,6 +657,7 @@ get_improvement_insights(limit=100)
 
 | Version | Description | Link |
 |---------|-------------|------|
+| v1.6 | Branch Lifecycle（stale 警告、begin_phase_gate） | [v1.6](updates/v1.6_ja.md) |
 | v1.5 | Quality Review（品質レビュー） | [v1.5](updates/v1.5_ja.md) |
 | v1.4 | Intervention System（介入システム） | [v1.4](updates/v1.4_ja.md) |
 | v1.3 | Document Research, Markup Cross-Reference | [v1.3](updates/v1.3_ja.md) |

@@ -27,7 +27,7 @@ You are a code implementation agent. You understand user instructions, investiga
 │  Step 7: VERIFICATION (Only if SEMANTIC executed)                           │
 │  Step 8: IMPACT ANALYSIS                                                    │
 │                                                                             │
-│  ← Skip this entire block with --quick / -g=n                               │
+│  ← Skip this entire block with --quick / -q / --fast / -f / -g=n            │
 └─────────────────────────────────────────────────────────────────────────────┘
                                     ↓
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -80,7 +80,8 @@ You are a code implementation agent. You understand user instructions, investiga
 | `--no-verify` | - | Skip post-implementation verification |
 | `--only-verify` | `-v` | Run verification only (skip implementation) |
 | `--gate=LEVEL` | `-g=LEVEL` | Set gate level: `h`igh, `m`iddle, `l`ow, `a`uto, `n`one |
-| `--quick` | `-q` | Skip exploration phases (= `--gate=none`) |
+| `--quick` | `-q` | Skip exploration phases (= `--gate=none`), no branch |
+| `--fast` | `-f` | Skip exploration phases with branch (= `--gate=none` + branch) |
 | `--doc-research=PROMPTS` | - | Specify document research prompts (comma-separated) |
 | `--no-doc-research` | - | Skip document research phase |
 | `--no-quality` | - | Skip quality review phase (v1.5) |
@@ -118,24 +119,32 @@ You are a code implementation agent. You understand user instructions, investiga
    - `auto` / `a`: Server determines based on risk
 
 6. **If `--quick` or `-q` detected:**
-   - Equivalent to `--gate=none`
+   - Equivalent to `--gate=none` with `skip_branch=true`
    - Skip exploration phases, go directly to READY
+   - No branch creation, no garbage detection, no quality review
 
-7. **If `--doc-research=PROMPTS` detected:**
+7. **If `--fast` or `-f` detected:**
+   - Equivalent to `--gate=none` with `skip_branch=false`
+   - Skip exploration phases, go directly to READY
+   - Branch is created, garbage detection enabled
+   - Quality review skipped (for speed)
+   - Use for known fixes that should be properly recorded
+
+8. **If `--doc-research=PROMPTS` detected:**
    - Parse comma-separated prompt names (e.g., `--doc-research=default,security`)
    - Store for use in Step 2.5
    - Continue to Step 0
 
-8. **If `--no-doc-research` detected:**
+9. **If `--no-doc-research` detected:**
    - Skip DOCUMENT_RESEARCH phase (Step 2.5)
    - Continue to Step 0
 
-9. **If `--no-quality` detected:**
+10. **If `--no-quality` detected:**
    - Skip QUALITY_REVIEW phase (Step 10.5)
    - After PRE_COMMIT, proceed directly to merge_to_base
    - Continue to Step 0
 
-10. **If `--no-intervention` or `-ni` detected:**
+11. **If `--no-intervention` or `-ni` detected:**
     - Skip intervention system (v1.4)
     - Verification failures will not trigger intervention prompts
     - Continue to Step 0
@@ -569,6 +578,32 @@ Response:
   }
 }
 ```
+
+### skip_branch=false with gate=none (--fast mode)
+
+For `--fast` mode, create branch but skip exploration:
+
+```
+mcp__code-intel__begin_phase_gate
+  session_id: "session_id"
+  skip_branch: false
+  gate_level: "none"
+```
+
+Response:
+```json
+{
+  "success": true,
+  "phase": "READY",
+  "branch": {
+    "created": true,
+    "name": "llm_task_abc123_from_main",
+    "base_branch": "main"
+  }
+}
+```
+
+**Note:** `--fast` creates a branch for proper change tracking while still skipping exploration phases.
 
 ---
 
@@ -1271,8 +1306,11 @@ mcp__code-intel__sync_index
 # Verification only (check existing implementation)
 /code -v sample/hello.html
 
-# Quick mode (skip exploration, impl + verify only)
+# Quick mode (skip exploration, no branch, minimal)
 /code -q change the button color to blue
+
+# Fast mode (skip exploration, with branch for proper tracking)
+/code -f fix known issue in login validation
 
 # Set gate level explicitly
 /code -g=m add password validation
@@ -1306,7 +1344,8 @@ mcp__code-intel__sync_index
 | `--no-verify` | - | Skip post-implementation verification |
 | `--only-verify` | `-v` | Run verification only |
 | `--gate=LEVEL` | `-g=LEVEL` | Gate level: h(igh), m(iddle), l(ow), a(uto), n(one) |
-| `--quick` | `-q` | Skip exploration (= `-g=n`) |
+| `--quick` | `-q` | Skip exploration, no branch (= `-g=n` + `skip_branch`) |
+| `--fast` | `-f` | Skip exploration, with branch (= `-g=n` + branch) |
 | `--doc-research=PROMPTS` | - | Document research prompts (comma-separated) |
 | `--no-doc-research` | - | Skip document research phase |
 | `--no-quality` | - | Skip quality review phase (v1.5) |

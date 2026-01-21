@@ -1,6 +1,6 @@
 # Code Intelligence MCP Server
 
-> **Current Version: v1.5**
+> **Current Version: v1.6**
 
 An MCP server that provides Cursor IDE-like code intelligence capabilities using open source tools.
 
@@ -41,6 +41,7 @@ And have a mechanism to learn from failures.
 | Markup Cross-Reference (v1.3) | Lightweight CSS/HTML/JS cross-reference analysis |
 | Intervention System (v1.4) | Retry-based intervention for stuck verification loops |
 | Quality Review (v1.5) | Post-implementation quality check with retry loop |
+| Branch Lifecycle (v1.6) | Stale branch warnings, auto-deletion on failure, begin_phase_gate separation |
 
 ---
 
@@ -99,6 +100,11 @@ Processing consists of 3 layers:
 └─────────────────────────────────────────────────────────────────────────────┘
                                     ↓
 ┌─────────────────────────────────────────────────────────────────────────────┐
+│  1.5. Phase Gate Start (v1.6)                                               │
+│     begin_phase_gate → [Stale branches?] → [User intervention] → Continue  │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    ↓
+┌─────────────────────────────────────────────────────────────────────────────┐
 │  2. Phase Gates (Server enforced)                                           │
 │     EXPLORATION → SEMANTIC* → VERIFICATION* → IMPACT_ANALYSIS → READY      │
 │     → POST_IMPL_VERIFY → PRE_COMMIT → QUALITY_REVIEW                       │
@@ -120,9 +126,17 @@ Controlled by skill prompt (code.md). Server not involved.
 | Flag Check | Parse command options (`--quick`, etc.) | - |
 | Failure Check | Auto-detect previous failure, record to OutcomeLog | - |
 | Intent | Classify as IMPLEMENT / MODIFY / INVESTIGATE / QUESTION | - |
-| Session Start | Start session, get project_rules, create Git branch | - |
+| Session Start | Start session, get project_rules (no branch yet) | - |
 | **DOCUMENT_RESEARCH** | Sub-agent researches design docs, extracts mandatory_rules | `--no-doc-research` |
 | QueryFrame | Decompose request into structured slots with Quote verification | - |
+
+### 1.5. Phase Gate Start (v1.6)
+
+After preparation, `begin_phase_gate` creates the task branch and starts phase gates.
+
+**Stale Branch Detection:**
+- If `llm_task_*` branches exist while not on a task branch, user intervention is required
+- Three options: Delete, Merge, or Continue as-is
 
 ### 2. Phase Gates (Server enforced)
 
@@ -135,6 +149,7 @@ MCP server enforces phase transitions. LLM cannot skip arbitrarily.
 | (default) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `--no-verify` | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | ✅ |
 | `--no-quality` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
+| `--fast` / `-f` | ❌ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
 | `--quick` / `-q` | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
 
 ### Tool Permissions by Phase
@@ -198,6 +213,13 @@ MCP server enforces phase transitions. LLM cannot skip arbitrarily.
 | `merge_to_base` | Merge task branch to base branch |
 | `cleanup_stale_sessions` | Clean up interrupted sessions |
 
+### Branch Lifecycle (v1.6)
+
+| Tool | Purpose |
+|------|---------|
+| `begin_phase_gate` | Start phase gates, create branch (with stale check) |
+| `cleanup_stale_sessions` | Delete stale branches |
+
 ### Improvement Cycle
 
 | Tool | Purpose |
@@ -239,12 +261,14 @@ This creates:
 your-project/
 └── .code-intel/
     ├── config.json       ← Configuration
-    ├── context.yml       ← Essential context (v1.1, auto-generated)
+    ├── context.yml       ← Project rules / doc research settings (auto-generated)
     ├── chroma/           ← ChromaDB data (auto-generated)
-    ├── agreements/       ← Agreements directory
+    ├── agreements/       ← Success pattern storage
     ├── logs/             ← DecisionLog, OutcomeLog
-    ├── verifiers/        ← Verification prompts
-    └── doc_research/     ← Document research prompts (v1.3)
+    ├── verifiers/        ← Verification prompts (backend.md, html_css.md, etc.)
+    ├── doc_research/     ← Document research prompts (v1.3)
+    ├── interventions/    ← Intervention prompts (v1.4)
+    └── review_prompts/   ← Quality review prompts (v1.5)
 ```
 
 ### Step 3: Configure .mcp.json
@@ -320,7 +344,9 @@ project_rules:
 
 ---
 
-## Upgrade (v1.0 → v1.1 → v1.2 → v1.3)
+## Upgrade (for existing v1.2 or earlier users)
+
+**Note:** If you performed a fresh setup with v1.3 or later, this section is not needed. `init-project.sh` creates all directories automatically.
 
 Steps to upgrade existing projects:
 
@@ -375,17 +401,18 @@ Restart to reload the MCP server.
 
 ### What Changes
 
-| Item | v1.0 | v1.1 | v1.2 | v1.3 | v1.4 | v1.5 |
-|------|------|------|------|------|------|------|
-| Phases | 4 | 5 | 6 | 6 | 6 | 7 (QUALITY_REVIEW) |
-| context.yml | None | Auto-generated | Auto-generated | doc_research added | Same | Same |
-| Design docs summary | None | Auto-provided | Same | Sub-agent research | Same | Same |
-| Garbage isolation | None | None | Git branch | Same | Same | Same |
-| Intervention | None | None | None | None | Retry-based | Same |
-| Quality review | None | None | None | None | None | Retry loop |
-| verifiers/ | None | None | None | Verification prompts | Same | Same |
-| interventions/ | None | None | None | None | Intervention prompts | Same |
-| review_prompts/ | None | None | None | None | None | Quality prompts |
+| Item | v1.0 | v1.1 | v1.2 | v1.3 | v1.4 | v1.5 | v1.6 |
+|------|------|------|------|------|------|------|------|
+| Phases | 4 | 5 | 6 | 6 | 6 | 7 (QUALITY_REVIEW) | 7 |
+| context.yml | None | Auto-generated | Auto-generated | doc_research added | Same | Same | Same |
+| Design docs summary | None | Auto-provided | Same | Sub-agent research | Same | Same | Same |
+| Garbage isolation | None | None | Git branch | Same | Same | Same | Same |
+| Intervention | None | None | None | None | Retry-based | Same | Same |
+| Quality review | None | None | None | None | None | Retry loop | Same |
+| Branch lifecycle | None | None | None | None | None | None | Stale warning |
+| verifiers/ | None | None | None | Verification prompts | Same | Same | Same |
+| interventions/ | None | None | None | None | Intervention prompts | Same | Same |
+| review_prompts/ | None | None | None | None | None | Quality prompts | Same |
 
 ### No Changes Required
 
@@ -412,7 +439,8 @@ The `context.yml` file will be automatically created on next session start.
 | `--no-verify` | - | Skip verification (and intervention) |
 | `--no-quality` | - | Skip quality review (v1.5) |
 | `--only-verify` | `-v` | Run verification only (skip implementation) |
-| `--quick` | `-q` | Minimal mode: implement + verify only (no branch) |
+| `--fast` | `-f` | Fast mode: skip exploration with branch (garbage + verify) |
+| `--quick` | `-q` | Minimal mode: skip exploration without branch |
 | `--doc-research=PROMPTS` | - | Specify document research prompts (v1.3) |
 | `--no-doc-research` | - | Skip document research (v1.3) |
 | `--clean` | `-c` | Cleanup stale sessions |
@@ -435,7 +463,10 @@ The `context.yml` file will be automatically created on next session start.
 # Verification only (check existing implementation)
 /code -v sample/hello.html
 
-# Quick mode: implement + verify only (no branch, no garbage, no quality)
+# Fast mode: skip exploration with branch (for known fixes)
+/code -f fix known issue in login validation
+
+# Quick mode: minimal mode (no branch, no garbage, no quality)
 /code -q change the button color to blue
 
 # Document research with specific prompts (v1.3)
@@ -603,6 +634,7 @@ For version history and detailed changes, see:
 
 | Version | Description | Link |
 |---------|-------------|------|
+| v1.6 | Branch Lifecycle (stale warning, begin_phase_gate) | [v1.6](docs/updates/v1.6.md) |
 | v1.5 | Quality Review with retry loop | [v1.5](docs/updates/v1.5.md) |
 | v1.4 | Intervention System | [v1.4](docs/updates/v1.4.md) |
 | v1.3 | Document Research, Markup Cross-Reference | [v1.3](docs/updates/v1.3.md) |
