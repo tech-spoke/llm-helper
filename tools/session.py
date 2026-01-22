@@ -935,6 +935,10 @@ class SessionState:
     quality_review_max_revert: int = 3  # Max revert count before forced completion
     quality_review_completed: bool = False  # Whether quality review passed (issues_found=false)
 
+    # v1.7: Ctags Performance Optimization
+    definitions_cache: dict[tuple[str, str, str | None, bool], dict] = field(default_factory=dict)
+    cache_stats: dict[str, int] = field(default_factory=lambda: {"hits": 0, "misses": 0})
+
     @property
     def gate_level(self) -> str:
         """Get gate level for exploration phases."""

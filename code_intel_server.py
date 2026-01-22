@@ -2817,19 +2817,35 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         )
 
     elif name == "find_definitions":
+        # Get active session for caching
+        session = session_manager.get_active_session()
+
         result = await find_definitions(
             symbol=arguments["symbol"],
             path=arguments.get("path", "."),
             language=arguments.get("language"),
             exact_match=arguments.get("exact_match", False),
+            session=session,
         )
 
+        # Add cache stats to result
+        if session:
+            result["cache_stats"] = session.cache_stats.copy()
+
     elif name == "find_references":
+        # Get active session for caching
+        session = session_manager.get_active_session()
+
         result = await find_references(
             symbol=arguments["symbol"],
             path=arguments.get("path", "."),
             language=arguments.get("language"),
+            session=session,
         )
+
+        # Add cache stats to result
+        if session:
+            result["cache_stats"] = session.cache_stats.copy()
 
     elif name == "get_symbols":
         result = await get_symbols(

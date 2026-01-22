@@ -35,6 +35,7 @@ async def find_definitions(
     path: str = ".",
     language: str | None = None,
     exact_match: bool = False,
+    session: "SessionState | None" = None,
 ) -> dict:
     """
     Find symbol definitions using Universal Ctags.
@@ -44,11 +45,22 @@ async def find_definitions(
         path: Path to search in (file or directory)
         language: Filter by language (e.g., "Python", "JavaScript")
         exact_match: Whether to match symbol name exactly
+        session: Optional SessionState for caching
 
     Returns:
         Dictionary with definition locations
     """
     search_path = Path(path).resolve()
+
+    # Check session cache first
+    if session:
+        cache_key = (symbol, str(search_path), language, exact_match)
+        if cache_key in session.definitions_cache:
+            session.cache_stats["hits"] += 1
+            cached_result = session.definitions_cache[cache_key].copy()
+            cached_result["cache_hit"] = True
+            return cached_result
+        session.cache_stats["misses"] += 1
 
     if not search_path.exists():
         return {"error": f"Path does not exist: {path}"}
@@ -123,12 +135,20 @@ async def find_definitions(
         # Clean up temp file
         Path(temp_path).unlink(missing_ok=True)
 
-        return {
+        result = {
             "symbol": symbol,
             "path": str(search_path),
             "definitions": definitions,
             "total": len(definitions),
+            "cache_hit": False,
         }
+
+        # Cache result if session provided
+        if session:
+            cache_key = (symbol, str(search_path), language, exact_match)
+            session.definitions_cache[cache_key] = result
+
+        return result
 
     except FileNotFoundError:
         return {
@@ -142,6 +162,7 @@ async def find_references(
     symbol: str,
     path: str = ".",
     language: str | None = None,
+    session: "SessionState | None" = None,
 ) -> dict:
     """
     Find symbol references using ripgrep (ctags doesn't track references).
@@ -183,7 +204,7 @@ async def find_references(
         stdout, stderr = await process.communicate()
 
         # Get definitions to filter them out
-        definitions_result = await find_definitions(symbol, path, language, exact_match=True)
+        definitions_result = await find_definitions(symbol, path, language, exact_match=True, session=session)
         definition_locations = set()
         if "definitions" in definitions_result:
             for d in definitions_result["definitions"]:
