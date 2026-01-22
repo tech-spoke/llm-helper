@@ -123,6 +123,7 @@ class UnifiedResult:
     content_snippet: str
     source_tool: str
     confidence: float = 1.0
+    chunk_id: str | None = None  # v1.8: ChromaDBチャンクID（段階的取得用）
 
 
 @dataclass

@@ -223,11 +223,26 @@ async def execute_query(
     # Execute planned steps
     for step in plan.steps:
         step_result = await execute_tool_step(step.tool, step.params, context)
+
+        # v1.8: 出力サイズ削減のため、raw_resultの代わりにsummaryのみ返す
+        result_summary = "no results"
+        if isinstance(step_result, dict):
+            if "matches" in step_result:
+                result_summary = f"{len(step_result['matches'])} matches"
+            elif "results" in step_result:
+                result_summary = f"{len(step_result['results'])} results"
+            elif "definitions" in step_result:
+                result_summary = f"{len(step_result['definitions'])} definitions"
+            elif "references" in step_result:
+                result_summary = f"{len(step_result['references'])} references"
+            elif "symbols" in step_result:
+                result_summary = f"{len(step_result['symbols'])} symbols"
+
         step_outputs.append({
             "tool": step.tool,
             "phase": "query",
             "priority": step.priority,
-            "raw_result": step_result,
+            "summary": result_summary,
         })
 
         # Collect results (simple normalization)
@@ -557,6 +572,27 @@ async def list_tools() -> list[Tool]:
                     },
                 },
                 "required": ["question"],
+            },
+        ),
+        Tool(
+            name="fetch_chunk_detail",
+            description="v1.8: Fetch detailed content of a specific ChromaDB chunk by ID. "
+                        "Use this when semantic_search returns chunk IDs and you need full content. "
+                        "Enables gradual retrieval to avoid large outputs.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "chunk_id": {
+                        "type": "string",
+                        "description": "ChromaDB chunk ID (from semantic_search results)",
+                    },
+                    "path": {
+                        "type": "string",
+                        "default": ".",
+                        "description": "Project root path",
+                    },
+                },
+                "required": ["chunk_id"],
             },
         ),
         # Session management tools for phase-gated execution
@@ -2888,6 +2924,34 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             show_plan=arguments.get("show_plan", True),
             intent=arguments.get("intent"),  # v3.2: Pass intent from caller
         )
+
+    elif name == "fetch_chunk_detail":
+        # v1.8: 段階的取得 - ChromaDBから個別チャンクを取得
+        chunk_id = arguments.get("chunk_id")
+        project_root = arguments.get("path", ".")
+
+        if not chunk_id:
+            result = {"error": "chunk_id is required"}
+        else:
+            try:
+                manager = get_chromadb_manager(project_root)
+                # ChromaDBからチャンクを取得
+                chunk_result = manager.forest_collection.get(
+                    ids=[chunk_id],
+                    include=["documents", "metadatas"]
+                )
+
+                if chunk_result and chunk_result["documents"]:
+                    result = {
+                        "success": True,
+                        "chunk_id": chunk_id,
+                        "content": chunk_result["documents"][0],
+                        "metadata": chunk_result["metadatas"][0] if chunk_result["metadatas"] else {},
+                    }
+                else:
+                    result = {"error": f"Chunk not found: {chunk_id}"}
+            except Exception as e:
+                result = {"error": f"Failed to fetch chunk: {str(e)}"}
 
     else:
         result = {"error": f"Unknown tool: {name}"}

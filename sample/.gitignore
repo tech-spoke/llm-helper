@@ -1,0 +1,8 @@
+
+# Code Intel MCP Server
+.code-intel/vectors-*.db
+.code-intel/chroma/
+.code-intel/sync_state.json
+.code-intel/.last_sync
+.code-intel/learned_pairs.json
+
