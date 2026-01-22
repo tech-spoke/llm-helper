@@ -68,6 +68,9 @@ session_manager = SessionManager()
 # ChromaDB manager cache (per project)
 _chromadb_managers: dict[str, ChromaDBManager] = {}
 
+# v1.7: Ctags cache managers (per project)
+_ctags_cache_managers: dict[str, "CtagsCacheManager"] = {}
+
 # v1.2.1: Branch manager cache (per session) - OverlayFS removed, git branch only
 _branch_managers: dict[str, BranchManager] = {}
 
@@ -141,6 +144,19 @@ def get_chromadb_manager(project_root: str = ".") -> ChromaDBManager:
         _chromadb_managers[key] = ChromaDBManager(project_path)
 
     return _chromadb_managers[key]
+
+
+def get_ctags_cache_manager(project_root: str = ".") -> "CtagsCacheManager":
+    """Get or create CtagsCacheManager for a project."""
+    from tools.ctags_cache import CtagsCacheManager
+
+    project_path = Path(project_root).resolve()
+    key = str(project_path)
+
+    if key not in _ctags_cache_managers:
+        _ctags_cache_managers[key] = CtagsCacheManager(project_path)
+
+    return _ctags_cache_managers[key]
 
 
 async def execute_query(

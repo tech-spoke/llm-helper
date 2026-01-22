@@ -224,6 +224,19 @@ class ChromaDBManager:
 
         logger.info(f"Sync: {len(added)} added, {len(modified)} modified, {len(deleted)} deleted")
 
+        # v1.7: Invalidate ctags cache for changed/deleted files
+        try:
+            from code_intel_server import get_ctags_cache_manager
+            ctags_cache = get_ctags_cache_manager(self.project_root)
+            for file_path in modified:
+                ctags_cache.invalidate_file(file_path)
+            for rel_path in deleted:
+                # Reconstruct Path from relative path
+                file_path = self.project_root / rel_path
+                ctags_cache.invalidate_file(file_path)
+        except Exception as e:
+            logger.debug(f"Failed to invalidate ctags cache: {e}")
+
         # 削除されたファイルのチャンクを削除
         for rel_path in deleted:
             try:
