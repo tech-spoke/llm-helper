@@ -927,6 +927,19 @@ mcp__code-intel__revert_to_exploration
   keep_results: true
 ```
 
+### After Implementation Complete
+
+**Once all code modifications are complete:**
+
+1. Verify all changes have been saved (Edit/Write operations completed)
+2. Check if `--no-verify` flag was set:
+   - If `--no-verify` flag was **NOT** set:
+     → **Proceed to Step 9.5 (POST_IMPLEMENTATION_VERIFICATION)**
+   - If `--no-verify` flag **was** set:
+     → **Skip Step 9.5, proceed directly to Step 10 (PRE_COMMIT)**
+
+**IMPORTANT:** Do NOT stop after implementation. You MUST proceed to the next step (9.5 or 10) to complete the workflow.
+
 ---
 
 ## Step 9.5: POST_IMPLEMENTATION_VERIFICATION (default, skip with --no-verify)
