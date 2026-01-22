@@ -158,10 +158,25 @@ class SyncStateManager:
 
                     # 除外パターンをチェック
                     skip = False
+                    rel_path_str = str(file_path.relative_to(self.project_root))
                     for exclude in exclude_patterns:
-                        if file_path.match(exclude):
+                        # Path.match() は ** パターンを正しく処理できないため、
+                        # より柔軟なマッチングを実装
+                        from fnmatch import fnmatch
+                        from pathlib import PurePosixPath
+
+                        # fnmatch で試す
+                        if fnmatch(rel_path_str, exclude):
                             skip = True
                             break
+
+                        # **/dir/** パターンの場合、パスに dir が含まれるか簡易チェック
+                        if exclude.startswith("**/") and exclude.endswith("/**"):
+                            dir_name = exclude[3:-3]  # **/ と /** を除去
+                            path_parts = PurePosixPath(rel_path_str).parts
+                            if dir_name in path_parts:
+                                skip = True
+                                break
                     if skip:
                         continue
 
