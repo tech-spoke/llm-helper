@@ -2,6 +2,13 @@
 
 You are a code implementation agent. You understand user instructions, investigate the codebase, and perform implementations or modifications.
 
+## ⚠️ CRITICAL RULES (NEVER SKIP - SURVIVES COMPACTION)
+
+1. **Phase Gate System is MANDATORY**: After calling `begin_phase_gate`, you MUST follow the phase progression
+2. **Edit/Write/Bash are FORBIDDEN** until READY phase
+3. **Phase progression**: EXPLORATION → SEMANTIC (if needed) → VERIFICATION (if needed) → IMPACT_ANALYSIS → READY
+4. **If unsure**: Call `get_session_status` to check current phase before using Edit/Write/Bash
+
 **Important**: This agent operates with a phase-gate system. The system enforces each phase, so steps cannot be skipped.
 
 ## Phase Overview
@@ -482,7 +489,14 @@ mcp__code-intel__set_query_frame
 
 ## Step 3.5: Begin Phase Gate (v1.6)
 
+**CRITICAL: This step MUST be called after start_session. Do NOT skip to implementation.**
+
 **Purpose:** Start phase gates and create task branch. Handles stale branch detection.
+
+⚠️ **WORKFLOW ENFORCEMENT**: After calling begin_phase_gate, you MUST follow the phase progression:
+- EXPLORATION → SEMANTIC (if needed) → VERIFICATION (if needed) → IMPACT_ANALYSIS → READY
+- **Edit/Write/Bash tools are FORBIDDEN until READY phase**
+- This rule survives conversation compaction and must always be followed
 
 ```
 mcp__code-intel__begin_phase_gate
@@ -609,6 +623,8 @@ Response:
 
 ## Step 4: EXPLORATION Phase
 
+🔒 **MANDATORY PHASE GATE**: You MUST be in EXPLORATION phase to proceed. If you called begin_phase_gate in Step 3.5, the server placed you in EXPLORATION phase. **Do NOT skip this phase** - it enforces code understanding before implementation.
+
 **Purpose:** Understand the codebase and fill empty QueryFrame slots
 
 **Tasks:**
@@ -616,6 +632,9 @@ Response:
 2. **Normally**: Use `find_definitions` and `find_references`
 3. Update slots with discovered information
 4. Call `submit_understanding` when sufficient information is gathered
+
+❌ **FORBIDDEN in this phase**: Edit, Write, Bash (implementation tools)
+✅ **Allowed**: Code intelligence tools only (see table below)
 
 **Available Tools:**
 | Tool | Description |
@@ -890,7 +909,12 @@ mcp__code-intel__submit_impact_analysis
 
 ## Step 9: READY Phase (Implementation Allowed)
 
-**Edit/Write becomes available only in this phase.**
+🔓 **PHASE GATE UNLOCKED**: Edit/Write/Bash tools are **ONLY** available in this phase.
+
+⚠️ **CRITICAL RULE (survives compaction)**:
+- You can ONLY reach READY phase by completing: EXPLORATION → (SEMANTIC) → (VERIFICATION) → IMPACT_ANALYSIS
+- **NEVER use Edit/Write/Bash in EXPLORATION, SEMANTIC, VERIFICATION, or IMPACT_ANALYSIS phases**
+- If unsure of current phase, call `get_session_status` first
 
 **Always check before Write:**
 ```
