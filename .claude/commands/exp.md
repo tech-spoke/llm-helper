@@ -94,10 +94,14 @@ Recommended investigation directions
 |------|----------------------|------------|
 | search_text | Pass patterns as array | 15-20 sec |
 | Read | Multiple calls in one message | 4-6 sec |
+| find_definitions | Multiple calls in one message | 2-3 sec |
+| find_references | Multiple calls in one message | 2-3 sec |
 | Grep | Multiple calls in one message | 2-4 sec |
-| Edit | Multiple calls in one message (different files)* | 2-4 sec |
+| Glob | Multiple calls in one message | 1-2 sec |
+| Edit* | Multiple calls in one message (different files) | 2-4 sec |
+| Write* | Multiple calls in one message | 2-4 sec |
 
-*Edit is not available in `/exp` (exploration only), but follows the same parallel execution principle in `/code`
+*Edit and Write are not available in `/exp` (exploration only), but follow the same parallel execution principle in `/code`
 
 ## Usage Examples
 

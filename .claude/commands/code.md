@@ -683,6 +683,48 @@ search_text(patterns=["useAuthContext", "AuthProvider", "withAuth"])
 - Maximum 5 patterns per call
 - For more patterns, split into multiple calls
 
+#### Glob: Multiple Patterns
+
+When searching for multiple file patterns, call ALL Glob tools in ONE message:
+
+✅ **CORRECT (saves 1-2 seconds)**:
+```xml
+<Glob pattern="**/*Service.py" />
+<Glob pattern="**/*Repository.py" />
+<Glob pattern="**/*Controller.py" />
+```
+→ All patterns execute in parallel
+
+❌ **WRONG (wastes time)**:
+```xml
+<Glob pattern="**/*Service.py" />
+[Wait for result]
+<Glob pattern="**/*Repository.py" />
+[Wait for result]
+```
+
+#### Code Intelligence Tools: Multiple Symbols
+
+When using find_definitions or find_references for multiple symbols, call ALL in ONE message:
+
+✅ **CORRECT (saves 2-3 seconds)**:
+```xml
+<ToolSearch query="select:mcp__code-intel__find_definitions" />
+<!-- Then in one message: -->
+<mcp__code-intel__find_definitions symbol="AuthService" />
+<mcp__code-intel__find_definitions symbol="UserRepository" />
+<mcp__code-intel__find_references symbol="LoginController" />
+```
+→ All queries execute in parallel
+
+❌ **WRONG (wastes time)**:
+```xml
+<mcp__code-intel__find_definitions symbol="AuthService" />
+[Wait for result]
+<mcp__code-intel__find_definitions symbol="UserRepository" />
+[Wait for result]
+```
+
 ### Markup Context Relaxation (v1.1)
 
 **When targeting only pure markup files, requirements are relaxed:**
@@ -1095,6 +1137,24 @@ When editing multiple independent files, call ALL Edit tools in ONE message:
 → Parallel execution (saves 2-4 seconds)
 
 ⚠️ **CAUTION**: When editing the same file multiple times, use sequential edits to avoid conflicts.
+
+**Same applies to Write**:
+When creating multiple new files, call ALL Write tools in ONE message:
+```
+<Write file_path="models/User.py" content="..." />
+<Write file_path="models/Product.py" content="..." />
+<Write file_path="models/Order.py" content="..." />
+```
+→ Parallel execution (saves 2-4 seconds)
+
+**Same applies to Glob**:
+When searching for multiple file patterns, call ALL Glob tools in ONE message:
+```
+<Glob pattern="**/*Service.py" />
+<Glob pattern="**/*Repository.py" />
+<Glob pattern="**/*Controller.py" />
+```
+→ Parallel execution (saves 1-2 seconds)
 
 **Principle**: Whenever you need to call the SAME tool multiple times, call them ALL in a SINGLE message for automatic parallel execution.
 
