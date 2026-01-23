@@ -657,6 +657,7 @@ get_improvement_insights(limit=100)
 
 | Version | Description | Link |
 |---------|-------------|------|
+| v1.7 | Parallel Execution（並列実行 - 27-35秒削減） | [v1.7](updates/v1.7_ja.md) |
 | v1.6 | Branch Lifecycle（stale 警告、begin_phase_gate） | [v1.6](updates/v1.6_ja.md) |
 | v1.5 | Quality Review（品質レビュー） | [v1.5](updates/v1.5_ja.md) |
 | v1.4 | Intervention System（介入システム） | [v1.4](updates/v1.4_ja.md) |

@@ -642,6 +642,7 @@ For version history and detailed changes:
 
 | Version | Description | Link |
 |---------|-------------|------|
+| v1.7 | Parallel Execution (search_text, Read, Grep - saves 27-35s) | [v1.7](updates/v1.7.md) |
 | v1.6 | Branch Lifecycle (stale warning, begin_phase_gate) | [v1.6](updates/v1.6.md) |
 | v1.5 | Quality Review (revert-to-READY loop) | [v1.5](updates/v1.5.md) |
 | v1.4 | Intervention System | [v1.4](updates/v1.4.md) |
