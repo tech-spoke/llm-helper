@@ -949,6 +949,52 @@ class SessionState:
         """Set gate level for exploration phases."""
         self._gate_level = value
 
+    def record_tool_call_start(self, tool: str, params: dict) -> None:
+        """
+        Record tool call start (v1.8: Performance tracking).
+
+        Args:
+            tool: Tool name
+            params: Tool parameters
+        """
+        now = datetime.now()
+        record = {
+            "tool": tool,
+            "params": params,
+            "phase": self.phase.name,
+            "started_at": now.isoformat(),
+            # completed_at will be added by record_tool_call_end
+        }
+        self.tool_calls.append(record)
+
+    def record_tool_call_end(
+        self,
+        result_summary: str,
+        result_detail: dict | None = None,
+    ) -> None:
+        """
+        Record tool call completion (v1.8: Performance tracking).
+
+        Args:
+            result_summary: Summary of result
+            result_detail: Detailed result (optional)
+        """
+        if not self.tool_calls:
+            return
+
+        now = datetime.now()
+        last_call = self.tool_calls[-1]
+        last_call["completed_at"] = now.isoformat()
+        last_call["result_summary"] = result_summary
+
+        # Calculate execution time
+        if "started_at" in last_call:
+            started = datetime.fromisoformat(last_call["started_at"])
+            last_call["duration_seconds"] = (now - started).total_seconds()
+
+        if result_detail:
+            last_call["result_detail"] = result_detail
+
     def record_tool_call(
         self,
         tool: str,
@@ -957,7 +1003,9 @@ class SessionState:
         result_detail: dict | None = None,
     ) -> None:
         """
-        Record a tool call for tracking.
+        Record a tool call for tracking (legacy method for backward compatibility).
+
+        DEPRECATED: Use record_tool_call_start/end instead for performance tracking.
 
         result_detail: 改善サイクルでの分析用。
         """
@@ -972,6 +1020,38 @@ class SessionState:
         if result_detail:
             record["result_detail"] = result_detail
         self.tool_calls.append(record)
+
+    def transition_to_phase(self, new_phase: Phase, reason: str = "") -> None:
+        """
+        Transition to a new phase with timestamp tracking (v1.8: Performance tracking).
+
+        Args:
+            new_phase: The phase to transition to
+            reason: Reason for transition (e.g., "submit_understanding", "gate_requirement")
+        """
+        now = datetime.now()
+
+        # Record end time for current phase
+        if self.phase_history:
+            last_phase = self.phase_history[-1]
+            if "ended_at" not in last_phase:
+                last_phase["ended_at"] = now.isoformat()
+                if "started_at" in last_phase:
+                    started = datetime.fromisoformat(last_phase["started_at"])
+                    last_phase["duration_seconds"] = (now - started).total_seconds()
+
+        # Transition to new phase
+        old_phase = self.phase
+        self.phase = new_phase
+
+        # Record new phase start
+        self.phase_history.append({
+            "phase": new_phase.name,
+            "started_at": now.isoformat(),
+            "reason": reason,
+            "from_phase": old_phase.name,
+            # ended_at will be added on next transition
+        })
 
     def get_allowed_tools(self) -> list[str]:
         """
@@ -1179,7 +1259,7 @@ class SessionState:
             }
 
         # フェーズを戻す
-        self.phase = Phase.EXPLORATION
+        self.transition_to_phase(Phase.EXPLORATION, reason="revert_to_exploration")
 
         # 結果をクリアするかどうか
         if not keep_results:
@@ -1295,7 +1375,7 @@ class SessionState:
 
         if can_proceed:
             # v1.1: READY ではなく IMPACT_ANALYSIS へ
-            self.phase = Phase.IMPACT_ANALYSIS
+            self.transition_to_phase(Phase.IMPACT_ANALYSIS, reason="submit_understanding_approved")
             response = {
                 "success": True,
                 "next_phase": Phase.IMPACT_ANALYSIS.name,
@@ -1310,7 +1390,7 @@ class SessionState:
                 response["relaxed_requirements"] = "find_definitions/find_references not required for markup files"
             return response
         else:
-            self.phase = Phase.SEMANTIC
+            self.transition_to_phase(Phase.SEMANTIC, reason="semantic_gate_required")
             response = {
                 "success": True,
                 "next_phase": Phase.SEMANTIC.name,
@@ -1432,7 +1512,7 @@ class SessionState:
             "timestamp": datetime.now().isoformat(),
         })
 
-        self.phase = Phase.VERIFICATION
+        self.transition_to_phase(Phase.VERIFICATION, reason="submit_semantic")
         return {
             "success": True,
             "next_phase": Phase.VERIFICATION.name,
@@ -1483,7 +1563,7 @@ class SessionState:
         })
 
         # v1.1: READY ではなく IMPACT_ANALYSIS へ
-        self.phase = Phase.IMPACT_ANALYSIS
+        self.transition_to_phase(Phase.IMPACT_ANALYSIS, reason="submit_verification")
 
         rejected = [v for v in result.verified if v.status == "rejected"]
         if rejected:
@@ -1598,7 +1678,7 @@ class SessionState:
             "timestamp": datetime.now().isoformat(),
         })
 
-        self.phase = Phase.READY
+        self.transition_to_phase(Phase.READY, reason="submit_impact_analysis")
 
         # Check for should_verify warnings
         should_verify_missing = []
@@ -1648,7 +1728,7 @@ class SessionState:
             "timestamp": datetime.now().isoformat(),
         })
 
-        self.phase = Phase.PRE_COMMIT
+        self.transition_to_phase(Phase.PRE_COMMIT, reason="submit_for_review")
 
         return {
             "success": True,
@@ -1743,6 +1823,9 @@ class SessionState:
             "semantic": self.semantic.to_dict() if self.semantic else None,
             "verification": self.verification.to_dict() if self.verification else None,
             "tool_calls_count": len(self.tool_calls),
+            # v1.8: Performance tracking data
+            "tool_calls": self.tool_calls,  # Includes started_at, completed_at, duration_seconds
+            "phase_history": self.phase_history,  # Includes started_at, ended_at, duration_seconds
         }
 
         # v1.2: Add task branch info if enabled

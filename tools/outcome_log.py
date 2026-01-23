@@ -104,8 +104,9 @@ def record_outcome(outcome_log: OutcomeLog) -> dict:
         record_id = f"outcome_{outcome_log.session_id}_{outcome_log.timestamp}"
         record["record_id"] = record_id
 
-        with open(OUTCOME_LOG_FILE, "a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        # DISABLED: Log output disabled for performance
+        # with open(OUTCOME_LOG_FILE, "a", encoding="utf-8") as f:
+        #     f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
         return {
             "success": True,
@@ -258,8 +259,9 @@ def record_decision(decision_log: dict) -> dict:
         record_id = f"decision_{session_id}_{timestamp}"
         decision_log["record_id"] = record_id
 
-        with open(DECISION_LOG_FILE, "a", encoding="utf-8") as f:
-            f.write(json.dumps(decision_log, ensure_ascii=False) + "\n")
+        # DISABLED: Log output disabled for performance
+        # with open(DECISION_LOG_FILE, "a", encoding="utf-8") as f:
+        #     f.write(json.dumps(decision_log, ensure_ascii=False) + "\n")
 
         return {
             "success": True,
