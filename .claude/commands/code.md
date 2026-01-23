@@ -804,6 +804,26 @@ mcp__code-intel__validate_symbol_relevance
 
 **When executed:** When server evaluates as "low"
 
+### ⚡ Parallel Execution in SEMANTIC
+
+**When investigating multiple files discovered from semantic_search:**
+
+✅ **CORRECT (parallel execution)**:
+```xml
+<Read file_path="auth/ServiceA.py" />
+<Read file_path="auth/ServiceB.py" />
+<Read file_path="auth/ServiceC.py" />
+```
+
+❌ **WRONG (sequential execution)**:
+```xml
+<Read file_path="auth/ServiceA.py" />
+<!-- wait -->
+<Read file_path="auth/ServiceB.py" />
+<!-- wait -->
+<Read file_path="auth/ServiceC.py" />
+```
+
 **Phase completion:**
 ```
 mcp__code-intel__submit_semantic
@@ -830,6 +850,27 @@ mcp__code-intel__submit_semantic
 **Purpose:** Verify SEMANTIC hypotheses with actual code and promote to FACT
 
 **When executed:** After SEMANTIC phase
+
+### ⚡ Parallel Execution in VERIFICATION
+
+**When verifying multiple hypotheses, use tools in parallel:**
+
+✅ **CORRECT (parallel execution)**:
+Call multiple code intelligence tools in a **SINGLE message**:
+```
+<ToolSearch query="select:mcp__code-intel__find_references" />
+<!-- Then in one message: -->
+<mcp__code-intel__find_references symbol="AuthService" />
+<mcp__code-intel__find_references symbol="UserRepository" />
+<mcp__code-intel__find_definitions symbol="LoginController" />
+```
+
+Or when reading verification files:
+```xml
+<Read file_path="controllers/UserController.py" />
+<Read file_path="services/AuthService.py" />
+<Read file_path="repositories/UserRepository.py" />
+```
 
 **Phase completion:**
 ```
@@ -890,6 +931,28 @@ mcp__code-intel__analyze_impact
 ```
 
 ### Verification Requirements
+
+### ⚡ Parallel Execution in IMPACT_ANALYSIS
+
+**When verifying multiple must_verify or should_verify files:**
+
+✅ **CORRECT (parallel execution)**:
+Read all files to verify in a **SINGLE message**:
+```xml
+<Read file_path="app/Services/CartService.php" />
+<Read file_path="tests/Feature/ProductTest.php" />
+<Read file_path="database/factories/ProductFactory.php" />
+```
+→ All files are read in parallel (saves 4-6 seconds)
+
+❌ **WRONG (sequential execution)**:
+```xml
+<Read file_path="app/Services/CartService.php" />
+<!-- wait -->
+<Read file_path="tests/Feature/ProductTest.php" />
+<!-- wait -->
+<Read file_path="database/factories/ProductFactory.php" />
+```
 
 **Call submit_impact_analysis to proceed to READY:**
 ```
