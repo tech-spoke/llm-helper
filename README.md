@@ -308,14 +308,14 @@ The `init-project.sh` automatically creates `.claude/CLAUDE.md` with essential r
 ## Core Rules
 
 1. **Always use parallel execution** when making multiple tool calls
-2. **Use `/exp`** for code exploration and understanding
+2. **Use `/exp`** for quick tasks and parallel execution (exploration + implementation)
 
 See [PARALLEL_GUIDE.md](PARALLEL_GUIDE.md) for details.
 ```
 
 **Key Points:**
 - **Parallel execution** (v1.7): When calling the same tool multiple times (Read, Grep, search_text), call them in a **single message** to save 27-35 seconds
-- **`/exp` command**: Use for exploration and investigation tasks - automatically uses parallel execution
+- **`/exp` command**: Fast parallel execution tool for quick fixes, exploration, and lightweight implementation - no Phase Gates, direct execution
 
 Example:
 ```

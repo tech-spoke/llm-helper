@@ -309,14 +309,14 @@ your-project/
 ## Core Rules
 
 1. **Always use parallel execution** when making multiple tool calls
-2. **Use `/exp`** for code exploration and understanding
+2. **Use `/exp`** for quick tasks and parallel execution (exploration + implementation)
 
 See [PARALLEL_GUIDE.md](PARALLEL_GUIDE.md) for details.
 ```
 
 **重要なポイント:**
 - **並列実行**（v1.7）: 同じツールを複数回呼び出す場合（Read, Grep, search_text）、**1メッセージ内で並列実行**することで 27-35秒 節約
-- **`/exp` コマンド**: 探索・調査タスクに使用 - 自動的に並列実行を活用
+- **`/exp` コマンド**: 高速並列実行ツール - クイックフィックス、探索、軽量実装向け。Phase Gate なし、直接実行
 
 例：
 ```
