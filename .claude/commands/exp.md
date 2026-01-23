@@ -1,16 +1,16 @@
-# /exp - 高速コード探索コマンド
+# /exp - Fast Code Exploration Command
 
-**目的**: 並列検索を活用した軽量な探索・調査
+**Purpose**: Lightweight exploration and investigation leveraging parallel search
 
-## 特徴
+## Features
 
-- **並列実行**: search_text、Read、Grep を自動的に並列実行
-- **軽量**: 実装はせず、探索と理解に特化
-- **高速**: 並列実行により通常の探索より20-30秒高速
+- **Parallel execution**: Automatically executes search_text, Read, and Grep in parallel
+- **Lightweight**: Focused on exploration and understanding, no implementation
+- **Fast**: 20-30 seconds faster than standard exploration due to parallel execution
 
-## 使い方
+## Usage
 
-探索したい内容を自然言語で指定するだけ：
+Simply specify what you want to explore in natural language:
 
 ```
 /exp Find all authentication related code
@@ -18,140 +18,140 @@
 /exp List all API endpoints
 ```
 
-## 実行プロセス
+## Execution Process
 
-### 1. タスク理解
-ユーザーの探索目的を分析
+### 1. Task Understanding
+Analyze the user's exploration objective
 
-### 2. 並列検索の実行
+### 2. Parallel Search Execution
 
-**⚠️ CRITICAL: 必ず並列実行を使用**
+**⚠️ CRITICAL: Always use parallel execution**
 
-#### search_text (複数パターン)
-探索に必要なパターンを特定し、**1回の呼び出し**で並列検索：
+#### search_text (Multiple Patterns)
+Identify necessary patterns and search in parallel with **a single call**:
 
-✅ **正しい方法**:
+✅ **Correct method**:
 ```
-mcp__code-intel__search_text で ["pattern1", "pattern2", "pattern3"] を検索
+Search with mcp__code-intel__search_text using ["pattern1", "pattern2", "pattern3"]
 ```
 
-❌ **間違った方法**:
+❌ **Wrong method**:
 ```
 search_text("pattern1")
-<!-- 待機 -->
+<!-- wait -->
 search_text("pattern2")
-<!-- 待機 -->
+<!-- wait -->
 search_text("pattern3")
 ```
 
-#### Read (複数ファイル)
-関連ファイルを**1メッセージ**で並列読み込み：
+#### Read (Multiple Files)
+Read related files in parallel with **a single message**:
 
-✅ **正しい方法**:
+✅ **Correct method**:
 ```xml
 <Read file_path="file1.py" />
 <Read file_path="file2.py" />
 <Read file_path="file3.py" />
 ```
 
-#### Grep (複数パターン)
-複数パターンを**1メッセージ**で並列検索：
+#### Grep (Multiple Patterns)
+Search multiple patterns in parallel with **a single message**:
 
-✅ **正しい方法**:
+✅ **Correct method**:
 ```xml
 <Grep pattern="class.*Service" />
 <Grep pattern="function.*handler" />
 <Grep pattern="async def" />
 ```
 
-### 3. 結果の整理と報告
+### 3. Organizing and Reporting Results
 
-探索結果を整理して以下の形式で報告：
+Organize exploration results and report in the following format:
 
 ```markdown
-## 探索結果
+## Exploration Results
 
-### 発見したファイル
-- file1.py: 役割の説明
-- file2.py: 役割の説明
+### Discovered Files
+- file1.py: Role description
+- file2.py: Role description
 
-### 主要なパターン
-- パターン1: 説明
-- パターン2: 説明
+### Key Patterns
+- Pattern 1: Description
+- Pattern 2: Description
 
-### アーキテクチャ
-簡潔な説明
+### Architecture
+Brief description
 
-### 次のステップ（オプション）
-推奨される調査方向
+### Next Steps (Optional)
+Recommended investigation directions
 ```
 
-## 並列実行の原則
+## Parallel Execution Principles
 
-**同じツールを複数回使う場合は必ず1メッセージ/1呼び出しにまとめる**
+**When using the same tool multiple times, always combine them into a single message/call**
 
-| ツール | 並列化方法 | 時間削減 |
-|--------|----------|---------|
-| search_text | 配列でパターンを渡す | 15-20秒 |
-| Read | 1メッセージで複数呼び出し | 4-6秒 |
-| Grep | 1メッセージで複数呼び出し | 2-4秒 |
+| Tool | Parallelization Method | Time Saved |
+|------|----------------------|------------|
+| search_text | Pass patterns as array | 15-20 sec |
+| Read | Multiple calls in one message | 4-6 sec |
+| Grep | Multiple calls in one message | 2-4 sec |
 
-## 使用例
+## Usage Examples
 
-### 例1: 認証機能の理解
+### Example 1: Understanding Authentication
 ```
 /exp Find all authentication related code
 ```
 
-実行内容：
+Execution:
 1. search_text(["auth", "login", "session", "token", "password"])
-2. 発見したファイルを並列Read
-3. 構造を分析して報告
+2. Read discovered files in parallel
+3. Analyze structure and report
 
-### 例2: API エンドポイントのリスト
+### Example 2: Listing API Endpoints
 ```
 /exp List all API endpoints
 ```
 
-実行内容：
+Execution:
 1. Glob("**/*controller*.py"), Glob("**/*route*.py"), Glob("**/*api*.py")
-2. 発見したファイルを並列Read
-3. エンドポイント一覧を抽出して報告
+2. Read discovered files in parallel
+3. Extract and report endpoint list
 
-### 例3: モーダルシステムの理解
+### Example 3: Understanding Modal System
 ```
 /exp Understand how the modal system works
 ```
 
-実行内容：
+Execution:
 1. search_text(["modal", "dialog", "popup", "overlay"])
-2. 関連ファイルを並列Read
-3. システムの仕組みを説明
+2. Read related files in parallel
+3. Explain how the system works
 
-## 禁止事項
+## Prohibited Actions
 
-- ❌ Edit/Write/Bash は使用不可（探索のみ）
-- ❌ 実装作業は不可
-- ❌ 順次実行（必ず並列実行）
-- ❌ git 操作は不可
+- ❌ Edit/Write/Bash not allowed (exploration only)
+- ❌ No implementation work
+- ❌ Sequential execution (always use parallel)
+- ❌ No git operations
 
-## `/code` との違い
+## Differences from `/code`
 
-| 項目 | /exp | /code |
+| Item | /exp | /code |
 |------|------|-------|
-| 目的 | 探索・理解 | 実装 |
-| 実装 | ❌ | ✅ |
-| フェーズゲート | なし | あり |
-| 所要時間 | 30-90秒 | 402秒 |
-| 並列実行 | 必須 | 自動 |
-| git 操作 | なし | あり |
+| Purpose | Exploration/Understanding | Implementation |
+| Implementation | ❌ | ✅ |
+| Phase Gates | None | Yes |
+| Duration | 30-90 sec | 402 sec |
+| Parallel Execution | Mandatory | Automatic |
+| Git Operations | None | Yes |
 
-## 重要な注意
+## Important Notes
 
-**このコマンドは並列実行を前提としています。**
+**This command is designed for parallel execution.**
 
-- search_text は必ず複数パターンを配列で渡す
-- Read/Grep は必ず1メッセージで複数呼び出し
-- 順次実行すると時間削減効果がなくなります
+- search_text must always pass multiple patterns as an array
+- Read/Grep must always be called multiple times in a single message
+- Sequential execution eliminates time-saving benefits
 
-詳細は `.claude/README.md` の並列実行ガイドを参照してください。
+See `.claude/PARALLEL_GUIDE.md` for detailed parallel execution guide.
