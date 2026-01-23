@@ -260,6 +260,10 @@ This creates:
 
 ```
 your-project/
+├── .claude/
+│   ├── CLAUDE.md         ← Project rules for LLM (auto-generated)
+│   ├── PARALLEL_GUIDE.md ← Efficiency guide (v1.7)
+│   └── commands/         ← Skill files: /code, /exp, etc. (auto-generated)
 └── .code-intel/
     ├── config.json       ← Configuration
     ├── context.yml       ← Project rules / doc research settings (auto-generated)
@@ -271,6 +275,11 @@ your-project/
     ├── interventions/    ← Intervention prompts (v1.4)
     └── review_prompts/   ← Quality review prompts (v1.5)
 ```
+
+**Important files created:**
+- `.claude/CLAUDE.md` - Project-specific rules that LLM must follow
+- `.claude/PARALLEL_GUIDE.md` - Parallel execution efficiency guide (v1.7)
+- `.claude/commands/` - Skill definitions (`/code`, `/exp`, etc.)
 
 ### Step 3: Configure .mcp.json
 
@@ -289,18 +298,52 @@ Add the configuration output by `init-project.sh` to `.mcp.json`:
 }
 ```
 
-### Step 4: Setup Skills (optional)
+### Step 4: Understanding Project Rules (Important)
 
-```bash
-mkdir -p /path/to/your-project/.claude/commands
-cp /path/to/llm-helper/.claude/commands/*.md /path/to/your-project/.claude/commands/
+The `init-project.sh` automatically creates `.claude/CLAUDE.md` with essential rules:
+
+```markdown
+# your-project
+
+## Core Rules
+
+1. **Always use parallel execution** when making multiple tool calls
+2. **Use `/exp`** for code exploration and understanding
+
+See [PARALLEL_GUIDE.md](PARALLEL_GUIDE.md) for details.
+```
+
+**Key Points:**
+- **Parallel execution** (v1.7): When calling the same tool multiple times (Read, Grep, search_text), call them in a **single message** to save 27-35 seconds
+- **`/exp` command**: Use for exploration and investigation tasks - automatically uses parallel execution
+
+Example:
+```
+✅ CORRECT (parallel):
+<Read file_path="file1.py" />
+<Read file_path="file2.py" />
+<Read file_path="file3.py" />
+
+❌ WRONG (sequential):
+<Read file_path="file1.py" />
+[wait]
+<Read file_path="file2.py" />
 ```
 
 ### Step 5: Restart Claude Code
 
 Restart to load the MCP server.
 
-### Step 6: Customize context.yml (optional)
+### Step 6: Verify Skills
+
+Check that skills are available:
+```bash
+# In Claude Code
+/code --help
+/exp Find all authentication code
+```
+
+### Step 7: Customize context.yml (optional)
 
 The `.code-intel/context.yml` file controls various behaviors. You can customize it as needed:
 

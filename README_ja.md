@@ -261,6 +261,10 @@ cd llm-helper
 
 ```
 your-project/
+├── .claude/
+│   ├── CLAUDE.md          ← LLM 用プロジェクトルール（自動生成）
+│   ├── PARALLEL_GUIDE.md  ← 効率化ガイド（v1.7）
+│   └── commands/          ← スキルファイル: /code, /exp 等（自動生成）
 └── .code-intel/
     ├── config.json        ← 設定
     ├── context.yml        ← プロジェクトルール・ドキュメント調査設定（自動生成）
@@ -272,6 +276,11 @@ your-project/
     ├── interventions/     ← 介入プロンプト（v1.4）
     └── review_prompts/    ← 品質レビュープロンプト（v1.5）
 ```
+
+**重要な作成ファイル:**
+- `.claude/CLAUDE.md` - LLM が従うべきプロジェクト固有のルール
+- `.claude/PARALLEL_GUIDE.md` - 並列実行による効率化ガイド（v1.7）
+- `.claude/commands/` - スキル定義（`/code`, `/exp` 等）
 
 ### Step 3: .mcp.json の設定
 
@@ -290,18 +299,52 @@ your-project/
 }
 ```
 
-### Step 4: スキルの設定（任意）
+### Step 4: プロジェクトルールの理解（重要）
 
-```bash
-mkdir -p /path/to/your-project/.claude/commands
-cp /path/to/llm-helper/.claude/commands/*.md /path/to/your-project/.claude/commands/
+`init-project.sh` は `.claude/CLAUDE.md` を自動作成し、以下の基本ルールを設定します：
+
+```markdown
+# your-project
+
+## Core Rules
+
+1. **Always use parallel execution** when making multiple tool calls
+2. **Use `/exp`** for code exploration and understanding
+
+See [PARALLEL_GUIDE.md](PARALLEL_GUIDE.md) for details.
+```
+
+**重要なポイント:**
+- **並列実行**（v1.7）: 同じツールを複数回呼び出す場合（Read, Grep, search_text）、**1メッセージ内で並列実行**することで 27-35秒 節約
+- **`/exp` コマンド**: 探索・調査タスクに使用 - 自動的に並列実行を活用
+
+例：
+```
+✅ 正しい（並列実行）:
+<Read file_path="file1.py" />
+<Read file_path="file2.py" />
+<Read file_path="file3.py" />
+
+❌ 間違い（順次実行）:
+<Read file_path="file1.py" />
+[待機]
+<Read file_path="file2.py" />
 ```
 
 ### Step 5: Claude Code を再起動
 
 MCP サーバーを読み込むために再起動。
 
-### Step 6: context.yml のカスタマイズ（任意）
+### Step 6: スキルの確認
+
+スキルが利用可能か確認：
+```bash
+# Claude Code 内で
+/code --help
+/exp Find all authentication code
+```
+
+### Step 7: context.yml のカスタマイズ（任意）
 
 `.code-intel/context.yml` ファイルで各種動作を制御できます。必要に応じてカスタマイズしてください：
 

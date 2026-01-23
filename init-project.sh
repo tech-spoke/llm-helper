@@ -7,7 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 usage() {
     echo "Usage: $0 <project-path> [options]"
     echo ""
-    echo "Initialize a project for Code Intel MCP Server v1.3"
+    echo "Initialize a project for Code Intel MCP Server v1.7"
     echo ""
     echo "Arguments:"
     echo "  project-path    Path to the target project (required)"
@@ -80,7 +80,7 @@ PROJECT_PATH="$(cd "$PROJECT_PATH" 2>/dev/null && pwd)" || {
     exit 1
 }
 
-echo "=== Code Intel Project Initialization v1.3 ==="
+echo "=== Code Intel Project Initialization v1.7 ==="
 echo ""
 echo "Project: $PROJECT_PATH"
 echo "MCP Server: $SCRIPT_DIR"
@@ -250,6 +250,36 @@ if [ -d "$SCRIPT_DIR/.code-intel/doc_research" ]; then
     done
 fi
 
+# Copy .claude directory (project rules, guides, and skills)
+if [ -d "$SCRIPT_DIR/.claude" ]; then
+    mkdir -p "$PROJECT_PATH/.claude/commands"
+
+    # Copy CLAUDE.md
+    if [ -f "$SCRIPT_DIR/.claude/CLAUDE.md" ] && [ ! -f "$PROJECT_PATH/.claude/CLAUDE.md" ]; then
+        cp "$SCRIPT_DIR/.claude/CLAUDE.md" "$PROJECT_PATH/.claude/"
+        echo "  ✓ .claude/CLAUDE.md"
+    fi
+
+    # Copy PARALLEL_GUIDE.md
+    if [ -f "$SCRIPT_DIR/.claude/PARALLEL_GUIDE.md" ] && [ ! -f "$PROJECT_PATH/.claude/PARALLEL_GUIDE.md" ]; then
+        cp "$SCRIPT_DIR/.claude/PARALLEL_GUIDE.md" "$PROJECT_PATH/.claude/"
+        echo "  ✓ .claude/PARALLEL_GUIDE.md"
+    fi
+
+    # Copy skill files (commands/*.md)
+    if [ -d "$SCRIPT_DIR/.claude/commands" ]; then
+        for file in "$SCRIPT_DIR/.claude/commands"/*.md; do
+            if [ -f "$file" ]; then
+                filename=$(basename "$file")
+                if [ ! -f "$PROJECT_PATH/.claude/commands/$filename" ]; then
+                    cp "$file" "$PROJECT_PATH/.claude/commands/"
+                    echo "  ✓ .claude/commands/$filename"
+                fi
+            fi
+        done
+    fi
+fi
+
 # Show configured paths
 echo ""
 echo "Index configuration:"
@@ -291,6 +321,10 @@ echo "=== Initialization Complete ==="
 echo ""
 echo "Project structure:"
 echo "  $PROJECT_PATH/"
+echo "  ├── .claude/"
+echo "  │   ├── CLAUDE.md            (project rules for LLM)"
+echo "  │   ├── PARALLEL_GUIDE.md    (efficiency guide for LLM)"
+echo "  │   └── commands/            (skill files: /code, /exp, etc.)"
 echo "  └── .code-intel/"
 echo "      ├── config.json          (indexing configuration)"
 echo "      ├── context.yml          (context & doc research settings)"
@@ -324,12 +358,7 @@ cat << EOF
 }
 EOF
 echo ""
-echo "3. (Optional) Copy skills to your project:"
-echo ""
-echo "   mkdir -p $PROJECT_PATH/.claude/commands"
-echo "   cp $SCRIPT_DIR/.claude/commands/*.md $PROJECT_PATH/.claude/commands/"
-echo ""
-echo "4. Restart Claude Code to load the MCP server."
+echo "3. Restart Claude Code to load the MCP server."
 echo ""
 echo "=== Features ==="
 echo ""
@@ -340,6 +369,7 @@ echo "• Phase-gated implementation workflow"
 echo "• Document research with sub-agent (v1.3)"
 echo "• Git branch isolation for garbage detection (v1.2)"
 echo "• Post-implementation verification"
+echo "• Parallel execution for search_text, Read, Grep (v1.7 - saves 27-35s)"
 echo ""
 echo "Use '/code' skill for guided implementation workflow."
 echo "Use 'sync_index' tool to manually trigger re-indexing."
