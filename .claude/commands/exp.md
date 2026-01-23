@@ -1,28 +1,29 @@
-# /exp - Fast Code Exploration Command
+# /exp - Fast Parallel Execution Tool
 
-**Purpose**: Lightweight exploration and implementation leveraging parallel execution
+**Purpose**: Lightweight implementation tool optimized for parallel execution
 
 ## Features
 
-- **Parallel execution**: Automatically executes search_text, Read, Grep, Edit, Write in parallel
-- **Lightweight**: Fast exploration + direct implementation without Phase Gates
-- **Fast**: 20-30 seconds faster than /code due to parallel execution and no overhead
-- **Flexible**: Use for quick fixes, exploration, or lightweight implementation tasks
+- **Parallel execution**: Core design - all tools (search_text, Read, Grep, Edit, Write, find_*, Glob) execute in parallel
+- **No Phase Gates**: Direct execution without mandatory workflow constraints
+- **Fast**: 20-30 seconds faster than /code due to parallel execution and zero overhead
+- **Flexible**: Use for quick fixes, investigation, simple implementations, or any task benefiting from speed
 
 ## Usage
 
-Simply specify what you want to explore in natural language:
+Simply specify what you want to accomplish in natural language:
 
 ```
 /exp Find all authentication related code
+/exp Fix the button color in header to blue
 /exp Understand how the modal system works
-/exp List all API endpoints
+/exp Add close button to modal component
 ```
 
 ## Execution Process
 
 ### 1. Task Understanding
-Analyze the user's exploration objective
+Analyze the user's task objective
 
 ### 2. Parallel Search Execution
 
@@ -67,10 +68,10 @@ Search multiple patterns in parallel with **a single message**:
 
 ### 3. Organizing and Reporting Results
 
-Organize exploration results and report in the following format:
+Organize results and report in the following format:
 
 ```markdown
-## Exploration Results
+## Results
 
 ### Discovered Files
 - file1.py: Role description
@@ -80,11 +81,11 @@ Organize exploration results and report in the following format:
 - Pattern 1: Description
 - Pattern 2: Description
 
-### Architecture
-Brief description
+### Implementation (if applicable)
+Changes made
 
 ### Next Steps (Optional)
-Recommended investigation directions
+Recommended actions
 ```
 
 ## Parallel Execution Principles
@@ -146,7 +147,7 @@ Execution:
 4. Edit the file to change button color
 5. Report completion
 
-### Example 5: Exploration + Implementation
+### Example 5: Investigation + Implementation
 ```
 /exp Find modal component and add close button
 ```
@@ -161,23 +162,23 @@ Execution:
 
 ## Important Notes
 
-- ✅ Edit/Write/Bash are allowed (lightweight implementation supported)
-- ✅ Can implement changes directly after exploration
-- ⚡ Sequential execution prohibited (always use parallel)
-- ⚠️ No git operations (commits, branches) - use `/code` for full workflow
+- ✅ Edit/Write/Bash are allowed (full implementation capability)
+- ⚡ Sequential execution prohibited (parallel execution is mandatory)
+- ⚠️ No git operations (commits, branches) - use `/code` for full workflow with version control
+- ✅ Zero overhead - no Phase Gates, no mandatory verification
 
 ## Differences from `/code`
 
 | Item | /exp | /code |
 |------|------|-------|
-| Purpose | Fast Exploration + Implementation | Full Implementation Workflow |
-| Implementation | ✅ (lightweight) | ✅ (with verification) |
+| Purpose | Fast Parallel Execution | Full Workflow with Safety Checks |
+| Implementation | ✅ (direct) | ✅ (with verification) |
 | Phase Gates | None | Yes (mandatory) |
 | Duration | 30-120 sec | 402 sec |
-| Parallel Execution | Mandatory | Automatic |
+| Parallel Execution | Mandatory (core design) | Automatic |
 | Git Operations | None | Yes (branch, commit, merge) |
-| Verification | Optional | Automatic |
-| Best For | Quick fixes, exploration | Complex changes, safety-critical |
+| Verification | None | Automatic |
+| Best For | Quick tasks, speed priority | Complex changes, safety priority |
 
 ## Important Notes
 
