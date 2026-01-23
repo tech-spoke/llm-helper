@@ -1,211 +1,211 @@
-# Claude Code 効率化ガイド
+# Claude Code Efficiency Guide
 
-## 🔴 重要: `/exp` コマンドを常に使用
+## 🔴 CRITICAL: Always Use `/exp` Command
 
-**ファイルを探す・読む・調査するときは、常に `/exp` コマンドを使用してください。**
+**Always use the `/exp` command when searching for, reading, or exploring files.**
 
-- ユーザーが「〇〇を調査して」「〇〇を確認して」と言ったとき
-- 実装前に関連ファイルを確認したいとき
-- どのファイルを編集すべきか判断したいとき
+- When the user says "investigate XX" or "check XX"
+- When you need to check related files before implementation
+- When you need to determine which files to edit
 
-**例**:
-- ユーザー: 「sampleフォルダのファイルを編集して」
-- あなた: まず `/exp` でsampleフォルダを調査 → 編集対象を決定 → Editで実装
+**Example**:
+- User: "Edit files in the sample folder"
+- You: First `/exp` to investigate the sample folder → Determine edit targets → Implement with Edit
 
-## ⚡ 並列実行による時間短縮（v1.7）
+## ⚡ Time Savings Through Parallel Execution (v1.7)
 
-Claude Codeは複数のツール呼び出しを1メッセージ内で並列実行できます。これにより大幅な時間短縮が可能です。
+Claude Code can execute multiple tool calls in parallel within a single message, enabling significant time savings.
 
-### 基本原則
+### Basic Principle
 
-**同じツールを複数回呼び出す場合は、必ず1メッセージ内でまとめて呼び出す**
+**When calling the same tool multiple times, always call them together in a single message**
 
-### 効果的なパターン
+### Effective Patterns
 
-#### 1. 複数ファイルの読み込み
+#### 1. Reading Multiple Files
 
-❌ **遅い方法** (順次実行):
+❌ **Slow method** (sequential execution):
 ```xml
 <Read file_path="file1.py" />
-<!-- 待機 -->
+<!-- wait -->
 <Read file_path="file2.py" />
-<!-- 待機 -->
+<!-- wait -->
 <Read file_path="file3.py" />
 ```
 
-✅ **速い方法** (並列実行):
+✅ **Fast method** (parallel execution):
 ```xml
 <Read file_path="file1.py" />
 <Read file_path="file2.py" />
 <Read file_path="file3.py" />
 ```
 
-**削減時間**: 4-6秒
+**Time saved**: 4-6 seconds
 
-#### 2. 複数パターンの検索（Grep）
+#### 2. Multiple Pattern Search (Grep)
 
-❌ **遅い方法**:
+❌ **Slow method**:
 ```xml
 <Grep pattern="class.*Service" />
-<!-- 待機 -->
+<!-- wait -->
 <Grep pattern="function.*calculate" />
-<!-- 待機 -->
+<!-- wait -->
 <Grep pattern="interface.*Repository" />
 ```
 
-✅ **速い方法**:
+✅ **Fast method**:
 ```xml
 <Grep pattern="class.*Service" />
 <Grep pattern="function.*calculate" />
 <Grep pattern="interface.*Repository" />
 ```
 
-**削減時間**: 2-4秒
+**Time saved**: 2-4 seconds
 
-#### 3. 複数パターンのテキスト検索（search_text、v1.7新機能）
+#### 3. Multiple Pattern Text Search (search_text, v1.7 feature)
 
-❌ **遅い方法**:
+❌ **Slow method**:
 ```
-mcp__code-intel__search_text で "modal" を検索
-<!-- 待機 -->
-mcp__code-intel__search_text で "dialog" を検索
-<!-- 待機 -->
-mcp__code-intel__search_text で "popup" を検索
-```
-
-✅ **速い方法**:
-```
-mcp__code-intel__search_text で ["modal", "dialog", "popup"] を検索
+search "modal" with mcp__code-intel__search_text
+<!-- wait -->
+search "dialog" with mcp__code-intel__search_text
+<!-- wait -->
+search "popup" with mcp__code-intel__search_text
 ```
 
-**削減時間**: 15-20秒
+✅ **Fast method**:
+```
+search ["modal", "dialog", "popup"] with mcp__code-intel__search_text
+```
 
-#### 4. ドキュメント整備
+**Time saved**: 15-20 seconds
 
-❌ **遅い方法**:
+#### 4. Documentation Updates
+
+❌ **Slow method**:
 ```xml
 <Read file_path="README.md" />
-<!-- 内容確認 -->
+<!-- check content -->
 <Edit file_path="README.md" ... />
-<!-- 待機 -->
+<!-- wait -->
 <Read file_path="CHANGELOG.md" />
-<!-- 内容確認 -->
+<!-- check content -->
 <Edit file_path="CHANGELOG.md" ... />
 ```
 
-✅ **速い方法**:
+✅ **Fast method**:
 ```xml
-<!-- 最初に必要なファイルを全て読む -->
+<!-- Read all necessary files first -->
 <Read file_path="README.md" />
 <Read file_path="CHANGELOG.md" />
 <Read file_path="docs/guide.md" />
-<!-- 内容確認後、編集も並列実行 -->
+<!-- After checking content, edit in parallel -->
 <Edit file_path="README.md" ... />
 <Edit file_path="CHANGELOG.md" ... />
 <Edit file_path="docs/guide.md" ... />
 ```
 
-**削減時間**: 5-10秒
+**Time saved**: 5-10 seconds
 
-### 適用可能なツール
+### Applicable Tools
 
-以下のツールは並列実行が効果的です:
+The following tools benefit from parallel execution:
 
-| ツール | 並列実行 | 効果 |
-|--------|---------|------|
-| Read | ✅ | 4-6秒/ファイル |
-| Grep | ✅ | 2-3秒/パターン |
-| Glob | ✅ | 1-2秒/パターン |
-| search_text (v1.7) | ✅ | 複数パターンを配列で渡す |
-| Edit | ✅ | 2-3秒/ファイル |
-| Write | ✅ | 2-3秒/ファイル |
-| Bash | ❌ | 依存関係があるため順次実行 |
+| Tool | Parallel Execution | Effect |
+|------|-------------------|---------|
+| Read | ✅ | 4-6 sec/file |
+| Grep | ✅ | 2-3 sec/pattern |
+| Glob | ✅ | 1-2 sec/pattern |
+| search_text (v1.7) | ✅ | Pass multiple patterns as array |
+| Edit | ✅ | 2-3 sec/file |
+| Write | ✅ | 2-3 sec/file |
+| Bash | ❌ | Sequential due to dependencies |
 
-### 使用例
+### Usage Examples
 
-#### コードレビュー作業
+#### Code Review
 ```xml
-<!-- 関連ファイルを全て並列読み込み -->
+<!-- Read all related files in parallel -->
 <Read file_path="src/auth/service.py" />
 <Read file_path="src/auth/controller.py" />
 <Read file_path="tests/test_auth.py" />
 <Read file_path="docs/auth_design.md" />
 
-<!-- 分析後、複数ファイルを並列更新 -->
+<!-- After analysis, update multiple files in parallel -->
 <Edit file_path="src/auth/service.py" ... />
 <Edit file_path="tests/test_auth.py" ... />
 ```
 
-#### ドキュメント一括更新
+#### Bulk Documentation Updates
 ```xml
-<!-- ドキュメントを並列読み込み -->
+<!-- Read documents in parallel -->
 <Read file_path="README.md" />
 <Read file_path="README_ja.md" />
 <Read file_path="docs/api.md" />
 
-<!-- 内容確認後、並列更新 -->
+<!-- After checking content, update in parallel -->
 <Edit file_path="README.md" ... />
 <Edit file_path="README_ja.md" ... />
 <Edit file_path="docs/api.md" ... />
 ```
 
-### 総削減時間の例
+### Total Time Savings Example
 
-典型的な `/code` タスク (402秒):
-- EXPLORATION: search_text並列化で **20秒削減**
-- READY: Read/Grep並列化で **5-10秒削減**
-- その他フェーズ: **2-5秒削減**
+Typical `/code` task (402 seconds):
+- EXPLORATION: **20 seconds saved** with search_text parallelization
+- READY: **5-10 seconds saved** with Read/Grep parallelization
+- Other phases: **2-5 seconds saved**
 
-**合計削減**: 27-35秒 (約7-9%)
+**Total savings**: 27-35 seconds (approx 7-9%)
 
-### 注意事項
+### Important Notes
 
-1. **依存関係がある場合は順次実行**
-   - 例: ファイル作成後にそのファイルを読む場合
-   - Bashコマンドは `&&` で連結して順次実行
+1. **Use sequential execution when there are dependencies**
+   - Example: Reading a file after creating it
+   - Chain Bash commands with `&&` for sequential execution
 
-2. **search_textの制限**
-   - 最大5パターンまで
-   - それ以上は複数回に分割
+2. **search_text limitations**
+   - Maximum 5 patterns
+   - Split into multiple calls if more are needed
 
-3. **トランケート対策**
-   - 大量のデータを並列取得する場合、30,000文字制限に注意
-   - search_textはパターン数を5個に制限することで対処
+3. **Truncation prevention**
+   - Be mindful of 30,000 character limit when fetching large amounts of data in parallel
+   - search_text limits patterns to 5 to mitigate this
 
-## `/exp` コマンド - 並列実行を活用した高速調査
+## `/exp` Command - Fast Investigation with Parallel Execution
 
-### `/exp` とは
+### What is `/exp`
 
-並列実行を自動的に活用する軽量な調査・探索コマンド。
-実装前の調査、実装中の確認、どちらでも使用可能。
+A lightweight investigation and exploration command that automatically leverages parallel execution.
+Can be used for both pre-implementation investigation and during implementation.
 
-### いつ使うか
+### When to Use
 
-- コードの構造を理解したいとき
-- 特定のパターンを探したいとき
-- 実装前に関連コードを調査したいとき
-- 実装中に確認したいことがあるとき
+- When you want to understand code structure
+- When looking for specific patterns
+- When investigating related code before implementation
+- When you need to verify something during implementation
 
-### 使い方
+### How to Use
 
 ```
 /exp Find all authentication related code
 /exp Understand how the modal system works
 /exp List all API endpoints in the project
-/exp テストとしてsampleフォルダを調査
+/exp Investigate files in the sample folder for testing
 ```
 
-### 特徴
+### Features
 
-- **自動並列実行**: search_text、Read、Grep を自動的に並列実行
-- **高速**: 通常の調査より 20-30秒高速
-- **軽量**: 実装はせず、調査と理解に特化
+- **Automatic parallel execution**: Automatically executes search_text, Read, and Grep in parallel
+- **Fast**: 20-30 seconds faster than standard investigation
+- **Lightweight**: Focused on investigation and understanding, no implementation
 
-### 詳細
+### Details
 
-実装の詳細は [commands/exp.md](commands/exp.md) を参照。
+See [commands/exp.md](commands/exp.md) for implementation details.
 
-## 参考資料
+## References
 
-- [/exp コマンド詳細 (commands/exp.md)](commands/exp.md)
-- [プロジェクトルール (CLAUDE.md)](CLAUDE.md)
+- [/exp Command Details (commands/exp.md)](commands/exp.md)
+- [Project Rules (CLAUDE.md)](CLAUDE.md)
