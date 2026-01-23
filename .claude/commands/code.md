@@ -1085,6 +1085,17 @@ When searching for multiple patterns, call ALL Grep tools in ONE message:
 ```
 → Parallel execution (saves 2-4 seconds)
 
+**Same applies to Edit (different files)**:
+When editing multiple independent files, call ALL Edit tools in ONE message:
+```
+<Edit file_path="auth/service.py" old_string="..." new_string="..." />
+<Edit file_path="auth/repository.py" old_string="..." new_string="..." />
+<Edit file_path="tests/test_auth.py" old_string="..." new_string="..." />
+```
+→ Parallel execution (saves 2-4 seconds)
+
+⚠️ **CAUTION**: When editing the same file multiple times, use sequential edits to avoid conflicts.
+
 **Principle**: Whenever you need to call the SAME tool multiple times, call them ALL in a SINGLE message for automatic parallel execution.
 
 ### After Implementation Complete
