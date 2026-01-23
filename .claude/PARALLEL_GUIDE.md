@@ -1,5 +1,17 @@
 # Claude Code 効率化ガイド
 
+## 🔴 重要: `/exp` コマンドを常に使用
+
+**ファイルを探す・読む・調査するときは、常に `/exp` コマンドを使用してください。**
+
+- ユーザーが「〇〇を調査して」「〇〇を確認して」と言ったとき
+- 実装前に関連ファイルを確認したいとき
+- どのファイルを編集すべきか判断したいとき
+
+**例**:
+- ユーザー: 「sampleフォルダのファイルを編集して」
+- あなた: まず `/exp` でsampleフォルダを調査 → 編集対象を決定 → Editで実装
+
 ## ⚡ 並列実行による時間短縮（v1.7）
 
 Claude Codeは複数のツール呼び出しを1メッセージ内で並列実行できます。これにより大幅な時間短縮が可能です。
@@ -160,8 +172,40 @@ mcp__code-intel__search_text で ["modal", "dialog", "popup"] を検索
    - 大量のデータを並列取得する場合、30,000文字制限に注意
    - search_textはパターン数を5個に制限することで対処
 
+## `/exp` コマンド - 並列実行を活用した高速調査
+
+### `/exp` とは
+
+並列実行を自動的に活用する軽量な調査・探索コマンド。
+実装前の調査、実装中の確認、どちらでも使用可能。
+
+### いつ使うか
+
+- コードの構造を理解したいとき
+- 特定のパターンを探したいとき
+- 実装前に関連コードを調査したいとき
+- 実装中に確認したいことがあるとき
+
+### 使い方
+
+```
+/exp Find all authentication related code
+/exp Understand how the modal system works
+/exp List all API endpoints in the project
+/exp テストとしてsampleフォルダを調査
+```
+
+### 特徴
+
+- **自動並列実行**: search_text、Read、Grep を自動的に並列実行
+- **高速**: 通常の調査より 20-30秒高速
+- **軽量**: 実装はせず、調査と理解に特化
+
+### 詳細
+
+実装の詳細は [commands/exp.md](commands/exp.md) を参照。
+
 ## 参考資料
 
-- [v1.7 更新内容](../docs/updates/v1.7_ja.md)
-- [/code コマンド](commands/code.md) - Step 4, Step 9の並列実行セクション
-- [/test-parallel コマンド](commands/test-parallel.md) - 並列実行検証ツール
+- [/exp コマンド詳細 (commands/exp.md)](commands/exp.md)
+- [プロジェクトルール (CLAUDE.md)](CLAUDE.md)
