@@ -1,12 +1,13 @@
 # /exp - Fast Code Exploration Command
 
-**Purpose**: Lightweight exploration and investigation leveraging parallel search
+**Purpose**: Lightweight exploration and implementation leveraging parallel execution
 
 ## Features
 
-- **Parallel execution**: Automatically executes search_text, Read, and Grep in parallel
-- **Lightweight**: Focused on exploration and understanding, no implementation
-- **Fast**: 20-30 seconds faster than standard exploration due to parallel execution
+- **Parallel execution**: Automatically executes search_text, Read, Grep, Edit, Write in parallel
+- **Lightweight**: Fast exploration + direct implementation without Phase Gates
+- **Fast**: 20-30 seconds faster than /code due to parallel execution and no overhead
+- **Flexible**: Use for quick fixes, exploration, or lightweight implementation tasks
 
 ## Usage
 
@@ -98,10 +99,8 @@ Recommended investigation directions
 | find_references | Multiple calls in one message | 2-3 sec |
 | Grep | Multiple calls in one message | 2-4 sec |
 | Glob | Multiple calls in one message | 1-2 sec |
-| Edit* | Multiple calls in one message (different files) | 2-4 sec |
-| Write* | Multiple calls in one message | 2-4 sec |
-
-*Edit and Write are not available in `/exp` (exploration only), but follow the same parallel execution principle in `/code`
+| Edit | Multiple calls in one message (different files) | 2-4 sec |
+| Write | Multiple calls in one message | 2-4 sec |
 
 ## Usage Examples
 
@@ -135,23 +134,50 @@ Execution:
 2. Read related files in parallel
 3. Explain how the system works
 
-## Prohibited Actions
+### Example 4: Quick Fix Implementation
+```
+/exp Fix the button color in header to blue
+```
 
-- ❌ Edit/Write/Bash not allowed (exploration only)
-- ❌ No implementation work
-- ❌ Sequential execution (always use parallel)
-- ❌ No git operations
+Execution:
+1. Glob("**/*header*"), search_text(["button", "color"])
+2. Read discovered files in parallel
+3. Identify the target file (e.g., styles.css)
+4. Edit the file to change button color
+5. Report completion
+
+### Example 5: Exploration + Implementation
+```
+/exp Find modal component and add close button
+```
+
+Execution:
+1. search_text(["modal", "component"])
+2. Read modal files in parallel
+3. Analyze structure
+4. Edit modal.tsx to add close button
+5. Write test file for close functionality
+6. Report completion
+
+## Important Notes
+
+- ✅ Edit/Write/Bash are allowed (lightweight implementation supported)
+- ✅ Can implement changes directly after exploration
+- ⚡ Sequential execution prohibited (always use parallel)
+- ⚠️ No git operations (commits, branches) - use `/code` for full workflow
 
 ## Differences from `/code`
 
 | Item | /exp | /code |
 |------|------|-------|
-| Purpose | Exploration/Understanding | Implementation |
-| Implementation | ❌ | ✅ |
-| Phase Gates | None | Yes |
-| Duration | 30-90 sec | 402 sec |
+| Purpose | Fast Exploration + Implementation | Full Implementation Workflow |
+| Implementation | ✅ (lightweight) | ✅ (with verification) |
+| Phase Gates | None | Yes (mandatory) |
+| Duration | 30-120 sec | 402 sec |
 | Parallel Execution | Mandatory | Automatic |
-| Git Operations | None | Yes |
+| Git Operations | None | Yes (branch, commit, merge) |
+| Verification | Optional | Automatic |
+| Best For | Quick fixes, exploration | Complex changes, safety-critical |
 
 ## Important Notes
 
