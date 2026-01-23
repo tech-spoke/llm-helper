@@ -18,7 +18,6 @@ You are a code implementation agent. You understand user instructions, investiga
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │  Step -1: Flag Check                                                        │
-│  Step 0: Failure Check (Auto-failure Detection)                             │
 │  Step 1: Intent Classification                                              │
 │  Step 2: Session Start (+ Essential Context)                                │
 │  Step 2.5: DOCUMENT_RESEARCH [v1.3]  ← skip with --no-doc-research          │
@@ -55,7 +54,6 @@ You are a code implementation agent. You understand user instructions, investiga
 | Step | Phase | Description |
 |------|-------|-------------|
 | -1 | Flag Check | Parse command options (--quick, --no-verify, etc.) |
-| 0 | Failure Check | Auto-detect if previous fix failed |
 | 1 | Intent | Classify as IMPLEMENT/MODIFY/INVESTIGATE/QUESTION |
 | 2 | Session Start | Initialize session, load context (no branch yet) |
 | 2.5 | DOCUMENT_RESEARCH | v1.3: Agentic RAG for mandatory rules |
@@ -101,17 +99,17 @@ You are a code implementation agent. You understand user instructions, investiga
 1. **If `--clean` or `-c` detected:**
    - Execute the cleanup action
    - Report result to user
-   - **Do NOT proceed to Step 0**
+   - **Do NOT proceed to Step 1**
 
 2. **If `--rebuild` or `-r` detected:**
    - Execute full re-index of all components
    - Report result to user
-   - **Do NOT proceed to Step 0**
+   - **Do NOT proceed to Step 1**
 
 3. **If `--only-verify` or `-v` detected:**
    - Skip to Step 9.5 (POST_IMPLEMENTATION_VERIFICATION)
    - Run verification on existing code
-   - **Do NOT proceed to Step 0**
+   - **Do NOT proceed to Step 1**
 
 4. **If `--no-verify` detected:**
    - Note that verification is disabled (skip Step 9.5)
@@ -140,25 +138,27 @@ You are a code implementation agent. You understand user instructions, investiga
 8. **If `--doc-research=PROMPTS` detected:**
    - Parse comma-separated prompt names (e.g., `--doc-research=default,security`)
    - Store for use in Step 2.5
-   - Continue to Step 0
+   - Continue to Step 1
 
 9. **If `--no-doc-research` detected:**
    - Skip DOCUMENT_RESEARCH phase (Step 2.5)
-   - Continue to Step 0
+   - Continue to Step 1
 
 10. **If `--no-quality` detected:**
    - Skip QUALITY_REVIEW phase (Step 10.5)
    - After PRE_COMMIT, proceed directly to merge_to_base
-   - Continue to Step 0
+   - Continue to Step 1
 
 11. **If `--no-intervention` or `-ni` detected:**
     - Skip intervention system (v1.4)
     - Verification failures will not trigger intervention prompts
-    - Continue to Step 0
+    - Continue to Step 1
 
-**If NO flag detected:** Proceed to Step 0 with defaults (gate=high, verify=true, quality=true, intervention=true, doc-research=context.yml default).
+**If NO flag detected:** Proceed to Step 1 with defaults (gate=high, verify=true, quality=true, intervention=true, doc-research=context.yml default).
 
 ---
+
+<!-- DISABLED: Step 0 disabled for performance (improvement cycle feature)
 
 ## Step 0: Failure Check
 
@@ -206,6 +206,8 @@ mcp__code-intel__record_outcome
 
 **If no previous session exists, or doesn't indicate failure:**
 → Proceed to Step 1
+
+-->
 
 ---
 
@@ -645,6 +647,42 @@ Response:
 | search_text | Text search |
 | analyze_structure | Structure analysis |
 
+### ⚡ CRITICAL: Parallel Execution (v1.7)
+
+**MANDATORY: Use parallel execution to save 15-25 seconds**
+
+#### search_text: Multiple Patterns
+
+When searching for multiple patterns, call `search_text` **ONCE** with all patterns:
+
+✅ **CORRECT (saves 15-20 seconds)**:
+```python
+search_text(patterns=["modal", "dialog", "popup"])
+```
+→ All patterns execute in parallel (0.06 seconds total)
+
+❌ **WRONG (wastes time)**:
+```python
+search_text("modal")     # Wait 10s
+search_text("dialog")    # Wait 10s
+search_text("popup")     # Total: 20s wasted
+```
+
+**Pattern Selection Process**:
+1. Analyze `query` or semantic_search results
+2. Determine 2-4 search patterns based on the results
+3. Call search_text ONCE with ALL patterns as a list
+
+**Example**:
+```python
+# After analyzing query results, you identified these patterns:
+search_text(patterns=["useAuthContext", "AuthProvider", "withAuth"])
+```
+
+**Limits**:
+- Maximum 5 patterns per call
+- For more patterns, split into multiple calls
+
 ### Markup Context Relaxation (v1.1)
 
 **When targeting only pure markup files, requirements are relaxed:**
@@ -950,6 +988,41 @@ mcp__code-intel__add_explored_files
 mcp__code-intel__revert_to_exploration
   keep_results: true
 ```
+
+### ⚡ CRITICAL: Parallel File Operations (v1.7)
+
+**MANDATORY: Read multiple files in parallel to save 5-10 seconds**
+
+When you need to read multiple files to understand the codebase:
+
+✅ **CORRECT (parallel execution)**:
+Call multiple Read tools in a **SINGLE message**:
+```
+<Read file_path="CartService.php" />
+<Read file_path="ProductService.php" />
+<Read file_path="OrderService.php" />
+```
+→ All files are read in parallel (saves 4-6 seconds)
+
+❌ **WRONG (sequential execution)**:
+```
+<Read file_path="CartService.php" />
+[Wait for result]
+<Read file_path="ProductService.php" />
+[Wait for result]
+<Read file_path="OrderService.php" />
+```
+
+**Same applies to Grep**:
+When searching for multiple patterns, call ALL Grep tools in ONE message:
+```
+<Grep pattern="class.*Service" />
+<Grep pattern="function.*calculate" />
+<Grep pattern="interface.*Repository" />
+```
+→ Parallel execution (saves 2-4 seconds)
+
+**Principle**: Whenever you need to call the SAME tool multiple times, call them ALL in a SINGLE message for automatic parallel execution.
 
 ### After Implementation Complete
 

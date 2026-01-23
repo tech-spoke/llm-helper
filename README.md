@@ -1,6 +1,6 @@
 # Code Intelligence MCP Server
 
-> **Current Version: v1.6**
+> **Current Version: v1.7**
 
 An MCP server that provides Cursor IDE-like code intelligence capabilities using open source tools.
 
@@ -42,6 +42,7 @@ And have a mechanism to learn from failures.
 | Intervention System (v1.4) | Retry-based intervention for stuck verification loops |
 | Quality Review (v1.5) | Post-implementation quality check with retry loop |
 | Branch Lifecycle (v1.6) | Stale branch warnings, auto-deletion on failure, begin_phase_gate separation |
+| Parallel Execution (v1.7) | search_text multi-pattern support, Read/Grep parallel execution saves 27-35s |
 
 ---
 
@@ -175,7 +176,7 @@ MCP server enforces phase transitions. LLM cannot skip arbitrarily.
 | `query` | Intelligent query in natural language |
 | `find_definitions` | Symbol definition search (ctags) |
 | `find_references` | Symbol reference search (ripgrep) |
-| `search_text` | Text search (ripgrep) |
+| `search_text` | Text search (ripgrep), multi-pattern parallel search (v1.7) |
 | `search_files` | File pattern search (glob) |
 | `analyze_structure` | Code structure analysis (tree-sitter) |
 | `get_symbols` | Get symbol list |
@@ -524,8 +525,11 @@ The skill automatically:
 ### Direct tool invocation
 
 ```
-# Text search
+# Text search (single pattern)
 Search for pattern "Router" with mcp__code-intel__search_text
+
+# Text search (multi-pattern parallel, v1.7)
+Search for patterns ["Router", "SessionState", "QueryFrame"] in parallel with mcp__code-intel__search_text
 
 # Definition search
 Find definition of "SessionState" with mcp__code-intel__find_definitions

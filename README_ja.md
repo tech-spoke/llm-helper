@@ -1,6 +1,6 @@
 # Code Intelligence MCP Server
 
-> **Current Version: v1.6**
+> **Current Version: v1.7**
 
 Cursor IDE のようなコードインテリジェンス機能をオープンソースツールで実現する MCP サーバー。
 
@@ -42,6 +42,7 @@ LLM に判断をさせない。守らせるのではなく、守らないと進�
 | 介入システム（v1.4） | 検証ループにハマった時のリトライベース介入 |
 | 品質レビュー（v1.5） | 実装後の品質チェック、リトライループ |
 | ブランチライフサイクル（v1.6） | stale ブランチ警告、失敗時自動削除、begin_phase_gate 分離 |
+| 並列実行最適化（v1.7） | search_text 複数パターン対応、Read/Grep 並列実行で27-35秒削減 |
 
 ---
 
@@ -176,7 +177,7 @@ MCP サーバーがフェーズ遷移を強制。LLM が勝手にスキップで
 | `query` | 自然言語でのインテリジェントクエリ |
 | `find_definitions` | シンボル定義検索 (ctags) |
 | `find_references` | シンボル参照検索 (ripgrep) |
-| `search_text` | テキスト検索 (ripgrep) |
+| `search_text` | テキスト検索 (ripgrep)、複数パターン並列検索対応（v1.7） |
 | `search_files` | ファイルパターン検索 (glob) |
 | `analyze_structure` | コード構造解析 (tree-sitter) |
 | `get_symbols` | シンボル一覧取得 |
@@ -502,8 +503,11 @@ MCP サーバーを再読み込みするために再起動。
 ### 直接ツールを呼び出す
 
 ```
-# テキスト検索
+# テキスト検索（単一パターン）
 mcp__code-intel__search_text でパターン "Router" を検索して
+
+# テキスト検索（複数パターン並列、v1.7）
+mcp__code-intel__search_text でパターン ["Router", "SessionState", "QueryFrame"] を並列検索して
 
 # 定義検索
 mcp__code-intel__find_definitions で "SessionState" の定義を探して

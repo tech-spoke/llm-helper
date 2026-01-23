@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 
 
-async def search_text(
+async def _search_single(
     pattern: str,
     path: str = ".",
     file_type: str | None = None,
@@ -15,7 +15,7 @@ async def search_text(
     regex: bool = True,
 ) -> dict:
     """
-    Search for text patterns using ripgrep.
+    Search for a single text pattern using ripgrep.
 
     Args:
         pattern: Search pattern (regex by default)
@@ -106,6 +106,65 @@ async def search_text(
         }
     except Exception as e:
         return {"error": f"Search failed: {str(e)}"}
+
+
+async def search_text(
+    pattern: str | list[str],
+    path: str = ".",
+    file_type: str | None = None,
+    case_sensitive: bool = True,
+    context_lines: int = 0,
+    max_results: int = 100,
+    regex: bool = True,
+) -> dict:
+    """
+    Search for text patterns using ripgrep.
+
+    Args:
+        pattern: Single pattern (str) or multiple patterns (list[str])
+                Maximum 5 patterns for parallel search.
+        path: Path to search in
+        file_type: File type filter (e.g., "py", "js", "ts")
+        case_sensitive: Whether search is case sensitive
+        context_lines: Number of context lines before/after match
+        max_results: Maximum number of results to return
+        regex: Whether pattern is a regex (False for literal)
+
+    Returns:
+        Dictionary with search results
+    """
+    # Single pattern
+    if isinstance(pattern, str):
+        return await _search_single(
+            pattern, path, file_type, case_sensitive,
+            context_lines, max_results, regex
+        )
+
+    # Multiple patterns: check limit
+    if len(pattern) > 5:
+        return {
+            "error": "Too many patterns for parallel search. "
+                     f"Maximum 5 patterns allowed, got {len(pattern)}. "
+                     "Please split into multiple search_text calls or reduce patterns.",
+            "provided_patterns": pattern
+        }
+
+    # Multiple patterns: parallel execution
+    tasks = [
+        _search_single(p, path, file_type, case_sensitive,
+                      context_lines, max_results, regex)
+        for p in pattern
+    ]
+    results = await asyncio.gather(*tasks)
+
+    return {
+        "patterns": pattern,
+        "path": str(Path(path).resolve()),
+        "results": {
+            p: r for p, r in zip(pattern, results)
+        },
+        "total_patterns": len(pattern),
+    }
 
 
 async def search_files(

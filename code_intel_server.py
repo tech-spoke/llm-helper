@@ -275,19 +275,19 @@ async def execute_query(
     output["step_outputs"] = step_outputs
 
     # v3.7: Include decision log for observability
-    # v3.10: Persist decision log for improvement cycle
-    if plan.decision_log:
-        decision_dict = plan.decision_log.to_dict()
-
-        # Add session_id if there's an active session
-        active_session = session_manager.get_active_session()
-        if active_session:
-            decision_dict["session_id"] = active_session.session_id
-
-        # Persist decision log
-        record_decision(decision_dict)
-
-        output["decision_log"] = decision_dict
+    # DISABLED: Decision log disabled for performance (v3.10 feature)
+    # if plan.decision_log:
+    #     decision_dict = plan.decision_log.to_dict()
+    #
+    #     # Add session_id if there's an active session
+    #     active_session = session_manager.get_active_session()
+    #     if active_session:
+    #         decision_dict["session_id"] = active_session.session_id
+    #
+    #     # Persist decision log
+    #     record_decision(decision_dict)
+    #
+    #     output["decision_log"] = decision_dict
 
     return output
 
@@ -357,13 +357,21 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="search_text",
             description="Search for text patterns in files using ripgrep. "
-                        "Supports regex patterns and file type filtering.",
+                        "Supports regex patterns and file type filtering. "
+                        "Can search multiple patterns in parallel (max 5).",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "pattern": {
-                        "type": "string",
-                        "description": "Search pattern (regex by default)",
+                        "oneOf": [
+                            {"type": "string"},
+                            {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "maxItems": 5
+                            }
+                        ],
+                        "description": "Single pattern (string) or multiple patterns (array of strings, max 5 for parallel search)",
                     },
                     "path": {
                         "type": "string",
@@ -1365,6 +1373,11 @@ def check_phase_access(tool_name: str) -> dict | None:
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     """Execute a code intelligence tool."""
 
+    # v1.8: Record tool call start for performance tracking
+    session = session_manager.get_active_session()
+    if session is not None and name not in ["start_session", "get_session_status"]:
+        session.record_tool_call_start(name, arguments)
+
     result = None
 
     # Session management tools (no phase check needed)
@@ -1574,7 +1587,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         # Handle skip_branch (--quick mode)
         if skip_branch:
             # Transition directly to READY without creating branch
-            session.phase = Phase.READY
+            session.transition_to_phase(Phase.READY, reason="skip_branch")
             session.task_branch_enabled = False
 
             result = {
@@ -1595,9 +1608,9 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 # Already on a task branch - continue there
                 # Check gate_level to determine starting phase
                 if session.gate_level == "none":
-                    session.phase = Phase.READY
+                    session.transition_to_phase(Phase.READY, reason="resume_current_gate_none")
                 else:
-                    session.phase = Phase.EXPLORATION
+                    session.transition_to_phase(Phase.EXPLORATION, reason="resume_current")
                 session.task_branch_enabled = True
                 session.task_branch_name = current_info["current_branch"]
 
@@ -1628,9 +1641,9 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             if setup_result.success:
                 # Check gate_level to determine starting phase
                 if session.gate_level == "none":
-                    session.phase = Phase.READY
+                    session.transition_to_phase(Phase.READY, reason="begin_phase_gate_gate_none")
                 else:
-                    session.phase = Phase.EXPLORATION
+                    session.transition_to_phase(Phase.EXPLORATION, reason="begin_phase_gate")
                 session.task_branch_enabled = True
                 session.task_branch_name = setup_result.branch_name
 
@@ -2024,7 +2037,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                         "next_action": "Call merge_to_base to complete",
                     }
                 else:
-                    session.phase = Phase.QUALITY_REVIEW
+                    session.transition_to_phase(Phase.QUALITY_REVIEW, reason="finalize_changes")
                     result = {
                         "success": True,
                         "commit_hash": finalize_result.commit_hash,
@@ -2044,7 +2057,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                     "discarded_files": finalize_result.discarded_files,
                     "branch": session.task_branch_name,
                     "message": f"Changes finalized. Committed to {session.task_branch_name}. Quality review skipped.",
-                    "next_step": "Call merge_to_base to merge back to original branch, or record_outcome to record result.",
+                    "next_step": "Call merge_to_base to merge back to original branch.",  # DISABLED: record_outcome
                 }
         else:
             result = {
@@ -2107,7 +2120,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
             # Revert to READY phase for fixes
-            session.phase = Phase.READY
+            session.transition_to_phase(Phase.READY, reason="quality_review_issues_found")
             result = {
                 "success": True,
                 "issues_found": True,
@@ -2178,7 +2191,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 "to_branch": merge_result.get("to_branch"),
                 "message": f"Successfully merged {merge_result.get('from_branch')} to {merge_result.get('to_branch')}." +
                           (" Branch deleted." if merge_result.get("branch_deleted") else ""),
-                "next_step": "Call record_outcome to record the result.",
+                # DISABLED: "next_step": "Call record_outcome to record the result.",
             }
         else:
             result = {
@@ -2997,7 +3010,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 result_summary = "completed"
                 result_detail = {"status": "completed"}
 
-        session.record_tool_call(name, arguments, result_summary, result_detail)
+        # v1.8: Record tool call end with timing
+        session.record_tool_call_end(result_summary, result_detail)
 
     # Format result as JSON
     return [TextContent(
