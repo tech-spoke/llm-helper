@@ -1345,6 +1345,74 @@ async def list_tools() -> list[Tool]:
                 "required": ["verified_files"],
             },
         ),
+        Tool(
+            name="submit_verification_and_impact",
+            description="[v1.9] Integrated VERIFICATION + IMPACT_ANALYSIS submission. "
+                        "Combines verification of semantic hypotheses with impact analysis in a single phase, "
+                        "eliminating LLM round-trip wait. Use this instead of separate submit_verification + submit_impact_analysis calls.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "verified": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "hypothesis": {"type": "string"},
+                                "status": {
+                                    "type": "string",
+                                    "enum": ["confirmed", "partial", "rejected"],
+                                },
+                                "evidence": {
+                                    "type": "object",
+                                    "properties": {
+                                        "tool": {"type": "string"},
+                                        "target": {"type": "string"},
+                                        "result": {"type": "string"},
+                                        "files": {
+                                            "type": "array",
+                                            "items": {"type": "string"},
+                                        },
+                                    },
+                                    "required": ["tool", "target", "result", "files"],
+                                },
+                            },
+                            "required": ["hypothesis", "status", "evidence"],
+                        },
+                        "description": "List of verified hypotheses from SEMANTIC phase",
+                    },
+                    "verified_files": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "file": {
+                                    "type": "string",
+                                    "description": "File path that was verified",
+                                },
+                                "status": {
+                                    "type": "string",
+                                    "enum": ["will_modify", "no_change_needed", "not_affected"],
+                                    "description": "Verification status for this file",
+                                },
+                                "reason": {
+                                    "type": "string",
+                                    "description": "Reason for status (required when status != will_modify)",
+                                },
+                            },
+                            "required": ["file", "status"],
+                        },
+                        "description": "List of verified files from impact analysis",
+                    },
+                    "inferred_from_rules": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Additional files inferred from project_rules naming conventions",
+                    },
+                },
+                "required": ["verified", "verified_files"],
+            },
+        ),
     ]
 
 
@@ -2903,6 +2971,56 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             inferred_from_rules = arguments.get("inferred_from_rules", [])
 
             result = session.submit_impact_analysis(
+                verified_files=verified_files,
+                inferred_from_rules=inferred_from_rules,
+            )
+
+        return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+
+    elif name == "submit_verification_and_impact":
+        # v1.9: Integrated VERIFICATION + IMPACT_ANALYSIS submission
+        session = session_manager.get_active_session()
+        if session is None:
+            result = {"error": "no_active_session", "message": "No active session."}
+        else:
+            # Convert verified hypotheses
+            verified_list = []
+            for v in arguments.get("verified", []):
+                evidence_data = v.get("evidence", {})
+                evidence = VerificationEvidence(
+                    tool=evidence_data.get("tool", ""),
+                    target=evidence_data.get("target", ""),
+                    result=evidence_data.get("result", ""),
+                    files=evidence_data.get("files", []),
+                )
+                verified_hypothesis = VerifiedHypothesis(
+                    hypothesis=v.get("hypothesis", ""),
+                    status=v.get("status", "rejected"),
+                    evidence=evidence,
+                )
+                verified_list.append(verified_hypothesis)
+
+            # Get verified files and inferred rules
+            verified_files = arguments.get("verified_files", [])
+            inferred_from_rules = arguments.get("inferred_from_rules", [])
+
+            # Convert to dict format for session method
+            verified_hypotheses_dict = [
+                {
+                    "hypothesis": vh.hypothesis,
+                    "status": vh.status,
+                    "evidence": {
+                        "tool": vh.evidence.tool,
+                        "target": vh.evidence.target,
+                        "result": vh.evidence.result,
+                        "files": vh.evidence.files,
+                    }
+                }
+                for vh in verified_list
+            ]
+
+            result = session.submit_verification_and_impact(
+                verified_hypotheses=verified_hypotheses_dict,
                 verified_files=verified_files,
                 inferred_from_rules=inferred_from_rules,
             )

@@ -127,8 +127,9 @@ class Phase(Enum):
     """Execution phases in order."""
     EXPLORATION = auto()      # Phase 1: code-intel required
     SEMANTIC = auto()         # Phase 2: semantic search allowed (if needed)
-    VERIFICATION = auto()     # Phase 3: verify semantic hypotheses
-    IMPACT_ANALYSIS = auto()  # Phase 4: analyze impact before implementation (v1.1)
+    VERIFICATION = auto()     # Phase 3: verify semantic hypotheses (deprecated in v1.9, use VERIFICATION_AND_IMPACT)
+    IMPACT_ANALYSIS = auto()  # Phase 4: analyze impact before implementation (v1.1) (deprecated in v1.9, use VERIFICATION_AND_IMPACT)
+    VERIFICATION_AND_IMPACT = auto()  # Phase 3+4 integrated: verify hypotheses + analyze impact (v1.9)
     READY = auto()            # Phase 5: implementation allowed
     PRE_COMMIT = auto()       # Phase 6: garbage detection before commit (v1.2)
     QUALITY_REVIEW = auto()   # Phase 7: quality check before merge (v1.5)
@@ -1730,6 +1731,181 @@ class SessionState:
 
         if should_verify_missing:
             response["warning"] = f"Some should_verify files were not verified: {should_verify_missing}"
+
+        return response
+
+    def submit_verification_and_impact(
+        self,
+        verified_hypotheses: list[dict],
+        verified_files: list[dict],
+        inferred_from_rules: list[str] | None = None,
+    ) -> dict:
+        """
+        v1.9: Integrated VERIFICATION + IMPACT_ANALYSIS submission.
+
+        Combines verification of semantic hypotheses with impact analysis
+        in a single phase, eliminating LLM round-trip wait.
+
+        Args:
+            verified_hypotheses: List of verified hypotheses (same format as submit_verification)
+            verified_files: List of verified files (same format as submit_impact_analysis)
+            inferred_from_rules: Files inferred from project rules
+
+        Returns: {"success": bool, "next_phase": str, "message": str}
+        """
+        if self.phase != Phase.VERIFICATION_AND_IMPACT:
+            return {
+                "success": False,
+                "next_phase": self.phase.name,
+                "message": f"Cannot submit verification and impact in phase {self.phase.name}",
+            }
+
+        # Validate verification data
+        if not verified_hypotheses:
+            return {
+                "success": False,
+                "next_phase": self.phase.name,
+                "message": "Must verify at least one hypothesis.",
+            }
+
+        # Convert verified_hypotheses to VerifiedHypothesis objects
+        verified = []
+        for vh in verified_hypotheses:
+            verified.append(VerifiedHypothesis(
+                hypothesis=vh["hypothesis"],
+                status=vh["status"],
+                evidence=vh["evidence"],
+            ))
+
+        # Validate evidence structure
+        for vh in verified:
+            is_valid, error = validate_verification_evidence(vh.evidence)
+            if not is_valid:
+                return {
+                    "success": False,
+                    "next_phase": self.phase.name,
+                    "message": f"Invalid evidence for hypothesis '{vh.hypothesis}': {error}",
+                    "valid_tools": list(VALID_VERIFICATION_TOOLS),
+                }
+
+        # Validate impact analysis data
+        if self.impact_analysis is None:
+            return {
+                "success": False,
+                "next_phase": self.phase.name,
+                "message": "Must call analyze_impact before submit_verification_and_impact.",
+            }
+
+        # Convert verified_files to VerifiedFile objects
+        verified_impact = []
+        for vf in verified_files:
+            verified_impact.append(VerifiedFile(
+                file=vf["file"],
+                status=vf["status"],
+                reason=vf.get("reason"),
+            ))
+
+        # Validate: all must_verify files must have a response
+        verified_paths = {v.file for v in verified_impact}
+        missing_must_verify = []
+        for must_file in self.impact_analysis.must_verify:
+            if must_file not in verified_paths:
+                missing_must_verify.append(must_file)
+
+        if missing_must_verify:
+            return {
+                "success": False,
+                "next_phase": self.phase.name,
+                "message": "Not all must_verify files have been verified.",
+                "missing_must_verify": missing_must_verify,
+                "hint": "Provide status for all must_verify files before proceeding.",
+            }
+
+        # Validate: status != will_modify requires reason
+        missing_reasons = []
+        for v in verified_impact:
+            if v.status != "will_modify" and not v.reason:
+                missing_reasons.append(v.file)
+
+        if missing_reasons:
+            return {
+                "success": False,
+                "next_phase": self.phase.name,
+                "message": "Files with status != will_modify require a reason.",
+                "missing_reasons": missing_reasons,
+            }
+
+        # Store verification results
+        self.verification = VerificationResult(verified=verified)
+
+        # Update impact_analysis result
+        self.impact_analysis.verified_files = verified_impact
+        self.impact_analysis.inferred_from_rules = inferred_from_rules or []
+
+        # Record combined phase transition
+        self.phase_history.append({
+            "from": Phase.VERIFICATION_AND_IMPACT.name,
+            "verification_result": self.verification.to_dict(),
+            "impact_result": self.impact_analysis.to_dict(),
+            "timestamp": datetime.now().isoformat(),
+        })
+
+        # v1.8: If skip_implementation is enabled, do not transition to READY
+        if self.skip_implementation:
+            response = {
+                "success": True,
+                "next_phase": Phase.VERIFICATION_AND_IMPACT.name,
+                "exploration_complete": True,
+                "message": "Exploration complete. Implementation skipped (--only-explore mode).",
+                "verified_hypotheses_count": len(verified),
+                "verified_files_count": len(verified_impact),
+                "will_modify": [v.file for v in verified_impact if v.status == "will_modify"],
+            }
+
+            # Check for should_verify warnings
+            should_verify_missing = []
+            for should_file in self.impact_analysis.should_verify:
+                if should_file not in verified_paths:
+                    should_verify_missing.append(should_file)
+
+            if should_verify_missing:
+                response["warning"] = f"Some should_verify files were not verified: {should_verify_missing}"
+
+            return response
+
+        # Normal flow: transition to READY
+        self.transition_to_phase(Phase.READY, reason="submit_verification_and_impact")
+
+        # Check for rejected hypotheses
+        rejected = [v for v in verified if v.status == "rejected"]
+        rejected_warning = None
+        if rejected:
+            rejected_warning = f"{len(rejected)} hypotheses were rejected. Do NOT implement based on rejected hypotheses."
+
+        # Check for should_verify warnings
+        should_verify_missing = []
+        for should_file in self.impact_analysis.should_verify:
+            if should_file not in verified_paths:
+                should_verify_missing.append(should_file)
+
+        response = {
+            "success": True,
+            "next_phase": Phase.READY.name,
+            "message": "Verification and impact analysis complete. Ready for implementation.",
+            "verified_hypotheses_count": len(verified),
+            "verified_files_count": len(verified_impact),
+            "will_modify": [v.file for v in verified_impact if v.status == "will_modify"],
+        }
+
+        # Add warnings if present
+        warnings = []
+        if rejected_warning:
+            warnings.append(rejected_warning)
+        if should_verify_missing:
+            warnings.append(f"Some should_verify files were not verified: {should_verify_missing}")
+
+        if warnings:
+            response["warning"] = "; ".join(warnings)
 
         return response
 

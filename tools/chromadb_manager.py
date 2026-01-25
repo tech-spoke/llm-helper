@@ -247,27 +247,37 @@ class ChromaDBManager:
                 logger.error(f"Failed to delete chunks for {rel_path}: {e}")
                 result.errors += 1
 
-        # 変更されたファイルを再インデックス
-        for file_path in modified:
-            try:
-                rel_path = self.sync_state.get_relative_path(file_path)
-                self._delete_chunks_for_file(rel_path)
-                chunk_count = self._index_file(file_path)
-                self.sync_state.mark_indexed(file_path, chunk_count)
-                result.modified += 1
-            except Exception as e:
-                logger.error(f"Failed to reindex {file_path}: {e}")
-                result.errors += 1
+        # v1.9: 変更されたファイルをバッチ処理で再インデックス
+        if modified:
+            # 古いチャンクを一括削除
+            for file_path in modified:
+                try:
+                    rel_path = self.sync_state.get_relative_path(file_path)
+                    self._delete_chunks_for_file(rel_path)
+                except Exception as e:
+                    logger.error(f"Failed to delete chunks for {file_path}: {e}")
+                    result.errors += 1
 
-        # 新規ファイルをインデックス
-        for file_path in added:
-            try:
-                chunk_count = self._index_file(file_path)
-                self.sync_state.mark_indexed(file_path, chunk_count)
-                result.added += 1
-            except Exception as e:
-                logger.error(f"Failed to index {file_path}: {e}")
-                result.errors += 1
+            # バッチでインデックス
+            file_chunk_counts = self._index_files_batch(modified)
+            for file_path, chunk_count in file_chunk_counts.items():
+                try:
+                    self.sync_state.mark_indexed(file_path, chunk_count)
+                    result.modified += 1
+                except Exception as e:
+                    logger.error(f"Failed to mark indexed {file_path}: {e}")
+                    result.errors += 1
+
+        # v1.9: 新規ファイルをバッチ処理でインデックス
+        if added:
+            file_chunk_counts = self._index_files_batch(added)
+            for file_path, chunk_count in file_chunk_counts.items():
+                try:
+                    self.sync_state.mark_indexed(file_path, chunk_count)
+                    result.added += 1
+                except Exception as e:
+                    logger.error(f"Failed to mark indexed {file_path}: {e}")
+                    result.errors += 1
 
         # 同期完了時刻を記録
         self.sync_state.mark_sync_completed()
@@ -351,6 +361,72 @@ class ChromaDBManager:
             )
 
         return len(unique_data)
+
+    def _index_files_batch(self, file_paths: list[Path]) -> dict[Path, int]:
+        """
+        v1.9: 複数ファイルをバッチ処理でインデックス
+
+        Args:
+            file_paths: インデックス対象のファイルパスリスト
+
+        Returns:
+            ファイルパスとチャンク数のマッピング
+        """
+        if not file_paths:
+            return {}
+
+        # 全ファイルのチャンクを収集
+        all_ids = []
+        all_documents = []
+        all_metadatas = []
+        file_chunk_counts = {}
+
+        for file_path in file_paths:
+            try:
+                chunks = self.chunker.chunk_file(file_path)
+
+                if not chunks:
+                    file_chunk_counts[file_path] = 0
+                    continue
+
+                # チャンクをリストに追加
+                for chunk in chunks:
+                    all_ids.append(chunk.id)
+                    all_documents.append(chunk.content)
+                    all_metadatas.append(
+                        self._sanitize_metadata({
+                            **chunk.metadata,
+                            "type": chunk.type,
+                            "name": chunk.name,
+                            "file": chunk.file,
+                            "line_start": chunk.line_start,
+                            "line_end": chunk.line_end,
+                        })
+                    )
+
+                file_chunk_counts[file_path] = len(chunks)
+
+            except Exception as e:
+                logger.error(f"Failed to chunk {file_path}: {e}")
+                file_chunk_counts[file_path] = 0
+
+        # ID の重複を除去
+        seen_ids = set()
+        unique_data = []
+        for i, id_ in enumerate(all_ids):
+            if id_ not in seen_ids:
+                seen_ids.add(id_)
+                unique_data.append((all_ids[i], all_documents[i], all_metadatas[i]))
+
+        # バッチで一括追加
+        if unique_data:
+            self.forest_collection.upsert(
+                ids=[d[0] for d in unique_data],
+                documents=[d[1] for d in unique_data],
+                metadatas=[d[2] for d in unique_data],
+            )
+
+        return file_chunk_counts
 
     def _delete_chunks_for_file(self, rel_path: str) -> None:
         """特定ファイルのチャンクを削除"""
