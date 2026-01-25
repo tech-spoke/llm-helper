@@ -714,6 +714,7 @@ For version history and detailed changes:
 
 | Version | Description | Link |
 |---------|-------------|------|
+| v1.9 | Performance Optimization (sync_index batch, VERIFICATION+IMPACT integration - saves 15-20s) | [v1.9](updates/v1.9.md) |
 | v1.8 | Exploration-Only Mode (--only-explore) | [v1.8](updates/v1.8.md) |
 | v1.7 | Parallel Execution (search_text, Read, Grep - saves 27-35s) | [v1.7](updates/v1.7.md) |
 | v1.6 | Branch Lifecycle (stale warning, begin_phase_gate) | [v1.6](updates/v1.6.md) |

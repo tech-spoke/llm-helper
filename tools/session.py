@@ -1773,10 +1773,17 @@ class SessionState:
         # Convert verified_hypotheses to VerifiedHypothesis objects
         verified = []
         for vh in verified_hypotheses:
+            evidence_data = vh["evidence"]
+            evidence = VerificationEvidence(
+                tool=evidence_data["tool"],
+                target=evidence_data["target"],
+                result=evidence_data["result"],
+                files=evidence_data.get("files", []),
+            )
             verified.append(VerifiedHypothesis(
                 hypothesis=vh["hypothesis"],
                 status=vh["status"],
-                evidence=vh["evidence"],
+                evidence=evidence,
             ))
 
         # Validate evidence structure
