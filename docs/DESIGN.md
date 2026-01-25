@@ -1,6 +1,6 @@
-# Code Intelligence MCP Server - Design Document v1.6
+# Code Intelligence MCP Server - Design Document v1.8
 
-> This document describes the complete system specification as of v1.6.
+> This document describes the complete system specification as of v1.8.
 > For version history, see [CHANGELOG](#changelog).
 
 ---
@@ -107,32 +107,56 @@ And have a mechanism to learn from failures.
 
 ## Processing Flow
 
-Processing consists of 3 layers:
+Processing consists of 4 layers (v1.8):
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│  1. Preparation (Skill controlled)                                          │
-│     Flag Check → Failure Check → Intent → Session Start                    │
-│     → DOCUMENT_RESEARCH → QueryFrame                                       │
-│     ← skip DOCUMENT_RESEARCH with --no-doc-research                        │
+│  Preparation Phase (Skill controlled - code.md)                             │
 └─────────────────────────────────────────────────────────────────────────────┘
-                                    ↓
+Step -1:  Flag Check              Parse command options
+Step 1:   Intent Classification   Classify as IMPLEMENT/MODIFY/INVESTIGATE/QUESTION
+Step 2:   Session Start           Start session, get project_rules (no branch yet)
+Step 2.5: DOCUMENT_RESEARCH       Document research (sub-agent) ← skip with --no-doc-research
+Step 3:   QueryFrame Setup        Decompose request into structured slots
+Step 3.5: begin_phase_gate        Start phase gates, create branch, stale warning
+
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│  2. Phase Gate Start (v1.6)                                                 │
-│     begin_phase_gate → [Stale branches?] → [User intervention] → Continue  │
+│  Exploration Phase (Server enforced)                                        │
 └─────────────────────────────────────────────────────────────────────────────┘
-                                    ↓
+Step 4:   EXPLORATION             Source investigation (find_definitions, find_references, search_text)
+Step 5:   Symbol Validation       Embedding-based relevance validation
+Step 6:   SEMANTIC                Semantic search (only if confidence is low)
+Step 7:   VERIFICATION            Hypothesis verification (only if SEMANTIC executed)
+Step 8:   IMPACT_ANALYSIS         Impact range analysis
+          ↓
+          [If --only-explore: End here, report findings to user]
+
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│  3. Phase Gates (Server enforced)                                           │
-│     EXPLORATION → SEMANTIC* → VERIFICATION* → IMPACT_ANALYSIS → READY      │
-│     → POST_IMPL_VERIFY → PRE_COMMIT → QUALITY_REVIEW                       │
-│     ← --quick skips exploration, --no-verify/--no-quality skip each phase  │
+│  Implementation & Verification Phase (Server enforced)                      │
 └─────────────────────────────────────────────────────────────────────────────┘
-                                    ↓
+Step 9:   READY                   Implementation (Edit/Write/Bash allowed)
+Step 9.5: POST_IMPL_VERIFY        Post-implementation verification (verifier prompts)
+                                  ← skip with --no-verify
+                                  On failure, loop back to Step 9 (max 3 times)
+
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│  4. Completion                                                              │
-│     Finalize & Merge                                                       │
+│  Commit & Quality Phase (Server enforced)                                   │
 └─────────────────────────────────────────────────────────────────────────────┘
+Step 10:  PRE_COMMIT              Pre-commit review
+          ├─ review_changes       Garbage detection (garbage_detection.md)
+          └─ finalize_changes     Keep/discard decision + commit execution ★Commit here
+
+Step 10.5: QUALITY_REVIEW         Quality review ← skip with --no-quality
+          ├─ quality_review.md    Checklist review
+          └─ submit_quality_review
+              ├─ Issues found → Revert to READY (fix → POST_IMPL_VERIFY → PRE_COMMIT → QUALITY_REVIEW)
+              └─ No issues → Next
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  Completion                                                                 │
+└─────────────────────────────────────────────────────────────────────────────┘
+Step 11:  merge_to_base           Merge task branch to original branch
+                                  Session complete, report results to user
 ```
 
 ### 1. Preparation (Skill controlled)
@@ -141,12 +165,22 @@ Controlled by skill prompt (code.md). Server not involved.
 
 | Step | Description | Skip |
 |------|-------------|------|
-| Flag Check | Parse command options (`--quick`, etc.) | - |
-| Failure Check | Auto-detect previous failure, record to OutcomeLog | - |
-| Intent | Classify as IMPLEMENT / MODIFY / INVESTIGATE / QUESTION | - |
-| Session Start | Start session, get project_rules (no branch yet) | - |
-| **DOCUMENT_RESEARCH** | Sub-agent researches design docs, extracts mandatory_rules | `--no-doc-research` |
-| QueryFrame | Decompose request into structured slots with Quote verification | - |
+| Step -1: Flag Check | Parse command options (`--quick`, `--only-explore`, etc.) | - |
+| Step 1: Intent | Classify as IMPLEMENT / MODIFY / INVESTIGATE / QUESTION | - |
+| Step 2: Session Start | Start session, get project_rules (no branch yet) | - |
+| Step 2.5: **DOCUMENT_RESEARCH** | Sub-agent researches design docs, extracts mandatory_rules | `--no-doc-research` |
+| Step 3: QueryFrame | Decompose request into structured slots with Quote verification | - |
+
+**DOCUMENT_RESEARCH details:**
+- Uses Claude Code Task tool (Explore agent)
+- Researches documents in `docs/` directory
+- Extracts task-specific rules, constraints, and dependencies
+- Referenced as `mandatory_rules` in subsequent phases
+
+**--only-explore flag (v1.8):**
+- When detected in Step -1, sets `skip_implementation=true` flag
+- Passes `skip_implementation` parameter to Session Start (Step 2)
+- After IMPACT_ANALYSIS (Step 8) completion, skips implementation phases and exits
 
 ### 2. Phase Gate Start (v1.6)
 
@@ -165,6 +199,7 @@ MCP server enforces phase transitions. LLM cannot skip arbitrarily.
 | Option | Explore | Implement | Verify | Intervene | Garbage | Quality | Branch |
 |--------|:-------:|:---------:|:------:|:---------:|:-------:|:-------:|:------:|
 | (default) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `--only-explore` / `-e` | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
 | `--no-verify` | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | ✅ |
 | `--no-quality` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
 | `--fast` / `-f` | ❌ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
@@ -340,6 +375,7 @@ doc_research:
 | `--no-verify` | - | Skip post-implementation verification (and intervention) |
 | `--no-quality` | - | Skip quality review (v1.5) |
 | `--only-verify` | `-v` | Run verification only |
+| `--only-explore` | `-e` | Run exploration only (skip implementation) (v1.8) |
 | `--gate=LEVEL` | `-g=LEVEL` | Gate level: h(igh), m(iddle), l(ow), a(uto), n(one) |
 | `--fast` | `-f` | Skip exploration with branch (= `-g=n` + branch) |
 | `--quick` | `-q` | Skip exploration, no branch (= `-g=n` + `skip_branch`) |
@@ -352,70 +388,106 @@ doc_research:
 ### Execution Flow
 
 ```
+┌─────────────────────────────────────────────────────────────────┐
+│ Preparation Phase (Skill controlled - code.md)                  │
+└─────────────────────────────────────────────────────────────────┘
 Step -1: Flag Check
-    └─ Parse command options
-
-Step 0: Failure Check
-    └─ Auto-detect if previous session failed
+    └─ Parse command options (--quick, --only-explore, --no-verify, etc.)
+       When --only-explore / -e detected → set skip_implementation=true flag
 
 Step 1: Intent Classification
-    └─ IMPLEMENT / MODIFY / INVESTIGATE / QUESTION
+    └─ Classify as IMPLEMENT / MODIFY / INVESTIGATE / QUESTION
+       ★ v1.8: Intent=INVESTIGATE or QUESTION → Automatic exploration-only mode
+          (skip_implementation=true, skip_branch=true)
 
 Step 2: Session Start
     ├─ Load project_rules from context.yml
+    ├─ Set skip_implementation flag:
+    │  - Intent=INVESTIGATE/QUESTION → skip_implementation=true (auto)
+    │  - --only-explore flag → skip_implementation=true (explicit)
+    │  - Intent=IMPLEMENT/MODIFY → skip_implementation=false (default)
     └─ Sync ChromaDB (if needed)
+    ※ Branch creation happens in Step 3.5 (v1.6)
 
 Step 2.5: DOCUMENT_RESEARCH (v1.3)
     ├─ Spawn sub-agent with research prompt
     └─ Extract mandatory_rules from docs/
+    ← skip with --no-doc-research
 
 Step 3: QueryFrame Setup
     └─ Extract structured slots with quote verification
 
-Step 3.5: Begin Phase Gate (v1.6)
+Step 3.5: begin_phase_gate (v1.6)
     ├─ Check for stale branches
-    ├─ User intervention if stale branches exist
-    └─ Create task branch
+    ├─ User intervention if stale branches exist (delete/merge/continue)
+    └─ Determine branch creation:
+       - skip_implementation=true → skip_branch=true (no branch)
+       - skip_implementation=false → Create task branch (normal flow)
+       ★ v1.8: Exploration-only mode skips branch creation
 
+┌─────────────────────────────────────────────────────────────────┐
+│ Exploration Phase (Server enforced)                             │
+└─────────────────────────────────────────────────────────────────┘
 Step 4: EXPLORATION
-    ├─ Use find_definitions, find_references, etc.
+    ├─ Use find_definitions, find_references, search_text, etc.
     ├─ Acknowledge mandatory_rules
     └─ submit_understanding
 
 Step 5: Symbol Validation
     └─ Verify NL→Symbol relevance via embedding
 
-Step 6: SEMANTIC (if confidence low)
+Step 6: SEMANTIC (only if confidence is low)
     └─ semantic_search → submit_semantic
 
-Step 7: VERIFICATION (if SEMANTIC executed)
+Step 7: VERIFICATION (only if SEMANTIC executed)
     └─ Verify hypotheses with code → submit_verification
 
 Step 8: IMPACT_ANALYSIS
     ├─ analyze_impact for target files
-    └─ Confirm all must_verify files
+    └─ Confirm all must_verify files → submit_impact_analysis
 
+    ★ v1.8: If skip_implementation=true (Intent=INVESTIGATE/QUESTION or --only-explore):
+       - submit_impact_analysis returns exploration_complete=true
+       - Report findings to user and complete (skip Step 9 onwards)
+       - No branch created, no implementation phases
+
+┌─────────────────────────────────────────────────────────────────┐
+│ Implementation & Verification Phase (Server enforced)           │
+└─────────────────────────────────────────────────────────────────┘
 Step 9: READY
     ├─ check_write_target before each Edit/Write
     └─ Implementation
+    → submit_for_review to PRE_COMMIT
 
-Step 9.5: POST_IMPLEMENTATION_VERIFICATION
+Step 9.5: POST_IMPL_VERIFY
     ├─ Select verifier based on file types
     ├─ Run verifier prompts (.code-intel/verifiers/)
     ├─ Loop back to Step 9 on failure
     └─ Intervention on 3 consecutive failures (v1.4)
+    ← skip with --no-verify
 
-Step 10: PRE_COMMIT (garbage detection)
-    ├─ review_changes
-    └─ finalize_changes (keep/discard)
+┌─────────────────────────────────────────────────────────────────┐
+│ Commit & Quality Phase (Server enforced)                        │
+└─────────────────────────────────────────────────────────────────┘
+Step 10: PRE_COMMIT (garbage detection + commit preparation)
+    ├─ review_changes (review with garbage_detection.md)
+    └─ finalize_changes (keep/discard decision + commit preparation)
+       ★ v1.8: Prepare commit only (execution after QUALITY_REVIEW)
 
-Step 10.5: QUALITY_REVIEW (v1.5)
+Step 10.5: QUALITY_REVIEW (v1.5, order changed in v1.8)
     ├─ quality_review.md checklist
-    ├─ Issues found → revert to READY → re-traverse
-    └─ No issues → proceed to merge
+    ├─ Issues found → submit_quality_review(issues_found=true)
+    │                → Revert to Step 9 (READY) (discard prepared commit)
+    └─ No issues → submit_quality_review(issues_found=false)
+                 → ★Commit execution happens here → Step 11
+    ← skip with --no-quality
 
-Step 11: Merge
-    └─ merge_to_base (to original branch)
+┌─────────────────────────────────────────────────────────────────┐
+│ Completion                                                      │
+└─────────────────────────────────────────────────────────────────┘
+Step 11: merge_to_base
+    └─ Merge task branch to original branch
+       Session complete, report results to user
 ```
 
 ### Verifier System
@@ -642,6 +714,7 @@ For version history and detailed changes:
 
 | Version | Description | Link |
 |---------|-------------|------|
+| v1.8 | Exploration-Only Mode (--only-explore) | [v1.8](updates/v1.8.md) |
 | v1.7 | Parallel Execution (search_text, Read, Grep - saves 27-35s) | [v1.7](updates/v1.7.md) |
 | v1.6 | Branch Lifecycle (stale warning, begin_phase_gate) | [v1.6](updates/v1.6.md) |
 | v1.5 | Quality Review (revert-to-READY loop) | [v1.5](updates/v1.5.md) |

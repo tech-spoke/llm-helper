@@ -1,6 +1,6 @@
 # Code Intelligence MCP Server
 
-> **Current Version: v1.7**
+> **Current Version: v1.8**
 
 Cursor IDE のようなコードインテリジェンス機能をオープンソースツールで実現する MCP サーバー。
 
@@ -43,6 +43,7 @@ LLM に判断をさせない。守らせるのではなく、守らないと進�
 | 品質レビュー（v1.5） | 実装後の品質チェック、リトライループ |
 | ブランチライフサイクル（v1.6） | stale ブランチ警告、失敗時自動削除、begin_phase_gate 分離 |
 | 並列実行最適化（v1.7） | search_text 複数パターン対応、Read/Grep 並列実行で27-35秒削減 |
+| 探索のみモード（v1.8） | Intent自動判定（INVESTIGATE/QUESTION）+ --only-explore フラグ、ブランチ作成なし |
 
 ---
 
@@ -107,8 +108,9 @@ LLM に判断をさせない。守らせるのではなく、守らないと進�
                                     ↓
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │  2. フェーズゲート（Server 強制）                                           │
-│     EXPLORATION → SEMANTIC* → VERIFICATION* → IMPACT_ANALYSIS → READY      │
-│     → POST_IMPL_VERIFY → PRE_COMMIT → QUALITY_REVIEW                       │
+│     EXPLORATION → SEMANTIC* → VERIFICATION* → IMPACT_ANALYSIS              │
+│     → [--only-explore で終了] or [READY → POST_IMPL_VERIFY → PRE_COMMIT]  │
+│     → QUALITY_REVIEW                                                       │
 │     ← --quick で探索スキップ、--no-verify/--no-quality で各フェーズスキップ │
 └─────────────────────────────────────────────────────────────────────────────┘
                                     ↓
@@ -148,6 +150,7 @@ MCP サーバーがフェーズ遷移を強制。LLM が勝手にスキップで
 | オプション | 探索 | 実装 | 検証 | 介入 | ゴミ取 | 品質 | ブランチ |
 |-----------|:----:|:----:|:----:|:----:|:------:|:----:|:-------:|
 | (デフォルト) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `--only-explore` / `-e` | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
 | `--no-verify` | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | ✅ |
 | `--no-quality` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
 | `--fast` / `-f` | ❌ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
@@ -464,6 +467,7 @@ MCP サーバーを再読み込みするために再起動。
 | `--no-verify` | - | 検証をスキップ（介入もスキップ） |
 | `--no-quality` | - | 品質レビューをスキップ（v1.5） |
 | `--only-verify` | `-v` | 検証のみ実行（実装スキップ） |
+| `--only-explore` | `-e` | 探索のみ実行（実装スキップ） |
 | `--fast` | `-f` | 高速モード: 探索スキップ、ブランチあり |
 | `--quick` | `-q` | 最小モード: 探索スキップ、ブランチなし |
 | `--doc-research=PROMPTS` | - | 調査プロンプトを指定（v1.3） |
@@ -488,6 +492,9 @@ MCP サーバーを再読み込みするために再起動。
 
 # 検証のみ（既存実装のチェック）
 /code -v sample/hello.html
+
+# 探索のみ（実装はしない、問題調査向け）
+/code -e コードベースの問題点を調査
 
 # 高速モード（探索スキップ、ブランチあり、既知の修正向け）
 /code -f fix known issue in login validation
@@ -665,6 +672,7 @@ your-project/
 
 | Version | Description | Link |
 |---------|-------------|------|
+| v1.8 | Exploration-Only Mode（探索のみモード - --only-explore） | [v1.8](docs/updates/v1.8_ja.md) |
 | v1.7 | Parallel Execution（並列実行 - 27-35秒削減） | [v1.7](docs/updates/v1.7_ja.md) |
 | v1.6 | Branch Lifecycle（stale 警告、begin_phase_gate） | [v1.6](docs/updates/v1.6_ja.md) |
 | v1.5 | Quality Review（品質レビュー） | [v1.5](docs/updates/v1.5_ja.md) |

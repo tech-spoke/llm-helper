@@ -1,6 +1,6 @@
 # Code Intelligence MCP Server
 
-> **Current Version: v1.7**
+> **Current Version: v1.8**
 
 An MCP server that provides Cursor IDE-like code intelligence capabilities using open source tools.
 
@@ -43,6 +43,7 @@ And have a mechanism to learn from failures.
 | Quality Review (v1.5) | Post-implementation quality check with retry loop |
 | Branch Lifecycle (v1.6) | Stale branch warnings, auto-deletion on failure, begin_phase_gate separation |
 | Parallel Execution (v1.7) | search_text multi-pattern support, Read/Grep parallel execution saves 27-35s |
+| Exploration-Only Mode (v1.8) | Intent-based auto-detection (INVESTIGATE/QUESTION) + --only-explore flag, no branch creation |
 
 ---
 
@@ -687,6 +688,7 @@ For version history and detailed changes, see:
 
 | Version | Description | Link |
 |---------|-------------|------|
+| v1.8 | Exploration-Only Mode (--only-explore) | [v1.8](docs/updates/v1.8.md) |
 | v1.7 | Parallel Execution (search_text, Read, Grep - saves 27-35s) | [v1.7](docs/updates/v1.7.md) |
 | v1.6 | Branch Lifecycle (stale warning, begin_phase_gate) | [v1.6](docs/updates/v1.6.md) |
 | v1.5 | Quality Review with retry loop | [v1.5](docs/updates/v1.5.md) |

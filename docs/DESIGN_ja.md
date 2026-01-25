@@ -1,6 +1,6 @@
-# Code Intelligence MCP Server - 設計ドキュメント v1.6
+# Code Intelligence MCP Server - 設計ドキュメント v1.8
 
-> このドキュメントは v1.6 時点の完全なシステム仕様を記述しています。
+> このドキュメントは v1.8 時点の完全なシステム仕様を記述しています。
 > バージョン履歴については [CHANGELOG](#changelog) を参照してください。
 
 ---
@@ -107,32 +107,55 @@ LLM に決めさせない。従わないと進めない設計にする。
 
 ## 処理フロー
 
-処理は3つのレイヤーで構成されます。
+処理は4つのレイヤーで構成されます（v1.8）。
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│  1. 準備フェーズ（Skill 制御）                                              │
-│     Flag Check → Failure Check → Intent → Session Start                    │
-│     → DOCUMENT_RESEARCH → QueryFrame                                       │
-│     ← --no-doc-research でスキップ可                                       │
+│  準備フェーズ（Skill 制御 - code.md）                                       │
 └─────────────────────────────────────────────────────────────────────────────┘
-                                    ↓
+Step -1:  Flag Check              コマンドオプションのパース
+Step 1:   Intent Classification   IMPLEMENT/MODIFY/INVESTIGATE/QUESTION に分類
+Step 2:   Session Start           セッション開始、project_rules取得（ブランチ未作成）
+Step 2.5: DOCUMENT_RESEARCH       ドキュメント調査（サブエージェント）← --no-doc-research でスキップ
+Step 3:   QueryFrame Setup        ユーザー要求を構造化スロットに分解
+Step 3.5: begin_phase_gate        フェーズゲート開始、ブランチ作成、stale警告
+
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│  1.5. フェーズゲート開始（v1.6）                                            │
-│     begin_phase_gate → [Stale ブランチ?] → [ユーザー介入] → 継続           │
+│  探索フェーズ（Server強制）                                                 │
 └─────────────────────────────────────────────────────────────────────────────┘
-                                    ↓
+Step 4:   EXPLORATION             ソース調査（find_definitions, find_references, search_text）
+Step 5:   Symbol Validation       Embeddingで関連性検証
+Step 6:   SEMANTIC                セマンティック検索（信頼度低い場合のみ）
+Step 7:   VERIFICATION            仮説検証（SEMANTIC実行時のみ）
+Step 8:   IMPACT_ANALYSIS         影響範囲分析
+          ↓
+          [--only-explore ならここで終了、ユーザーに報告して完了]
+
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│  2. フェーズゲート（Server 強制）                                           │
-│     EXPLORATION → SEMANTIC* → VERIFICATION* → IMPACT_ANALYSIS → READY      │
-│     → POST_IMPL_VERIFY → PRE_COMMIT → QUALITY_REVIEW                       │
-│     ← --quick で探索スキップ、--no-verify/--no-quality で各フェーズスキップ │
+│  実装・検証フェーズ（Server強制）                                           │
 └─────────────────────────────────────────────────────────────────────────────┘
-                                    ↓
+Step 9:   READY                   実装（Edit/Write/Bash許可）
+Step 9.5: POST_IMPL_VERIFY        実装後検証（verifier prompts実行）← --no-verify でスキップ
+                                  失敗時は Step 9 に戻る（最大3回）
+
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│  3. 完了                                                                    │
-│     Finalize & Merge                                                       │
+│  コミット・品質フェーズ（Server強制）                                       │
 └─────────────────────────────────────────────────────────────────────────────┘
+Step 10:  PRE_COMMIT              コミット前レビュー
+          ├─ review_changes       ゴミ検出（garbage_detection.md）
+          └─ finalize_changes     keep/discard判断 + コミット実行 ★ここでコミット
+
+Step 10.5: QUALITY_REVIEW         品質レビュー ← --no-quality でスキップ
+          ├─ quality_review.md    チェックリスト確認
+          └─ submit_quality_review
+              ├─ 問題あり → READY に戻る（修正 → POST_IMPL_VERIFY → PRE_COMMIT → QUALITY_REVIEW）
+              └─ 問題なし → 次へ
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  完了                                                                       │
+└─────────────────────────────────────────────────────────────────────────────┘
+Step 11:  merge_to_base           タスクブランチを元のブランチにマージ
+                                  セッション完了、結果をユーザーに報告
 ```
 
 ### 1. 準備フェーズ（Skill 制御）
@@ -141,18 +164,22 @@ Skill プロンプト（code.md）が制御。サーバーは関与しない。
 
 | ステップ | 内容 | スキップ |
 |---------|------|---------|
-| Flag Check | コマンドオプション（`--quick` 等）をパース | - |
-| Failure Check | 前回セッションが失敗したか自動検出、OutcomeLog に記録 | - |
-| Intent Classification | IMPLEMENT / MODIFY / INVESTIGATE / QUESTION を判定 | - |
-| Session Start | セッション開始、project_rules 取得（ブランチ作成は v1.6 で分離） | - |
-| **DOCUMENT_RESEARCH** | サブエージェントで設計ドキュメントを調査、mandatory_rules 抽出 | `--no-doc-research` |
-| QueryFrame Setup | ユーザー要求を構造化スロットに分解、Quote 検証 | - |
+| Step -1: Flag Check | コマンドオプション（`--quick`, `--only-explore` 等）をパース | - |
+| Step 1: Intent Classification | IMPLEMENT / MODIFY / INVESTIGATE / QUESTION を判定 | - |
+| Step 2: Session Start | セッション開始、project_rules 取得（ブランチ作成は v1.6 で分離） | - |
+| Step 2.5: **DOCUMENT_RESEARCH** | サブエージェントで設計ドキュメントを調査、mandatory_rules 抽出 | `--no-doc-research` |
+| Step 3: QueryFrame Setup | ユーザー要求を構造化スロットに分解、Quote 検証 | - |
 
 **DOCUMENT_RESEARCH の詳細:**
 - Claude Code の Task ツール（Explore エージェント）を使用
 - `docs/` 配下のドキュメントを調査
 - タスク固有のルール・制約・依存関係を抽出
 - `mandatory_rules` として後続フェーズで参照
+
+**--only-explore フラグ（v1.8）:**
+- Step -1 で検出時に `skip_implementation=true` フラグを設定
+- Session Start（Step 2）時に `skip_implementation` パラメータを渡す
+- IMPACT_ANALYSIS（Step 8）完了後、実装フェーズをスキップして終了
 
 ### 1.5. フェーズゲート開始（v1.6）
 
@@ -171,6 +198,7 @@ MCP サーバーがフェーズ遷移を強制。LLM が勝手にスキップで
 | オプション | 探索 | 実装 | 検証 | 介入 | ゴミ取 | 品質 | ブランチ |
 |-----------|:----:|:----:|:----:|:----:|:------:|:----:|:-------:|
 | (デフォルト) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `--only-explore` / `-e` | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
 | `--no-verify` | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | ✅ |
 | `--no-quality` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
 | `--fast` / `-f` | ❌ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
@@ -355,6 +383,7 @@ doc_research:
 | `--no-verify` | - | 検証をスキップ（介入もスキップ） |
 | `--no-quality` | - | 品質レビューをスキップ（v1.5） |
 | `--only-verify` | `-v` | 検証のみ実行 |
+| `--only-explore` | `-e` | 探索のみ実行（実装スキップ）（v1.8） |
 | `--fast` | `-f` | 高速モード: 探索スキップ、ブランチあり |
 | `--quick` | `-q` | 最小モード: 探索スキップ、ブランチなし |
 | `--doc-research=PROMPTS` | - | 調査プロンプトを指定 |
@@ -365,72 +394,106 @@ doc_research:
 ### 実行フロー
 
 ```
-Step -1: フラグチェック
-    └─ コマンドオプションをパース
+┌─────────────────────────────────────────────────────────────────┐
+│ 準備フェーズ（Skill制御 - code.md）                              │
+└─────────────────────────────────────────────────────────────────┘
+Step -1: Flag Check
+    └─ コマンドオプションをパース（--quick, --only-explore, --no-verify 等）
+       --only-explore / -e 検出時 → skip_implementation=true フラグ設定
 
-Step 0: 失敗チェック
-    └─ 前回セッションが失敗したか自動検出
+Step 1: Intent Classification
+    └─ IMPLEMENT / MODIFY / INVESTIGATE / QUESTION に分類
+       ★ v1.8: Intent=INVESTIGATE または QUESTION → 自動的に探索専用モード
+          (skip_implementation=true, skip_branch=true)
 
-Step 1: Intent 分類
-    └─ IMPLEMENT / MODIFY / INVESTIGATE / QUESTION
-
-Step 2: セッション開始
+Step 2: Session Start
     ├─ context.yml から project_rules をロード
-    ├─ タスクブランチをセットアップ（有効時）
+    ├─ skip_implementation フラグを設定:
+    │  - Intent=INVESTIGATE/QUESTION → skip_implementation=true（自動）
+    │  - --only-explore フラグ → skip_implementation=true（明示的）
+    │  - Intent=IMPLEMENT/MODIFY → skip_implementation=false（デフォルト）
     └─ ChromaDB を同期（必要時）
+    ※ ブランチ作成は Step 3.5 で実施（v1.6）
 
 Step 2.5: DOCUMENT_RESEARCH (v1.3)
     ├─ 調査プロンプトでサブエージェントを起動
     └─ docs/ から mandatory_rules を抽出
+    ← --no-doc-research でスキップ
 
-Step 3: QueryFrame 設定
+Step 3: QueryFrame Setup
     └─ Quote 検証付きで構造化スロットを抽出
 
-Step 3.5: Begin Phase Gate（v1.6）
+Step 3.5: begin_phase_gate（v1.6）
     ├─ stale ブランチをチェック
-    ├─ stale ブランチ存在時はユーザー介入
-    └─ タスクブランチ作成
+    ├─ stale ブランチ存在時はユーザー介入（削除/マージ/継続）
+    └─ ブランチ作成判定:
+       - skip_implementation=true → skip_branch=true（ブランチなし）
+       - skip_implementation=false → タスクブランチ作成（通常フロー）
+       ★ v1.8: 探索専用モードではブランチ作成をスキップ
 
+┌─────────────────────────────────────────────────────────────────┐
+│ 探索フェーズ（Server強制）                                       │
+└─────────────────────────────────────────────────────────────────┘
 Step 4: EXPLORATION
-    ├─ find_definitions, find_references 等を使用
+    ├─ find_definitions, find_references, search_text 等を使用
     ├─ mandatory_rules を acknowledge
     └─ submit_understanding
 
-Step 5: シンボル検証
+Step 5: Symbol Validation
     └─ Embedding で NL→Symbol 関連性を検証
 
-Step 6: SEMANTIC（信頼度が低い場合）
+Step 6: SEMANTIC（信頼度が低い場合のみ）
     └─ semantic_search → submit_semantic
 
-Step 7: VERIFICATION（SEMANTIC 実行時）
+Step 7: VERIFICATION（SEMANTIC 実行時のみ）
     └─ 仮説をコードで検証 → submit_verification
 
 Step 8: IMPACT_ANALYSIS
     ├─ 対象ファイルの analyze_impact
-    └─ 全 must_verify ファイルを確認
+    └─ 全 must_verify ファイルを確認 → submit_impact_analysis
 
+    ★ v1.8: skip_implementation=true 時（Intent=INVESTIGATE/QUESTION または --only-explore）:
+       - submit_impact_analysis が exploration_complete=true を返却
+       - 調査結果をユーザーに報告して完了（Step 9 以降をスキップ）
+       - ブランチ未作成、実装フェーズなし
+
+┌─────────────────────────────────────────────────────────────────┐
+│ 実装・検証フェーズ（Server強制）                                 │
+└─────────────────────────────────────────────────────────────────┘
 Step 9: READY
     ├─ 各 Edit/Write 前に check_write_target
     └─ 実装
+    → submit_for_review で PRE_COMMIT へ
 
-Step 9.5: POST_IMPLEMENTATION_VERIFICATION
+Step 9.5: POST_IMPL_VERIFY
     ├─ ファイルタイプに基づき verifier を選択
     ├─ verifier プロンプトを実行（.code-intel/verifiers/）
     ├─ 失敗時は Step 9 に戻る
     └─ 3回連続失敗で介入発動（v1.4）
+    ← --no-verify でスキップ
 
-Step 10: PRE_COMMIT（ゴミ検出）
-    ├─ review_changes（garbage_detection.md）
-    └─ finalize_changes (keep/discard)
+┌─────────────────────────────────────────────────────────────────┐
+│ コミット・品質フェーズ（Server強制）                             │
+└─────────────────────────────────────────────────────────────────┘
+Step 10: PRE_COMMIT（ゴミ検出 + コミット準備）
+    ├─ review_changes（garbage_detection.md で変更をレビュー）
+    └─ finalize_changes（keep/discard 判断 + コミット準備）
+       ★ v1.8: コミット準備のみ（実行は QUALITY_REVIEW 後）
 
-Step 10.5: QUALITY_REVIEW（v1.5）
+Step 10.5: QUALITY_REVIEW（v1.5、v1.8で順序変更）
     ├─ quality_review.md に基づき品質チェック
-    ├─ 問題発見 → submit_quality_review(issues_found=true) → Step 9 (READY) に差し戻し
-    │            → 修正 → Step 9.5 → Step 10 → Step 10.5（再チェック）
-    └─ 問題なし → submit_quality_review(issues_found=false) → merge_to_base へ
+    ├─ 問題発見 → submit_quality_review(issues_found=true)
+    │            → Step 9 (READY) に差し戻し（準備したコミット破棄）
+    └─ 問題なし → submit_quality_review(issues_found=false)
+                 → ★ここでコミット実行 → Step 11 へ
+    ← --no-quality でスキップ
 
-Step 11: Finalize
-    └─ merge_to_base（元のブランチへ）
+┌─────────────────────────────────────────────────────────────────┐
+│ 完了                                                            │
+└─────────────────────────────────────────────────────────────────┘
+Step 11: merge_to_base
+    └─ タスクブランチを元のブランチにマージ
+       セッション完了、結果をユーザーに報告
 ```
 
 ### 検証システム
@@ -657,6 +720,7 @@ get_improvement_insights(limit=100)
 
 | Version | Description | Link |
 |---------|-------------|------|
+| v1.8 | Exploration-Only Mode（探索のみモード - --only-explore） | [v1.8](updates/v1.8_ja.md) |
 | v1.7 | Parallel Execution（並列実行 - 27-35秒削減） | [v1.7](updates/v1.7_ja.md) |
 | v1.6 | Branch Lifecycle（stale 警告、begin_phase_gate） | [v1.6](updates/v1.6_ja.md) |
 | v1.5 | Quality Review（品質レビュー） | [v1.5](updates/v1.5_ja.md) |
