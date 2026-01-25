@@ -935,6 +935,15 @@ class SessionState:
     quality_review_max_revert: int = 3  # Max revert count before forced completion
     quality_review_completed: bool = False  # Whether quality review passed (issues_found=false)
 
+    # v1.8: PRE_COMMIT + QUALITY_REVIEW Order Change
+    commit_prepared: bool = False  # Whether commit is prepared (waiting for quality review)
+    prepared_commit_message: str | None = None  # Commit message for prepared commit
+    prepared_kept_files: list[str] = field(default_factory=list)  # Files to keep for prepared commit
+    prepared_discarded_files: list[str] = field(default_factory=list)  # Files to discard for prepared commit
+
+    # v1.8: Only Explore Mode
+    skip_implementation: bool = False  # Whether to skip implementation phase (--only-explore sets this to True)
+
     # v1.7: Ctags Performance Optimization
     definitions_cache: dict[tuple[str, str, str | None, bool], dict] = field(default_factory=dict)
     cache_stats: dict[str, int] = field(default_factory=lambda: {"hits": 0, "misses": 0})
@@ -1678,6 +1687,31 @@ class SessionState:
             "timestamp": datetime.now().isoformat(),
         })
 
+        # v1.8: If skip_implementation is enabled, do not transition to READY
+        if self.skip_implementation:
+            # Keep phase as IMPACT_ANALYSIS (or could transition to a terminal phase if needed)
+            # Return exploration complete message
+            response = {
+                "success": True,
+                "next_phase": Phase.IMPACT_ANALYSIS.name,
+                "exploration_complete": True,
+                "message": "Exploration complete. Implementation skipped (--only-explore mode).",
+                "verified_count": len(verified),
+                "will_modify": [v.file for v in verified if v.status == "will_modify"],
+            }
+
+            # Check for should_verify warnings
+            should_verify_missing = []
+            for should_file in self.impact_analysis.should_verify:
+                if should_file not in verified_paths:
+                    should_verify_missing.append(should_file)
+
+            if should_verify_missing:
+                response["warning"] = f"Some should_verify files were not verified: {should_verify_missing}"
+
+            return response
+
+        # Normal flow: transition to READY
         self.transition_to_phase(Phase.READY, reason="submit_impact_analysis")
 
         # Check for should_verify warnings
@@ -1826,6 +1860,8 @@ class SessionState:
             # v1.8: Performance tracking data
             "tool_calls": self.tool_calls,  # Includes started_at, completed_at, duration_seconds
             "phase_history": self.phase_history,  # Includes started_at, ended_at, duration_seconds
+            # v1.8: Exploration-only mode flag
+            "skip_implementation": self.skip_implementation,
         }
 
         # v1.2: Add task branch info if enabled

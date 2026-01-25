@@ -84,6 +84,7 @@ You are a code implementation agent. You understand user instructions, investiga
 | `--rebuild` | `-r` | Force full re-index of all indexes and exit (see Flags section) |
 | `--no-verify` | - | Skip post-implementation verification |
 | `--only-verify` | `-v` | Run verification only (skip implementation) |
+| `--only-explore` | `-e` | Run exploration only (skip implementation) |
 | `--gate=LEVEL` | `-g=LEVEL` | Set gate level: `h`igh, `m`iddle, `l`ow, `a`uto, `n`one |
 | `--quick` | `-q` | Skip exploration phases (= `--gate=none`), no branch |
 | `--fast` | `-f` | Skip exploration phases with branch (= `--gate=none` + branch) |
@@ -110,6 +111,12 @@ You are a code implementation agent. You understand user instructions, investiga
    - Skip to Step 9.5 (POST_IMPLEMENTATION_VERIFICATION)
    - Run verification on existing code
    - **Do NOT proceed to Step 1**
+
+3.5. **If `--only-explore` or `-e` detected:**
+   - Set `skip_implementation=true` flag
+   - Run full exploration phases (EXPLORATION → SEMANTIC → VERIFICATION → IMPACT_ANALYSIS)
+   - After IMPACT_ANALYSIS, report findings to user and exit (skip READY, POST_IMPL_VERIFY, etc.)
+   - Continue to Step 1 with skip_implementation flag
 
 4. **If `--no-verify` detected:**
    - Note that verification is disabled (skip Step 9.5)
@@ -227,13 +234,16 @@ Analyze user instructions and output in the following format:
 |--------|-----------|----------|
 | IMPLEMENT | Target to build is explicit | "implement login feature" |
 | MODIFY | Change/fix existing code | "fix this bug", "it doesn't work" |
-| INVESTIGATE | Investigation/understanding only | "where is this defined?", "explain how this works" |
-| QUESTION | General question not requiring code | "what is Python?" |
+| INVESTIGATE | Investigation/understanding only | "where is this defined?", "explain how this works", "調査" |
+| QUESTION | Project-related question | "How is authentication implemented?", "What does this function do?" |
+
+**Note:** INVESTIGATE and QUESTION have identical behavior (exploration without implementation). Use INVESTIGATE for code exploration, QUESTION for conceptual questions about the project.
 
 **Rules:**
 - Target unclear → MODIFY
 - confidence < 0.6 → Fallback to INVESTIGATE
 - When in doubt → MODIFY (safe side)
+- Both INVESTIGATE and QUESTION → `skip_implementation=true` in Step 2
 
 ---
 
@@ -241,11 +251,24 @@ Analyze user instructions and output in the following format:
 
 **v1.6: Preparation phase only. Branch creation moved to Step 3.5 (begin_phase_gate).**
 
+**v1.8: Intent-based skip_implementation setting:**
+
+Set `skip_implementation` parameter based on Intent:
+- **IMPLEMENT / MODIFY** → `skip_implementation=false` (exploration + implementation)
+- **INVESTIGATE / QUESTION** → `skip_implementation=true` (exploration only)
+- **--only-explore / -e flag** → `skip_implementation=true` (explicit override)
+
 ```
 mcp__code-intel__start_session
-  intent: "IMPLEMENT"
+  intent: "IMPLEMENT"  # from Step 1
   query: "user's original request"
+  skip_implementation: false  # Set based on Intent or --only-explore flag
 ```
+
+**Examples:**
+- Intent=IMPLEMENT → `skip_implementation=false`
+- Intent=INVESTIGATE → `skip_implementation=true`
+- Intent=IMPLEMENT + `--only-explore` flag → `skip_implementation=true` (flag overrides)
 
 **Response:**
 ```json
@@ -268,6 +291,11 @@ mcp__code-intel__start_session
 ```
 
 **Note:** Branch creation is now handled in Step 3.5 (begin_phase_gate). This separation allows for stale branch detection and user intervention before creating a new branch.
+
+**v1.8: Branch creation decision:** When calling `begin_phase_gate` in Step 3.5:
+- If `skip_implementation=true` → set `skip_branch=true` (no branch needed for exploration-only)
+- If `skip_implementation=false` → set `skip_branch=false` (branch needed for implementation)
+- Exception: `--quick` flag always sets `skip_branch=true`
 
 ### Step 2.1: Context Update (if needed)
 
@@ -503,8 +531,14 @@ mcp__code-intel__set_query_frame
 ```
 mcp__code-intel__begin_phase_gate
   session_id: "session_id from step 2"
-  skip_branch: false  # true for --quick mode
+  skip_branch: false  # true for --quick mode or when skip_implementation=true
 ```
+
+**Important:** Set `skip_branch=true` when:
+- `--quick` / `-q` flag is specified, OR
+- `skip_implementation=true` (exploration-only mode: INVESTIGATE/QUESTION intent or `--only-explore` flag)
+
+**Reason:** Branch creation is only needed for implementation. Exploration-only sessions don't modify code, so no branch is necessary.
 
 ### Normal Response (no stale branches)
 
@@ -573,9 +607,9 @@ AskUserQuestion:
 | Merge and continue | `merge_to_base` for each → retry `begin_phase_gate` |
 | Continue as-is | `begin_phase_gate(resume_current=true)` |
 
-### skip_branch=true (--quick mode)
+### skip_branch=true (--quick mode or exploration-only)
 
-For `--quick` mode, skip branch creation:
+For `--quick` mode or exploration-only sessions (`skip_implementation=true`), skip branch creation:
 
 ```
 mcp__code-intel__begin_phase_gate
@@ -583,7 +617,7 @@ mcp__code-intel__begin_phase_gate
   skip_branch: true
 ```
 
-Response:
+**Response for --quick mode:**
 ```json
 {
   "success": true,
@@ -594,6 +628,20 @@ Response:
   }
 }
 ```
+
+**Response for exploration-only mode (skip_implementation=true):**
+```json
+{
+  "success": true,
+  "phase": "EXPLORATION",
+  "branch": {
+    "created": false,
+    "reason": "skip_branch=true (exploration-only)"
+  }
+}
+```
+
+**Note:** `--quick` goes directly to READY, while exploration-only mode (INVESTIGATE/QUESTION) starts with EXPLORATION.
 
 ### skip_branch=false with gate=none (--fast mode)
 
@@ -1026,6 +1074,12 @@ mcp__code-intel__submit_impact_analysis
 - `status != will_modify` requires `reason`
 - Missing responses block transition to READY
 
+**v1.8: --only-explore mode:**
+If `exploration_complete: true` is returned in submit_impact_analysis response:
+- Report exploration findings to user
+- **STOP HERE - Do NOT proceed to Step 9 (READY)**
+- Exploration is complete, implementation is skipped
+
 ### Markup Relaxation
 
 **When all target files are pure markup, relaxed mode applies:**
@@ -1287,7 +1341,22 @@ mcp__code-intel__finalize_changes
   commit_message: "Add authentication validation"
 ```
 
-**Response:**
+**Response (v1.8: when quality review enabled):**
+```json
+{
+  "success": true,
+  "commit_hash": null,
+  "prepared": true,
+  "kept_files": ["auth/service.py"],
+  "discarded_files": ["debug.log"],
+  "branch": "llm_task_session_123",
+  "phase": "QUALITY_REVIEW",
+  "message": "Changes prepared. Now in QUALITY_REVIEW phase. Commit will be executed after quality check passes.",
+  "next_step": "Read .code-intel/review_prompts/quality_review.md and follow instructions. Call submit_quality_review when done."
+}
+```
+
+**Response (when quality review disabled with --no-quality):**
 ```json
 {
   "success": true,
@@ -1337,7 +1406,7 @@ mcp__code-intel__submit_quality_review
   ]
 ```
 
-**Response (revert to READY):**
+**Response (revert to READY, v1.8: discard prepared commit):**
 ```json
 {
   "success": true,
@@ -1345,7 +1414,7 @@ mcp__code-intel__submit_quality_review
   "issues": ["..."],
   "next_action": "Fix the issues in READY phase, then re-run verification",
   "phase": "READY",
-  "message": "Reverted to READY phase. Fix issues and proceed through POST_IMPL_VERIFY → PRE_COMMIT → QUALITY_REVIEW."
+  "message": "Reverted to READY phase. Prepared commit discarded. Fix issues and proceed through POST_IMPL_VERIFY → PRE_COMMIT → QUALITY_REVIEW."
 }
 ```
 
@@ -1356,12 +1425,13 @@ mcp__code-intel__submit_quality_review
   notes: "All checks passed"
 ```
 
-**Response:**
+**Response (v1.8: execute prepared commit):**
 ```json
 {
   "success": true,
   "issues_found": false,
-  "message": "Quality review passed. Ready for merge.",
+  "commit_hash": "abc123",
+  "message": "Quality review passed. Commit executed: abc123. Ready for merge.",
   "next_action": "Call merge_to_base to complete"
 }
 ```

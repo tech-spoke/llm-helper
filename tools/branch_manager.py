@@ -82,6 +82,7 @@ class FinalizeResult:
     kept_files: list[str] = field(default_factory=list)
     discarded_files: list[str] = field(default_factory=list)
     error: str | None = None
+    prepared: bool = False  # v1.8: True if commit is prepared but not executed
 
 
 class BranchManager:
@@ -761,17 +762,19 @@ class BranchManager:
         keep_files: list[str] | None = None,
         discard_files: list[str] | None = None,
         commit_message: str | None = None,
+        execute_commit: bool = True,  # v1.8: If False, prepare but don't execute commit
     ) -> FinalizeResult:
         """
         Finalize changes after garbage review.
 
         For discarded files, reverts them to base branch state.
-        Then creates a commit with the kept changes.
+        Then creates a commit with the kept changes (if execute_commit=True).
 
         Args:
             keep_files: Files to keep. If None, keep all.
             discard_files: Files to discard (revert). If None, discard none.
             commit_message: Commit message. Auto-generated if not provided.
+            execute_commit: If True, execute commit. If False, prepare but don't commit (v1.8).
 
         Returns:
             FinalizeResult with commit hash and file lists
@@ -808,6 +811,16 @@ class BranchManager:
                 if commit_message is None:
                     commit_message = f"Session {self._active_session}: Apply {len(files_to_keep)} file(s)"
 
+                # v1.8: If execute_commit=False, prepare but don't commit
+                if not execute_commit:
+                    return FinalizeResult(
+                        success=True,
+                        commit_hash=None,
+                        kept_files=list(files_to_keep),
+                        discarded_files=list(files_to_discard),
+                        prepared=True,
+                    )
+
                 result = await self._run_git(["commit", "-m", commit_message])
 
                 if result.returncode == 0:
@@ -842,6 +855,55 @@ class BranchManager:
                     commit_hash=None,
                     kept_files=[],
                     discarded_files=list(files_to_discard),
+                )
+
+        except Exception as e:
+            return FinalizeResult(
+                success=False,
+                error=str(e),
+            )
+
+    async def execute_prepared_commit(self, commit_message: str) -> FinalizeResult:
+        """
+        Execute a prepared commit (v1.8).
+
+        This should be called after finalize(..., execute_commit=False).
+        Executes the git commit on already-staged changes.
+
+        Args:
+            commit_message: Commit message
+
+        Returns:
+            FinalizeResult with commit hash
+        """
+        if not self._active_session or not self._base_branch:
+            return FinalizeResult(
+                success=False,
+                error="No active session",
+            )
+
+        try:
+            result = await self._run_git(["commit", "-m", commit_message])
+
+            if result.returncode == 0:
+                # Get commit hash
+                hash_result = await self._run_git(["rev-parse", "HEAD"])
+                commit_hash = hash_result.stdout.strip() if hash_result.returncode == 0 else None
+
+                return FinalizeResult(
+                    success=True,
+                    commit_hash=commit_hash,
+                )
+            else:
+                # Check if "nothing to commit"
+                if "nothing to commit" in result.stdout or "nothing to commit" in result.stderr:
+                    return FinalizeResult(
+                        success=True,
+                        commit_hash=None,
+                    )
+                return FinalizeResult(
+                    success=False,
+                    error=f"Git commit failed: {result.stderr}",
                 )
 
         except Exception as e:

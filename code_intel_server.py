@@ -638,6 +638,11 @@ async def list_tools() -> list[Tool]:
                         "description": "v1.5: Skip QUALITY_REVIEW phase (--no-quality flag)",
                         "default": False,
                     },
+                    "skip_implementation": {
+                        "type": "boolean",
+                        "description": "v1.8: Skip implementation phase (--only-explore flag). Exploration will run but implementation will be skipped.",
+                        "default": False,
+                    },
                 },
                 "required": ["intent", "query"],
             },
@@ -1387,6 +1392,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         repo_path = arguments.get("repo_path", ".")
         gate_level = arguments.get("gate_level", "high")
         skip_quality = arguments.get("skip_quality", False)
+        skip_implementation = arguments.get("skip_implementation", False)
+        print(f"[DEBUG start_session] skip_implementation argument = {skip_implementation}, type = {type(skip_implementation)}")
 
         # v1.6: enable_overlay/enable_branch parameter removed (branch creation moved to begin_phase_gate)
         # These parameters are no longer used
@@ -1400,6 +1407,9 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
         # v1.5: Set quality review enabled/disabled
         session.quality_review_enabled = not skip_quality
+
+        # v1.8: Set skip_implementation flag
+        session.skip_implementation = skip_implementation
 
         # Get extraction prompt for QueryFrame
         extraction_prompt = QueryDecomposer.get_extraction_prompt(query)
@@ -1584,20 +1594,33 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 }
                 return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
-        # Handle skip_branch (--quick mode)
+        # Handle skip_branch
         if skip_branch:
-            # Transition directly to READY without creating branch
-            session.transition_to_phase(Phase.READY, reason="skip_branch")
             session.task_branch_enabled = False
 
-            result = {
-                "success": True,
-                "phase": "READY",
-                "branch": {
-                    "created": False,
-                    "reason": "skip_branch=true (quick mode)",
-                },
-            }
+            # v1.8: Differentiate between --quick mode and exploration-only mode
+            if session.skip_implementation:
+                # Exploration-only mode (INVESTIGATE/QUESTION): start with EXPLORATION
+                session.transition_to_phase(Phase.EXPLORATION, reason="skip_branch (exploration-only)")
+                result = {
+                    "success": True,
+                    "phase": "EXPLORATION",
+                    "branch": {
+                        "created": False,
+                        "reason": "skip_branch=true (exploration-only)",
+                    },
+                }
+            else:
+                # --quick mode: skip directly to READY
+                session.transition_to_phase(Phase.READY, reason="skip_branch (quick mode)")
+                result = {
+                    "success": True,
+                    "phase": "READY",
+                    "branch": {
+                        "created": False,
+                        "reason": "skip_branch=true (quick mode)",
+                    },
+                }
             return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
         # Handle resume_current
@@ -2008,14 +2031,26 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         if not review_result.get("success"):
             return [TextContent(type="text", text=json.dumps(review_result, indent=2, ensure_ascii=False))]
 
-        # Apply changes using branch manager
+        # v1.8: Apply changes using branch manager
+        # If quality_review_enabled, prepare commit but don't execute (for quality check first)
+        # If quality_review_disabled, execute commit immediately
+        execute_commit_now = not session.quality_review_enabled
+
         finalize_result = await branch_manager.finalize(
             keep_files=review_result.get("kept_files"),
             discard_files=review_result.get("discarded_files"),
             commit_message=commit_message,
+            execute_commit=execute_commit_now,  # v1.8: Skip commit if quality review is enabled
         )
 
         if finalize_result.success:
+            # v1.8: Store commit preparation state
+            if finalize_result.prepared:
+                session.commit_prepared = True
+                session.prepared_commit_message = commit_message
+                session.prepared_kept_files = finalize_result.kept_files
+                session.prepared_discarded_files = finalize_result.discarded_files
+
             # v1.5: Transition to QUALITY_REVIEW phase (if enabled)
             if session.quality_review_enabled:
                 # Check if quality_review.md exists
@@ -2040,12 +2075,13 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                     session.transition_to_phase(Phase.QUALITY_REVIEW, reason="finalize_changes")
                     result = {
                         "success": True,
-                        "commit_hash": finalize_result.commit_hash,
+                        "commit_hash": None if finalize_result.prepared else finalize_result.commit_hash,  # v1.8: No commit hash yet if prepared
+                        "prepared": finalize_result.prepared,  # v1.8
                         "kept_files": finalize_result.kept_files,
                         "discarded_files": finalize_result.discarded_files,
                         "branch": session.task_branch_name,
                         "phase": "QUALITY_REVIEW",
-                        "message": f"Changes finalized. Committed to {session.task_branch_name}. Now in QUALITY_REVIEW phase.",
+                        "message": f"Changes prepared. Now in QUALITY_REVIEW phase. Commit will be executed after quality check passes." if finalize_result.prepared else f"Changes finalized. Committed to {session.task_branch_name}. Now in QUALITY_REVIEW phase.",
                         "next_step": "Read .code-intel/review_prompts/quality_review.md and follow instructions. Call submit_quality_review when done.",
                     }
             else:
@@ -2119,6 +2155,12 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 }
                 return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
+            # v1.8: Clear commit preparation state when reverting
+            session.commit_prepared = False
+            session.prepared_commit_message = None
+            session.prepared_kept_files = []
+            session.prepared_discarded_files = []
+
             # Revert to READY phase for fixes
             session.transition_to_phase(Phase.READY, reason="quality_review_issues_found")
             result = {
@@ -2128,16 +2170,38 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 "revert_count": session.quality_revert_count,
                 "next_action": "Fix the issues in READY phase, then re-run verification",
                 "phase": "READY",
-                "message": "Reverted to READY phase. Fix issues and proceed through POST_IMPL_VERIFY → PRE_COMMIT → QUALITY_REVIEW.",
+                "message": "Reverted to READY phase. Prepared commit discarded. Fix issues and proceed through POST_IMPL_VERIFY → PRE_COMMIT → QUALITY_REVIEW.",
             }
         else:
+            # v1.8: No issues - execute prepared commit if it exists
+            commit_hash = None
+            if session.commit_prepared:
+                # Execute the prepared commit
+                repo_path = session.repo_path or "."
+                branch_manager = _get_or_recreate_branch_manager(session, repo_path)
+                if branch_manager:
+                    commit_result = await branch_manager.execute_prepared_commit(
+                        commit_message=session.prepared_commit_message or "Quality review passed"
+                    )
+                    if commit_result.success:
+                        commit_hash = commit_result.commit_hash
+                        session.commit_prepared = False  # Clear preparation state
+                    else:
+                        result = {
+                            "success": False,
+                            "error": "commit_execution_failed",
+                            "message": f"Failed to execute prepared commit: {commit_result.error}",
+                        }
+                        return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+
             # No issues - mark quality review as completed and ready for merge
             session.quality_review_completed = True
             result = {
                 "success": True,
                 "issues_found": False,
                 "notes": notes,
-                "message": "Quality review passed. Ready for merge.",
+                "commit_hash": commit_hash,  # v1.8: Include commit hash if executed
+                "message": f"Quality review passed. Commit executed: {commit_hash}. Ready for merge." if commit_hash else "Quality review passed. Ready for merge.",
                 "next_action": "Call merge_to_base to complete",
             }
 
