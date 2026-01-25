@@ -672,7 +672,8 @@ your-project/
 
 | Version | Description | Link |
 |---------|-------------|------|
-| v1.8 | Exploration-Only Mode（探索のみモード - --only-explore） | [v1.8](docs/updates/v1.8_ja.md) |
+| v1.9 | sync_index バッチ処理、VERIFICATION+IMPACT_ANALYSIS統合（15-20秒削減） | [v1.9](docs/updates/v1.9_ja.md) |
+| v1.8 | Exploration-Only Mode（Intent自動判定 + --only-explore、ブランチ作成なし） | [v1.8](docs/updates/v1.8_ja.md) |
 | v1.7 | Parallel Execution（並列実行 - 27-35秒削減） | [v1.7](docs/updates/v1.7_ja.md) |
 | v1.6 | Branch Lifecycle（stale 警告、begin_phase_gate） | [v1.6](docs/updates/v1.6_ja.md) |
 | v1.5 | Quality Review（品質レビュー） | [v1.5](docs/updates/v1.5_ja.md) |

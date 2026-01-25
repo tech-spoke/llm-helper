@@ -688,7 +688,8 @@ For version history and detailed changes, see:
 
 | Version | Description | Link |
 |---------|-------------|------|
-| v1.8 | Exploration-Only Mode (--only-explore) | [v1.8](docs/updates/v1.8.md) |
+| v1.9 | sync_index batch processing, VERIFICATION+IMPACT_ANALYSIS integration (saves 15-20s) | [v1.9](docs/updates/v1.9.md) |
+| v1.8 | Exploration-Only Mode (Intent-based + --only-explore, no branch creation) | [v1.8](docs/updates/v1.8.md) |
 | v1.7 | Parallel Execution (search_text, Read, Grep - saves 27-35s) | [v1.7](docs/updates/v1.7.md) |
 | v1.6 | Branch Lifecycle (stale warning, begin_phase_gate) | [v1.6](docs/updates/v1.6.md) |
 | v1.5 | Quality Review with retry loop | [v1.5](docs/updates/v1.5.md) |
