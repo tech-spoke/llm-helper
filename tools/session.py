@@ -125,14 +125,14 @@ def is_markup_context(files: list[str], target_files: list[str] | None = None) -
 
 class Phase(Enum):
     """Execution phases in order."""
-    EXPLORATION = auto()      # Phase 1: code-intel required
-    SEMANTIC = auto()         # Phase 2: semantic search allowed (if needed)
-    VERIFICATION = auto()     # Phase 3: verify semantic hypotheses (deprecated in v1.9, use VERIFICATION_AND_IMPACT)
-    IMPACT_ANALYSIS = auto()  # Phase 4: analyze impact before implementation (v1.1) (deprecated in v1.9, use VERIFICATION_AND_IMPACT)
-    VERIFICATION_AND_IMPACT = auto()  # Phase 3+4 integrated: verify hypotheses + analyze impact (v1.9)
-    READY = auto()            # Phase 5: implementation allowed
-    PRE_COMMIT = auto()       # Phase 6: garbage detection before commit (v1.2)
-    QUALITY_REVIEW = auto()   # Phase 7: quality check before merge (v1.5)
+    EXPLORATION = auto()                 # Phase 1: code-intel required
+    SEMANTIC = auto()                    # Phase 2: semantic search allowed (if needed)
+    VERIFICATION_AND_IMPACT = auto()     # Phase 3: verify hypotheses + analyze impact (v1.9 integrated)
+    VERIFICATION = auto()                # Phase 3 (deprecated in v1.9, use VERIFICATION_AND_IMPACT)
+    IMPACT_ANALYSIS = auto()             # Phase 4 (deprecated in v1.9, use VERIFICATION_AND_IMPACT)
+    READY = auto()                       # Phase 5: implementation allowed
+    PRE_COMMIT = auto()                  # Phase 6: garbage detection before commit (v1.2)
+    QUALITY_REVIEW = auto()              # Phase 7: quality check before merge (v1.5)
 
 
 class SemanticReason(Enum):
@@ -1522,12 +1522,14 @@ class SessionState:
             "timestamp": datetime.now().isoformat(),
         })
 
-        self.transition_to_phase(Phase.VERIFICATION, reason="submit_semantic")
+        # v1.9: Transition to integrated VERIFICATION_AND_IMPACT phase
+        self.transition_to_phase(Phase.VERIFICATION_AND_IMPACT, reason="submit_semantic")
         return {
             "success": True,
-            "next_phase": Phase.VERIFICATION.name,
-            "message": "Semantic search complete. Now verify hypotheses with code-intel.",
+            "next_phase": Phase.VERIFICATION_AND_IMPACT.name,
+            "message": "Semantic search complete. Now verify hypotheses and analyze impact (integrated phase).",
             "hypotheses_to_verify": [h.to_dict() for h in result.hypotheses],
+            "next_step": "Call analyze_impact first, then submit_verification_and_impact with both verified hypotheses and verified_files.",
         }
 
     def submit_verification(self, result: VerificationResult) -> dict:

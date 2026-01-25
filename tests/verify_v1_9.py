@@ -22,9 +22,19 @@ def test_batch_processing_method_exists():
 
 
 def test_integrated_phase_exists():
-    """Verify VERIFICATION_AND_IMPACT phase exists"""
+    """Verify VERIFICATION_AND_IMPACT phase exists and has correct order"""
     assert hasattr(Phase, 'VERIFICATION_AND_IMPACT'), "VERIFICATION_AND_IMPACT phase not found"
-    print("✓ Phase.VERIFICATION_AND_IMPACT exists")
+
+    # Check phase order
+    phase_values = list(Phase)
+    verif_impact_idx = phase_values.index(Phase.VERIFICATION_AND_IMPACT)
+    semantic_idx = phase_values.index(Phase.SEMANTIC)
+    ready_idx = phase_values.index(Phase.READY)
+
+    assert semantic_idx < verif_impact_idx < ready_idx, \
+        f"Phase order incorrect: SEMANTIC={semantic_idx}, VERIFICATION_AND_IMPACT={verif_impact_idx}, READY={ready_idx}"
+
+    print("✓ Phase.VERIFICATION_AND_IMPACT exists with correct order")
 
 
 def test_integrated_method_exists():

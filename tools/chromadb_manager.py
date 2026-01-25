@@ -258,26 +258,40 @@ class ChromaDBManager:
                     logger.error(f"Failed to delete chunks for {file_path}: {e}")
                     result.errors += 1
 
-            # バッチでインデックス
-            file_chunk_counts = self._index_files_batch(modified)
-            for file_path, chunk_count in file_chunk_counts.items():
-                try:
-                    self.sync_state.mark_indexed(file_path, chunk_count)
-                    result.modified += 1
-                except Exception as e:
-                    logger.error(f"Failed to mark indexed {file_path}: {e}")
-                    result.errors += 1
+            # v1.9: バッチでインデックス（エラーハンドリング付き）
+            try:
+                file_chunk_counts = self._index_files_batch(modified)
+                for file_path, chunk_count in file_chunk_counts.items():
+                    if chunk_count >= 0:  # -1 はエラー
+                        try:
+                            self.sync_state.mark_indexed(file_path, chunk_count)
+                            result.modified += 1
+                        except Exception as e:
+                            logger.error(f"Failed to mark indexed {file_path}: {e}")
+                            result.errors += 1
+                    else:
+                        result.errors += 1
+            except Exception as e:
+                logger.error(f"Batch indexing failed for modified files: {e}")
+                result.errors += len(modified)
 
-        # v1.9: 新規ファイルをバッチ処理でインデックス
+        # v1.9: 新規ファイルをバッチ処理でインデックス（エラーハンドリング付き）
         if added:
-            file_chunk_counts = self._index_files_batch(added)
-            for file_path, chunk_count in file_chunk_counts.items():
-                try:
-                    self.sync_state.mark_indexed(file_path, chunk_count)
-                    result.added += 1
-                except Exception as e:
-                    logger.error(f"Failed to mark indexed {file_path}: {e}")
-                    result.errors += 1
+            try:
+                file_chunk_counts = self._index_files_batch(added)
+                for file_path, chunk_count in file_chunk_counts.items():
+                    if chunk_count >= 0:  # -1 はエラー
+                        try:
+                            self.sync_state.mark_indexed(file_path, chunk_count)
+                            result.added += 1
+                        except Exception as e:
+                            logger.error(f"Failed to mark indexed {file_path}: {e}")
+                            result.errors += 1
+                    else:
+                        result.errors += 1
+            except Exception as e:
+                logger.error(f"Batch indexing failed for added files: {e}")
+                result.errors += len(added)
 
         # 同期完了時刻を記録
         self.sync_state.mark_sync_completed()
@@ -362,18 +376,29 @@ class ChromaDBManager:
 
         return len(unique_data)
 
-    def _index_files_batch(self, file_paths: list[Path]) -> dict[Path, int]:
+    def _index_files_batch(self, file_paths: list[Path], batch_size: int = 100) -> dict[Path, int]:
         """
         v1.9: 複数ファイルをバッチ処理でインデックス
 
         Args:
             file_paths: インデックス対象のファイルパスリスト
+            batch_size: バッチサイズ（メモリ制限のため、デフォルト100ファイル）
 
         Returns:
             ファイルパスとチャンク数のマッピング
         """
         if not file_paths:
             return {}
+
+        # v1.9: バッチサイズ制限によるメモリ対策
+        # 100ファイルを超える場合は分割処理
+        if len(file_paths) > batch_size:
+            all_results = {}
+            for i in range(0, len(file_paths), batch_size):
+                batch = file_paths[i:i + batch_size]
+                batch_results = self._index_files_batch(batch, batch_size)
+                all_results.update(batch_results)
+            return all_results
 
         # 全ファイルのチャンクを収集
         all_ids = []
@@ -418,13 +443,20 @@ class ChromaDBManager:
                 seen_ids.add(id_)
                 unique_data.append((all_ids[i], all_documents[i], all_metadatas[i]))
 
-        # バッチで一括追加
+        # v1.9: バッチで一括追加（エラーハンドリング付き）
         if unique_data:
-            self.forest_collection.upsert(
-                ids=[d[0] for d in unique_data],
-                documents=[d[1] for d in unique_data],
-                metadatas=[d[2] for d in unique_data],
-            )
+            try:
+                self.forest_collection.upsert(
+                    ids=[d[0] for d in unique_data],
+                    documents=[d[1] for d in unique_data],
+                    metadatas=[d[2] for d in unique_data],
+                )
+            except Exception as e:
+                logger.error(f"Failed to upsert batch ({len(unique_data)} chunks): {e}")
+                # エラー時は全ファイルを失敗としてマーク
+                for file_path in file_chunk_counts.keys():
+                    file_chunk_counts[file_path] = -1  # -1 = error
+                raise  # エラーを呼び出し元に伝播
 
         return file_chunk_counts
 

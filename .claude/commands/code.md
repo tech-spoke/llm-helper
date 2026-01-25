@@ -30,8 +30,8 @@ You are a code implementation agent. You understand user instructions, investiga
 │      └── Must include rule_acknowledgment [v1.3]                            │
 │  Step 5: Symbol Validation                                                  │
 │  Step 6: SEMANTIC (Only if confidence=low)                                  │
-│  Step 7: VERIFICATION (Only if SEMANTIC executed)                           │
-│  Step 8: IMPACT ANALYSIS                                                    │
+│  Step 7: VERIFICATION_AND_IMPACT [v1.9] (if SEMANTIC executed)              │
+│  Step 8: IMPACT ANALYSIS (standalone, if SEMANTIC not needed)               │
 │                                                                             │
 │  ← Skip this entire block with --quick / -q / --fast / -f / -g=n            │
 └─────────────────────────────────────────────────────────────────────────────┘
@@ -62,8 +62,8 @@ You are a code implementation agent. You understand user instructions, investiga
 | 4 | EXPLORATION | Explore codebase with code-intel tools |
 | 5 | Symbol Validation | Verify NL→Symbol relevance via Embedding |
 | 6 | SEMANTIC | Semantic search for missing info (if needed) |
-| 7 | VERIFICATION | Verify hypotheses with actual code (if needed) |
-| 8 | IMPACT ANALYSIS | Analyze affected files before implementation |
+| 7 | VERIFICATION_AND_IMPACT | v1.9: Integrated verification + impact (if SEMANTIC executed) |
+| 8 | IMPACT ANALYSIS | Standalone impact analysis (if SEMANTIC not needed) |
 | 9 | READY | Implementation allowed (Edit/Write) |
 | 9.5 | POST_IMPL_VERIFY | Run verifier prompts (Playwright/pytest) |
 | 10 | PRE_COMMIT | Review changes, discard garbage |
@@ -935,13 +935,21 @@ mcp__code-intel__submit_semantic
 
 ---
 
-## Step 7: VERIFICATION Phase (Only if needed)
+## Step 7: VERIFICATION_AND_IMPACT Phase (v1.9 Integrated)
 
-**Purpose:** Verify SEMANTIC hypotheses with actual code and promote to FACT
+**Purpose:** Verify SEMANTIC hypotheses AND analyze impact in a single integrated phase
 
-**When executed:** After SEMANTIC phase
+**When executed:** After SEMANTIC phase (if SEMANTIC was executed)
 
-### ⚡ Parallel Execution in VERIFICATION
+**Note:** v1.9 integrates VERIFICATION + IMPACT_ANALYSIS to eliminate LLM round-trip wait (10s reduction).
+
+### Phase Steps
+
+#### 7.1: Verify Hypotheses
+
+**Verify SEMANTIC hypotheses with actual code:**
+
+### ⚡ Parallel Execution in Hypothesis Verification
 
 **When verifying multiple hypotheses, use tools in parallel:**
 
@@ -962,9 +970,67 @@ Or when reading verification files:
 <Read file_path="repositories/UserRepository.py" />
 ```
 
-**Phase completion:**
+**Prepare verified hypotheses:**
+```json
+{
+  "hypothesis": "AuthService is called from Controller",
+  "status": "confirmed",
+  "evidence": {
+    "tool": "find_references",
+    "target": "AuthService",
+    "result": "AuthService.login() called at UserController.py:45",
+    "files": ["controllers/UserController.py"]
+  }
+}
 ```
-mcp__code-intel__submit_verification
+
+#### 7.2: Analyze Impact
+
+**Call analyze_impact to identify affected files:**
+
+```
+mcp__code-intel__analyze_impact
+  target_files: ["app/Models/Product.php"]
+  change_description: "Change price field type"
+```
+
+**Response:**
+```json
+{
+  "impact_analysis": {
+    "mode": "standard",
+    "static_references": {
+      "callers": [
+        {"file": "app/Services/CartService.php", "line": 45}
+      ]
+    }
+  },
+  "confirmation_required": {
+    "must_verify": ["app/Services/CartService.php"],
+    "should_verify": ["tests/Feature/ProductTest.php"]
+  }
+}
+```
+
+### ⚡ Parallel Execution in Impact Verification
+
+**When verifying multiple must_verify or should_verify files:**
+
+✅ **CORRECT (parallel execution)**:
+Read all files to verify in a **SINGLE message**:
+```xml
+<Read file_path="app/Services/CartService.php" />
+<Read file_path="tests/Feature/ProductTest.php" />
+<Read file_path="database/factories/ProductFactory.php" />
+```
+→ All files are read in parallel (saves 4-6 seconds)
+
+#### 7.3: Integrated Submission (v1.9)
+
+**Call submit_verification_and_impact with BOTH verified hypotheses AND verified files:**
+
+```
+mcp__code-intel__submit_verification_and_impact
   verified: [
     {
       "hypothesis": "AuthService is called from Controller",
@@ -977,11 +1043,51 @@ mcp__code-intel__submit_verification
       }
     }
   ]
+  verified_files: [
+    {
+      "file": "app/Services/CartService.php",
+      "status": "will_modify",
+      "reason": null
+    },
+    {
+      "file": "tests/Feature/ProductTest.php",
+      "status": "no_change_needed",
+      "reason": "Test uses mock data, not affected"
+    }
+  ]
+  inferred_from_rules: ["Added ProductResource.php based on project_rules"]
 ```
+
+**Status values:**
+| Status | Meaning |
+|--------|---------|
+| will_modify | Will modify this file |
+| no_change_needed | Checked, no changes required |
+| not_affected | Not affected by changes |
+
+**Validation (server-enforced):**
+- At least one verified hypothesis required
+- All `must_verify` files must have a response
+- `status != will_modify` requires `reason`
+- Missing responses block transition to READY
+
+**v1.8: --only-explore mode:**
+If `exploration_complete: true` is returned in response:
+- Report exploration findings to user
+- **STOP HERE - Do NOT proceed to Step 9 (READY)**
+- Exploration is complete, implementation is skipped
 
 ---
 
-## Step 8: IMPACT ANALYSIS (v1.1)
+## Step 8: IMPACT ANALYSIS (v1.1) [Deprecated - Use Step 7 for v1.9]
+
+**Note:** This step is now integrated into Step 7 (VERIFICATION_AND_IMPACT).
+The standalone IMPACT_ANALYSIS phase is deprecated in v1.9.
+
+**For backward compatibility:** When EXPLORATION phase has high confidence (no SEMANTIC needed),
+skip directly to this step for impact analysis only.
+
+## Step 8 (Standalone IMPACT ANALYSIS - Only when SEMANTIC not executed)
 
 **Purpose:** Before implementation, analyze impact of changes and verify affected files
 
