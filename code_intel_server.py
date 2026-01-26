@@ -1043,7 +1043,7 @@ async def list_tools() -> list[Tool]:
             name="cleanup_stale_branches",
             description="Clean up stale task branches from interrupted runs. "
                         "Use when task branches remain after session interruption. "
-                        "Deletes orphaned llm_task_* branches.",
+                        "action='delete' removes branches, action='merge' merges to base then removes.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -1051,6 +1051,12 @@ async def list_tools() -> list[Tool]:
                         "type": "string",
                         "description": "Repository path to clean up (default: current directory)",
                         "default": ".",
+                    },
+                    "action": {
+                        "type": "string",
+                        "enum": ["delete", "merge"],
+                        "description": "Action to take: 'delete' removes branches, 'merge' merges to base branch then removes",
+                        "default": "delete",
                     },
                 },
             },
@@ -2436,24 +2442,33 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
     elif name == "cleanup_stale_branches":
         # v1.2.1: Clean up stale task branches from interrupted runs
+        # v1.10: Added action parameter (delete/merge)
         repo_path = arguments.get("repo_path", ".")
+        action = arguments.get("action", "delete")
 
-        cleanup_result = await BranchManager.cleanup_stale_sessions(repo_path)
+        cleanup_result = await BranchManager.cleanup_stale_sessions(repo_path, action=action)
 
         deleted_count = len(cleanup_result.get("deleted_branches", []))
+        merged_count = len(cleanup_result.get("merged_branches", []))
         checked_out_to = cleanup_result.get("checked_out_to")
 
-        message = f"Cleaned up {deleted_count} stale branches."
+        if action == "merge":
+            message = f"Merged {merged_count} branches, deleted {deleted_count} stale branches."
+        else:
+            message = f"Cleaned up {deleted_count} stale branches."
         if checked_out_to:
             message = f"Checked out to '{checked_out_to}'. " + message
 
         result = {
             "success": True,
+            "action": action,
             "deleted_branches": cleanup_result.get("deleted_branches", []),
             "errors": cleanup_result.get("errors", []),
             "message": message,
         }
 
+        if cleanup_result.get("merged_branches"):
+            result["merged_branches"] = cleanup_result["merged_branches"]
         if checked_out_to:
             result["checked_out_to"] = checked_out_to
 

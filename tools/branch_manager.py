@@ -421,20 +421,22 @@ class BranchManager:
             }
 
     @classmethod
-    async def cleanup_stale_sessions(cls, repo_path: str) -> dict:
+    async def cleanup_stale_sessions(cls, repo_path: str, action: str = "delete") -> dict:
         """
         Clean up stale task branches from interrupted runs.
 
         If currently on a llm_task_* branch, extracts base branch from
         the branch name (llm_task_{session}_from_{base}) and checks out
-        to base branch before deleting.
+        to base branch before processing.
 
         Args:
             repo_path: Path to the git repository root
+            action: "delete" to delete branches, "merge" to merge then delete
 
         Returns:
             {
                 "deleted_branches": list,
+                "merged_branches": list (only if action="merge"),
                 "errors": list,
                 "checked_out_to": str or None (if switched branch),
             }
@@ -442,6 +444,7 @@ class BranchManager:
         repo = Path(repo_path).resolve()
         errors = []
         deleted_branches = []
+        merged_branches = []
         checked_out_to = None
 
         try:
@@ -522,6 +525,25 @@ class BranchManager:
                         errors.append(f"Skipped {branch}: currently checked out")
                         continue
 
+                    # Merge branch if action="merge"
+                    if action == "merge":
+                        try:
+                            proc = await asyncio.create_subprocess_exec(
+                                "git", "merge", branch, "--no-edit",
+                                cwd=str(repo),
+                                stdout=asyncio.subprocess.PIPE,
+                                stderr=asyncio.subprocess.PIPE,
+                            )
+                            stdout, stderr = await proc.communicate()
+                            if proc.returncode == 0:
+                                merged_branches.append(branch)
+                            else:
+                                errors.append(f"Failed to merge {branch}: {stderr.decode().strip()}")
+                                continue  # Skip deletion if merge failed
+                        except Exception as e:
+                            errors.append(f"Merge branch {branch}: {e}")
+                            continue  # Skip deletion if merge failed
+
                     # Delete branch
                     try:
                         proc = await asyncio.create_subprocess_exec(
@@ -545,6 +567,8 @@ class BranchManager:
             "deleted_branches": deleted_branches,
             "errors": errors,
         }
+        if merged_branches:
+            result["merged_branches"] = merged_branches
         if checked_out_to:
             result["checked_out_to"] = checked_out_to
 
