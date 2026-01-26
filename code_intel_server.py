@@ -792,9 +792,9 @@ async def list_tools() -> list[Tool]:
                         "description": "Phase to check necessity for",
                     },
                     "assessment": {
-                        "type": "object",
-                        "description": "Necessity assessment for the phase",
-                        "oneOf": [
+                        "type": ["object", "string"],
+                        "description": "Necessity assessment for the phase (object or JSON string)",
+                        "anyOf": [
                             {
                                 "description": "Q1: SEMANTIC necessity check",
                                 "properties": {
@@ -1968,6 +1968,14 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         else:
             phase = arguments["phase"]
             assessment = arguments["assessment"]
+
+            # Handle string-serialized assessment (MCP client workaround)
+            if isinstance(assessment, str):
+                try:
+                    assessment = json.loads(assessment)
+                except json.JSONDecodeError as e:
+                    result = {"error": "invalid_assessment", "message": f"Failed to parse assessment JSON: {e}"}
+                    return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
             # Validate assessment fields based on phase
             valid, error_msg = _validate_phase_assessment(phase, assessment)
