@@ -167,8 +167,9 @@ for pattern in "${FINAL_EXCLUDES[@]}"; do
     \"$pattern\""
 done
 
-# Generate config.json
-cat > "$PROJECT_PATH/.code-intel/config.json" << EOF
+# Generate config.json (only if not exists - preserve user settings)
+if [ ! -f "$PROJECT_PATH/.code-intel/config.json" ]; then
+    cat > "$PROJECT_PATH/.code-intel/config.json" << EOF
 {
   "version": "1.0",
   "embedding_model": "multilingual-e5-small",
@@ -188,7 +189,10 @@ cat > "$PROJECT_PATH/.code-intel/config.json" << EOF
   }
 }
 EOF
-echo "  ✓ .code-intel/config.json"
+    echo "  ✓ .code-intel/config.json"
+else
+    echo "  - .code-intel/config.json already exists (skipped)"
+fi
 
 # Generate context.yml (only if not exists - preserve user settings)
 if [ ! -f "$PROJECT_PATH/.code-intel/context.yml" ]; then
@@ -284,10 +288,24 @@ fi
 if [ -d "$SCRIPT_DIR/.claude" ]; then
     mkdir -p "$PROJECT_PATH/.claude/commands"
 
-    # Copy CLAUDE.md
-    if [ -f "$SCRIPT_DIR/.claude/CLAUDE.md" ] && [ ! -f "$PROJECT_PATH/.claude/CLAUDE.md" ]; then
-        cp "$SCRIPT_DIR/.claude/CLAUDE.md" "$PROJECT_PATH/.claude/"
-        echo "  ✓ .claude/CLAUDE.md"
+    # Generate CLAUDE.md template (project-specific rules)
+    if [ ! -f "$PROJECT_PATH/.claude/CLAUDE.md" ]; then
+        PROJECT_NAME=$(basename "$PROJECT_PATH")
+        cat > "$PROJECT_PATH/.claude/CLAUDE.md" << EOF
+# $PROJECT_NAME
+
+## Core Rules
+
+1. **Always use parallel execution** when making multiple tool calls
+2. **Use \`/code\`** for guided implementation workflow with phase gates
+
+See [PARALLEL_GUIDE.md](PARALLEL_GUIDE.md) for details.
+
+## Project-Specific Rules
+
+<!-- Add your project-specific rules here -->
+EOF
+        echo "  ✓ .claude/CLAUDE.md (template)"
     fi
 
     # Copy PARALLEL_GUIDE.md
@@ -325,9 +343,11 @@ GITIGNORE_ENTRIES="
 # Code Intel MCP Server
 .code-intel/vectors-*.db
 .code-intel/chroma/
+.code-intel/ctags_cache/
 .code-intel/sync_state.json
 .code-intel/.last_sync
 .code-intel/learned_pairs.json
+.code-intel/logs/
 "
 
 if [ -f "$PROJECT_PATH/.gitignore" ]; then
@@ -343,8 +363,14 @@ else
 fi
 
 # Get paths for MCP config
-PYTHON_PATH="$SCRIPT_DIR/venv/bin/python"
 SERVER_PATH="$SCRIPT_DIR/code_intel_server.py"
+if [ -f "$SCRIPT_DIR/venv/bin/python" ]; then
+    PYTHON_PATH="$SCRIPT_DIR/venv/bin/python"
+else
+    # Fallback to system python
+    PYTHON_PATH=$(which python3 || which python)
+    echo "  ⚠ venv not found, using system Python: $PYTHON_PATH"
+fi
 
 echo ""
 echo "=== Initialization Complete ==="
