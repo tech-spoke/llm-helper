@@ -3166,6 +3166,24 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                     result = {"error": "invalid_inferred_from_rules", "message": f"Failed to parse inferred_from_rules JSON: {e}"}
                     return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
+            # Normalize file paths to absolute paths for matching with must_verify
+            repo_path = Path(session.repo_path).resolve()
+            normalized_verified_files = []
+            for vf in verified_files:
+                file_path = vf.get("file", "")
+                if file_path and not Path(file_path).is_absolute():
+                    file_path = str((repo_path / file_path).resolve())
+                normalized_verified_files.append({**vf, "file": file_path})
+            verified_files = normalized_verified_files
+
+            # Also normalize inferred_from_rules paths
+            normalized_inferred = []
+            for path_str in inferred_from_rules:
+                if path_str and not Path(path_str).is_absolute():
+                    path_str = str((repo_path / path_str).resolve())
+                normalized_inferred.append(path_str)
+            inferred_from_rules = normalized_inferred
+
             result = session.submit_impact_analysis(
                 verified_files=verified_files,
                 inferred_from_rules=inferred_from_rules,
