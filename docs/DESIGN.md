@@ -118,7 +118,7 @@ Step 1:   Intent Classification   Classify as IMPLEMENT/MODIFY/INVESTIGATE/QUEST
 Step 2:   Session Start           Start session, get project_rules (no branch yet)
 Step 2.5: DOCUMENT_RESEARCH       Document research (sub-agent) ← skip with --no-doc-research
 Step 3:   QueryFrame Setup        Decompose request into structured slots
-Step 3.5: begin_phase_gate        Start phase gates, create branch, stale warning
+Step 3.5: begin_phase_gate        Start phase gates (no branch yet), stale warning
 
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │  Exploration Phase (Server enforced)                                        │
@@ -141,16 +141,18 @@ Step 6:   VERIFICATION            Hypothesis verification (only if Q2=YES)
           ↓
 Step 6.5: Q3 Check                Is impact range confirmation needed?
           ├─ YES → Execute IMPACT_ANALYSIS
-          └─ NO → Skip IMPACT_ANALYSIS
+          └─ NO → Skip IMPACT_ANALYSIS (+ create branch → READY)
           ↓
 Step 7:   IMPACT_ANALYSIS         Impact range analysis (only if Q3=YES)
           ↓
           [If --only-explore: End here, report findings to user]
+          [Normal flow: create branch → READY]
 
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │  Implementation & Verification Phase (Server enforced)                      │
 └─────────────────────────────────────────────────────────────────────────────┘
 Step 8:   READY                   Implementation (Edit/Write/Bash allowed)
+                                  ★ v1.11: Branch created at transition to READY
 Step 8.5: POST_IMPL_VERIFY        Post-implementation verification (verifier prompts)
                                   ← skip with --no-verify
                                   On failure, loop back to Step 8 (max 3 times)
@@ -198,13 +200,17 @@ Controlled by skill prompt (code.md). Server not involved.
 - Passes `skip_implementation` parameter to Session Start (Step 2)
 - After IMPACT_ANALYSIS (Step 8) completion, skips implementation phases and exits
 
-### 2. Phase Gate Start (v1.6)
+### 2. Phase Gate Start (v1.6, updated v1.11)
 
-After preparation, `begin_phase_gate` creates the task branch and starts phase gates.
+After preparation, `begin_phase_gate` starts phase gates (branch creation deferred to READY transition).
 
 **Stale Branch Detection:**
 - If `llm_task_*` branches exist while not on a task branch, user intervention is required
 - Three options: Delete, Merge, or Continue as-is
+
+**Branch Creation (v1.11):**
+- Branch is created when transitioning to READY phase (not at begin_phase_gate)
+- This allows exploration to complete before committing to implementation
 
 ### 3. Phase Gates (Server enforced)
 
@@ -372,11 +378,11 @@ doc_research:
 | `merge_to_base` | Merge task branch to base branch |
 | `cleanup_stale_branches` | Clean up interrupted sessions |
 
-### Branch Lifecycle (v1.6)
+### Branch Lifecycle (v1.6, v1.11)
 
 | Tool | Description |
 |------|-------------|
-| `begin_phase_gate` | Start phase gates, create branch (with stale branch check) |
+| `begin_phase_gate` | Start phase gates (stale branch check). v1.11: branch creation deferred to READY |
 | `cleanup_stale_branches` | Checkout to base branch, delete all `llm_task_*` branches |
 
 ### Index & Learning

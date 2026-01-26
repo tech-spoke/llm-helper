@@ -81,7 +81,7 @@ Step 1:   Intent Classification   Classify as IMPLEMENT/MODIFY/INVESTIGATE/QUEST
 Step 2:   Session Start           Start session, get project_rules
 Step 2.5: DOCUMENT_RESEARCH       Document research (sub-agent) ← skip with --no-doc-research
 Step 3:   QueryFrame Setup        Decompose request into structured slots
-Step 3.5: begin_phase_gate        Start phase gates, create branch
+Step 3.5: begin_phase_gate        Start phase gates (no branch yet)
 
 ┌─────────────────────────────────────────────────────────────────┐
 │  Exploration Phase (Server enforced)                            │
@@ -97,14 +97,16 @@ Step 5.5: Q2 Check                Are there hypotheses that need verification?
 Step 6:   VERIFICATION            Hypothesis verification (only if Q2=YES)
 Step 6.5: Q3 Check                Is impact range confirmation needed?
           ├─ YES → Execute IMPACT_ANALYSIS
-          └─ NO → Skip IMPACT_ANALYSIS
+          └─ NO → Skip IMPACT_ANALYSIS (+ create branch → READY)
 Step 7:   IMPACT_ANALYSIS         Impact range analysis (only if Q3=YES)
           [If --only-explore: End here, report findings]
+          [Normal flow: create branch → READY]
 
 ┌─────────────────────────────────────────────────────────────────┐
 │  Implementation & Verification Phase (Server enforced)          │
 └─────────────────────────────────────────────────────────────────┘
 Step 8:   READY                   Implementation (Edit/Write/Bash allowed)
+                                  Branch created at transition to this phase
 Step 8.5: POST_IMPL_VERIFY        Post-implementation verification
                                   ← skip with --no-verify
                                   On failure, loop back to Step 8 (max 3 times)
@@ -376,7 +378,7 @@ QueryFrame:
 
 ### Step 3.5: begin_phase_gate
 
-**Purpose**: Start phase gates, handle stale branches, and create task branch.
+**Purpose**: Start phase gates and handle stale branches. Branch creation is deferred to READY phase (v1.11).
 
 **Instructions**:
 
@@ -404,21 +406,25 @@ QueryFrame:
    - **Stop and ask the user** to choose one of three options:
      - **Delete**: Delete all stale branches and start fresh
      - **Merge**: Merge stale branches to base before proceeding
-     - **Continue**: Leave stale branches as-is and create new branch
+     - **Continue**: Leave stale branches as-is and proceed
 
    - Based on user's choice:
      - Delete: Call `cleanup_stale_branches(session_id, action="delete")`
      - Merge: Call `cleanup_stale_branches(session_id, action="merge")`
-     - Continue: Call `begin_phase_gate` again with `ignore_stale=true`
+     - Continue: Call `begin_phase_gate` again with `resume_current=true`
 
-4. **Branch creation logic:**
-   - **If `skip_implementation = false` (normal implementation flow):**
-     - Server creates task branch: `llm_task_session_<session_id>_from_<base_branch>`
-     - Git checkout to task branch
+4. **Branch creation logic (v1.11):**
+   - **Branch is NOT created at this step**
+   - Branch creation is deferred to READY phase transition
+   - This allows exploration to complete before committing to implementation
 
-   - **If `skip_implementation = true` (exploration-only mode):**
-     - No branch is created
-     - Work is done on current branch (read-only)
+   - **Branch will be created when:**
+     - Q3 Check skips IMPACT_ANALYSIS → READY transition
+     - submit_impact_analysis completes → READY transition
+
+   - **No branch is created if:**
+     - `skip_implementation = true` (exploration-only mode)
+     - `skip_branch = true` (--quick mode)
 
 5. **Phase gates started:**
    - Server sets initial phase to EXPLORATION

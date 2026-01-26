@@ -118,7 +118,7 @@ Step 1:   Intent Classification   IMPLEMENT/MODIFY/INVESTIGATE/QUESTION に分�
 Step 2:   Session Start           セッション開始、project_rules取得（ブランチ未作成）
 Step 2.5: DOCUMENT_RESEARCH       ドキュメント調査（サブエージェント）← --no-doc-research でスキップ
 Step 3:   QueryFrame Setup        ユーザー要求を構造化スロットに分解
-Step 3.5: begin_phase_gate        フェーズゲート開始、ブランチ作成、stale警告
+Step 3.5: begin_phase_gate        フェーズゲート開始（ブランチ未作成）、stale警告
 
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │  探索フェーズ（Server強制）                                                 │
@@ -141,16 +141,18 @@ Step 6:   VERIFICATION            仮説検証（Q2=YES の場合のみ）
           ↓
 Step 6.5: Q3チェック              影響範囲の確認が必要か？
           ├─ YES → IMPACT_ANALYSIS実行
-          └─ NO → IMPACT_ANALYSISスキップ
+          └─ NO → IMPACT_ANALYSISスキップ（+ ブランチ作成 → READY）
           ↓
 Step 7:   IMPACT_ANALYSIS         影響範囲分析（Q3=YES の場合のみ）
           ↓
           [--only-explore ならここで終了、ユーザーに報告して完了]
+          [通常フロー: ブランチ作成 → READY]
 
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │  実装・検証フェーズ（Server強制）                                           │
 └─────────────────────────────────────────────────────────────────────────────┘
 Step 8:   READY                   実装（Edit/Write/Bash許可）
+                                  ★ v1.11: READY遷移時にブランチ作成
 Step 8.5: POST_IMPL_VERIFY        実装後検証（verifier prompts実行）← --no-verify でスキップ
                                   失敗時は Step 8 に戻る（最大3回）
 
@@ -197,13 +199,17 @@ Skill プロンプト（code.md）が制御。サーバーは関与しない。
 - Session Start（Step 2）時に `skip_implementation` パラメータを渡す
 - IMPACT_ANALYSIS（Step 8）完了後、実装フェーズをスキップして終了
 
-### 1.5. フェーズゲート開始（v1.6）
+### 1.5. フェーズゲート開始（v1.6、v1.11更新）
 
-準備フェーズの後、`begin_phase_gate` がタスクブランチを作成しフェーズゲートを開始。
+準備フェーズの後、`begin_phase_gate` がフェーズゲートを開始（ブランチ作成はREADY遷移時に延期）。
 
 **Stale ブランチ検出:**
 - タスクブランチ上にいない状態で `llm_task_*` ブランチが存在する場合、ユーザー介入が必要
 - 3つの選択肢: 削除、マージ、そのまま継続
+
+**ブランチ作成（v1.11）:**
+- ブランチはREADYフェーズ遷移時に作成（begin_phase_gateでは作成しない）
+- これにより、探索が完了してから実装にコミットできる
 
 ### 2. フェーズゲート（Server 強制）
 
@@ -380,11 +386,11 @@ doc_research:
 | `merge_to_base` | タスクブランチを元のブランチにマージ |
 | `cleanup_stale_branches` | 中断セッションをクリーンアップ |
 
-### ブランチライフサイクル（v1.6）
+### ブランチライフサイクル（v1.6、v1.11）
 
 | ツール | 説明 |
 |--------|------|
-| `begin_phase_gate` | フェーズゲート開始、ブランチ作成（stale チェック付き） |
+| `begin_phase_gate` | フェーズゲート開始（stale チェック）。v1.11: ブランチ作成はREADYに延期 |
 | `cleanup_stale_branches` | ベースブランチにチェックアウトし、全 `llm_task_*` ブランチを削除 |
 
 ### インデックス & 学習

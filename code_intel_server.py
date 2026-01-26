@@ -132,6 +132,72 @@ def _get_or_recreate_branch_manager(session, repo_path: str) -> BranchManager | 
     return branch_manager
 
 
+async def _create_branch_for_ready(session) -> dict:
+    """
+    v1.11: Create task branch when transitioning to READY phase.
+
+    This function is called when:
+    - check_phase_necessity skips IMPACT_ANALYSIS (Q3=NO) → READY
+    - submit_impact_analysis completes → READY
+
+    Returns: {"success": bool, "branch": {...}} or {"error": str, "message": str}
+    """
+    # Skip if already has branch or skip_implementation mode
+    if session.task_branch_enabled and session.task_branch_name:
+        return {
+            "success": True,
+            "branch": {
+                "created": False,
+                "name": session.task_branch_name,
+                "reason": "Already on task branch",
+            },
+        }
+
+    if session.skip_implementation:
+        return {
+            "success": True,
+            "branch": {
+                "created": False,
+                "reason": "skip_implementation=true (exploration-only)",
+            },
+        }
+
+    repo_path = session.repo_path
+
+    try:
+        branch_manager = BranchManager(repo_path)
+        setup_result = await branch_manager.setup_session(session.session_id)
+
+        if setup_result.success:
+            session.task_branch_enabled = True
+            session.task_branch_name = setup_result.branch_name
+
+            # Cache branch manager for this session
+            _branch_managers[session.session_id] = branch_manager
+
+            return {
+                "success": True,
+                "branch": {
+                    "created": True,
+                    "name": setup_result.branch_name,
+                    "base_branch": setup_result.base_branch,
+                },
+            }
+        else:
+            return {
+                "success": False,
+                "error": "branch_setup_failed",
+                "message": setup_result.error,
+            }
+
+    except Exception as e:
+        return {
+            "success": False,
+            "error": "branch_setup_exception",
+            "message": str(e),
+        }
+
+
 def get_chromadb_manager(project_root: str = ".") -> ChromaDBManager:
     """Get or create ChromaDBManager for a project."""
     if not CHROMADB_AVAILABLE:
@@ -1670,6 +1736,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
     elif name == "begin_phase_gate":
         # v1.6: Start phase gate (separated from start_session)
+        # v1.11: Branch creation moved to READY phase transition
         session_id = arguments["session_id"]
         skip_branch = arguments.get("skip_branch", False)
         resume_current = arguments.get("resume_current", False)
@@ -1743,7 +1810,6 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
             if current_info.get("is_task_branch"):
                 # Already on a task branch - continue there
-                # v1.10: Always start from EXPLORATION (gate_level=none removed)
                 session.transition_to_phase(Phase.EXPLORATION, reason="resume_current")
                 session.task_branch_enabled = True
                 session.task_branch_name = current_info["current_branch"]
@@ -1759,63 +1825,22 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                     },
                 }
                 return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
-            else:
-                # Not on task branch - create new one, but note stale branches are ignored
-                stale_info = await BranchManager.list_stale_branches(repo_path)
-                ignored_branches = [b["name"] for b in stale_info.get("stale_branches", [])]
+            # If not on task branch with resume_current, fall through to normal flow
 
-                # Fall through to create new branch, but include stale_branches_ignored in response
-                pass
+        # v1.11: Normal flow - just transition to EXPLORATION, no branch creation yet
+        # Branch will be created when transitioning to READY phase
+        session.transition_to_phase(Phase.EXPLORATION, reason="begin_phase_gate")
+        session.task_branch_enabled = False  # Will be enabled when branch is created at READY
 
-        # Create new branch (normal flow or resume_current on non-task branch)
-        try:
-            branch_manager = BranchManager(repo_path)
-            setup_result = await branch_manager.setup_session(session.session_id)
-
-            if setup_result.success:
-                # v1.10: Always start from EXPLORATION (gate_level=none removed)
-                session.transition_to_phase(Phase.EXPLORATION, reason="begin_phase_gate")
-                session.task_branch_enabled = True
-                session.task_branch_name = setup_result.branch_name
-
-                # Cache branch manager for this session
-                _branch_managers[session.session_id] = branch_manager
-
-                result = {
-                    "success": True,
-                    "phase": session.phase.name,
-                    "branch": {
-                        "created": True,
-                        "name": setup_result.branch_name,
-                        "base_branch": setup_result.base_branch,
-                    },
-                }
-
-                # If resume_current was used but we created new branch, note ignored branches
-                if resume_current:
-                    stale_info = await BranchManager.list_stale_branches(repo_path)
-                    # Re-fetch since we just created a new branch
-                    ignored = [b["name"] for b in stale_info.get("stale_branches", [])
-                               if b["name"] != setup_result.branch_name]
-                    if ignored:
-                        result["branch"]["stale_branches_ignored"] = ignored
-
-                return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
-            else:
-                result = {
-                    "success": False,
-                    "error": "branch_setup_failed",
-                    "message": setup_result.error,
-                }
-                return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
-
-        except Exception as e:
-            result = {
-                "success": False,
-                "error": "branch_setup_exception",
-                "message": str(e),
-            }
-            return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+        result = {
+            "success": True,
+            "phase": session.phase.name,
+            "branch": {
+                "created": False,
+                "reason": "v1.11: Branch creation deferred to READY phase",
+            },
+        }
+        return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
     elif name == "set_query_frame":
         # v3.6: Set QueryFrame from LLM extraction
@@ -1999,6 +2024,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             # gate_level="auto": Use assessment to determine
             phase_required = False
             next_phase = None
+            branch_result = None  # v1.11: Track branch creation for READY transition
 
             if phase == "SEMANTIC":
                 needs_more_info = assessment.get("needs_more_information", False)
@@ -2031,6 +2057,13 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                     next_phase = "READY"
                     session.phase = Phase.READY
 
+                    # v1.11: Create branch when transitioning to READY
+                    branch_result = await _create_branch_for_ready(session)
+                    if not branch_result.get("success", False) and "error" in branch_result:
+                        # Branch creation failed
+                        result = branch_result
+                        return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+
             # Record assessment
             session.phase_assessments[phase] = assessment
 
@@ -2041,6 +2074,10 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 "assessment": assessment,
                 "instruction": _get_next_instruction(phase, phase_required, next_phase),
             }
+
+            # v1.11: Include branch info if created during READY transition
+            if branch_result and branch_result.get("branch"):
+                result["branch"] = branch_result["branch"]
 
         return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
@@ -3083,6 +3120,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
     elif name == "submit_impact_analysis":
         # v1.1: Submit impact analysis results to proceed to READY phase
+        # v1.11: Create branch when transitioning to READY
         session = session_manager.get_active_session()
         if session is None:
             result = {"error": "no_active_session", "message": "No active session."}
@@ -3094,6 +3132,15 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 verified_files=verified_files,
                 inferred_from_rules=inferred_from_rules,
             )
+
+            # v1.11: Create branch when transitioning to READY (not exploration-only)
+            if result.get("success") and result.get("next_phase") == "READY":
+                branch_result = await _create_branch_for_ready(session)
+                if not branch_result.get("success", False) and "error" in branch_result:
+                    # Branch creation failed
+                    result = branch_result
+                elif branch_result.get("branch"):
+                    result["branch"] = branch_result["branch"]
 
         return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 

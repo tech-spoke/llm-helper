@@ -135,13 +135,17 @@ Controlled by skill prompt (code.md). Server not involved.
 | **DOCUMENT_RESEARCH** | Sub-agent researches design docs, extracts mandatory_rules | `--no-doc-research` |
 | QueryFrame | Decompose request into structured slots with Quote verification | - |
 
-### 1.5. Phase Gate Start (v1.6)
+### 1.5. Phase Gate Start (v1.6, v1.11)
 
-After preparation, `begin_phase_gate` creates the task branch and starts phase gates.
+After preparation, `begin_phase_gate` starts phase gates (branch creation deferred to READY transition).
 
 **Stale Branch Detection:**
 - If `llm_task_*` branches exist while not on a task branch, user intervention is required
 - Three options: Delete, Merge, or Continue as-is
+
+**Branch Creation (v1.11):**
+- Branch is created when transitioning to READY phase (not at begin_phase_gate)
+- Allows exploration to complete before committing to implementation
 
 ### 2. Phase Gates (Server enforced)
 
@@ -219,11 +223,11 @@ MCP server enforces phase transitions. LLM cannot skip arbitrarily.
 | `merge_to_base` | Merge task branch to base branch |
 | `cleanup_stale_sessions` | Clean up interrupted sessions |
 
-### Branch Lifecycle (v1.6)
+### Branch Lifecycle (v1.6, v1.11)
 
 | Tool | Purpose |
 |------|---------|
-| `begin_phase_gate` | Start phase gates, create branch (with stale check) |
+| `begin_phase_gate` | Start phase gates (stale check). v1.11: branch creation deferred to READY |
 | `cleanup_stale_sessions` | Delete stale branches |
 
 ### Improvement Cycle
