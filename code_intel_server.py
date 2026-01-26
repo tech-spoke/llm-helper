@@ -1966,6 +1966,13 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
             # hypotheses を Hypothesis オブジェクトに変換
             hypotheses_raw = arguments.get("hypotheses", [])
+            # Handle string-serialized hypotheses (MCP client workaround)
+            if isinstance(hypotheses_raw, str):
+                try:
+                    hypotheses_raw = json.loads(hypotheses_raw)
+                except json.JSONDecodeError as e:
+                    result = {"error": "invalid_hypotheses", "message": f"Failed to parse hypotheses JSON: {e}"}
+                    return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
             hypotheses = []
             for h in hypotheses_raw:
                 if isinstance(h, str):
@@ -2087,8 +2094,17 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             result = {"error": "no_active_session", "message": "No active session."}
         else:
             # v3.3: 構造化された evidence を持つ VerifiedHypothesis に変換
+            verified_raw = arguments.get("verified", [])
+            # Handle string-serialized verified (MCP client workaround)
+            if isinstance(verified_raw, str):
+                try:
+                    verified_raw = json.loads(verified_raw)
+                except json.JSONDecodeError as e:
+                    result = {"error": "invalid_verified", "message": f"Failed to parse verified JSON: {e}"}
+                    return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+
             verified_list = []
-            for v in arguments.get("verified", []):
+            for v in verified_raw:
                 evidence_data = v.get("evidence", {})
                 evidence = VerificationEvidence(
                     tool=evidence_data.get("tool", ""),
@@ -3135,6 +3151,20 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         else:
             verified_files = arguments.get("verified_files", [])
             inferred_from_rules = arguments.get("inferred_from_rules", [])
+
+            # Handle string-serialized arrays (MCP client workaround)
+            if isinstance(verified_files, str):
+                try:
+                    verified_files = json.loads(verified_files)
+                except json.JSONDecodeError as e:
+                    result = {"error": "invalid_verified_files", "message": f"Failed to parse verified_files JSON: {e}"}
+                    return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+            if isinstance(inferred_from_rules, str):
+                try:
+                    inferred_from_rules = json.loads(inferred_from_rules)
+                except json.JSONDecodeError as e:
+                    result = {"error": "invalid_inferred_from_rules", "message": f"Failed to parse inferred_from_rules JSON: {e}"}
+                    return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
             result = session.submit_impact_analysis(
                 verified_files=verified_files,
