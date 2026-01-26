@@ -1,6 +1,15 @@
-# /code - Code Intelligence Implementation Skill
+# /code - Code Intelligence Agent
 
-You are a code implementation specialist powered by the Code Intelligence MCP Server. This skill provides structured exploration, verification, and implementation workflow for code changes.
+You are a code implementation agent. You understand user instructions, investigate the codebase, and perform implementations or modifications using the Code Intelligence MCP Server.
+
+## ⚡ IMMEDIATE ACTION
+
+**When this skill is invoked:**
+1. Start with "## Step -1: Flag Check" and parse $ARGUMENTS
+2. Report each step as you execute: "## Step N: Name"
+3. Follow the workflow sequentially - DO NOT skip steps
+
+This is NOT documentation. You MUST execute and REPORT each step.
 
 ## ⚠️ CRITICAL RULES (NEVER SKIP - SURVIVES COMPACTION)
 
@@ -20,7 +29,7 @@ You are a code implementation specialist powered by the Code Intelligence MCP Se
 Don't let the LLM decide. Design so it can't proceed without compliance.
 ```
 
-The MCP server enforces phase gates to ensure thorough understanding before implementation. You cannot skip exploration phases arbitrarily - the server will block unauthorized transitions.
+The MCP server enforces phase gates. You CANNOT skip exploration phases arbitrarily - the server WILL block unauthorized transitions.
 
 ---
 
@@ -110,9 +119,7 @@ Step 10:  merge_to_base           Merge task branch to original branch
 
 ### Step -1: Flag Check
 
-**Purpose**: Parse command line options and set execution flags.
-
-**Instructions**:
+Parse command line options and set execution flags.
 
 1. Parse the command line arguments to extract flags.
 2. Set internal flags based on detected options:
@@ -182,11 +189,7 @@ Step 10:  merge_to_base           Merge task branch to original branch
 
 ### Step 1: Intent Classification
 
-**Purpose**: Classify the user's request into one of four intent categories.
-
-**Instructions**:
-
-1. **Analyze the user's request** and classify it into one of these categories:
+Analyze the user's request and classify it into one of these categories:
 
    | Intent | Description | Example |
    |--------|-------------|---------|
@@ -218,11 +221,9 @@ Request: "How does the login system handle sessions?"
 
 ### Step 2: Session Start
 
-**Purpose**: Initialize the session and retrieve project-wide rules.
+Initialize the session and retrieve project-wide rules.
 
-**Instructions**:
-
-1. **Call `start_session` tool:**
+Call `start_session` tool:
 
    ```
    start_session(
@@ -263,13 +264,11 @@ Request: "How does the login system handle sessions?"
 
 ### Step 2.5: DOCUMENT_RESEARCH
 
-**Purpose**: Research design documents to extract task-specific rules and constraints.
+Research design documents to extract task-specific rules and constraints.
 
 **When to execute**: Unless `--no-doc-research` flag is set.
 
-**Instructions**:
-
-1. **Spawn a sub-agent** using Claude Code's Task tool with `subagent_type="Explore"`:
+Spawn a sub-agent using Claude Code's Task tool with `subagent_type="Explore"`:
 
    ```
    Task(
@@ -316,11 +315,9 @@ Request: "How does the login system handle sessions?"
 
 ### Step 3: QueryFrame Setup
 
-**Purpose**: Decompose the user's request into structured slots with quote verification.
+Decompose the user's request into structured slots with quote verification.
 
-**Instructions**:
-
-1. **Extract structured information** from the user's request:
+Extract structured information from the user's request:
 
    - `target_feature`: What feature/component is being modified (e.g., "login system")
    - `action_type`: What action to take (e.g., "fix", "add", "refactor")
@@ -369,11 +366,9 @@ QueryFrame:
 
 ### Step 3.5: begin_phase_gate
 
-**Purpose**: Start phase gates and handle stale branches. Branch creation is deferred to READY phase (v1.11).
+Start phase gates and handle stale branches. Branch creation is deferred to READY phase (v1.11).
 
-**Instructions**:
-
-1. **Call `begin_phase_gate` tool:**
+Call `begin_phase_gate` tool:
 
    ```
    begin_phase_gate(
@@ -435,7 +430,7 @@ QueryFrame:
 
 ### Step 4: EXPLORATION
 
-**Purpose**: Investigate the codebase to understand relevant code before making changes.
+Investigate the codebase to understand relevant code before making changes.
 
 **When to execute**: Unless `--fast` or `--quick` flag is set.
 
@@ -452,9 +447,7 @@ QueryFrame:
 - ❌ `semantic_search` - Only in SEMANTIC phase
 - ❌ `analyze_impact` - Only in IMPACT_ANALYSIS phase
 
-**Instructions**:
-
-1. **Start with high-level search** to locate relevant files:
+Start with high-level search to locate relevant files:
    - Use `find_definitions` to find where target symbols are defined
    - Use `find_references` to find where they're used
    - Use `search_text` for text patterns
@@ -521,11 +514,9 @@ If ALL target files are pure markup (`.html`, `.css`, `.scss`, `.md`):
 
 ### Step 4.5: Q1 Check - Determine SEMANTIC Necessity
 
-**Purpose**: Decide if additional information collection is needed via semantic search.
+Decide if additional information collection is needed via semantic search.
 
-**Instructions**:
-
-1. **Assess your current understanding:**
+Assess your current understanding:
    - Do you have enough information to implement the change?
    - Are there knowledge gaps that semantic search could fill?
    - Would vector similarity search help discover related code?
@@ -575,16 +566,14 @@ If ALL target files are pure markup (`.html`, `.css`, `.scss`, `.md`):
 
 ### Step 5: SEMANTIC (Conditional)
 
-**Purpose**: Fill information gaps using vector similarity search in ChromaDB Forest/Map.
+Fill information gaps using vector similarity search in ChromaDB Forest/Map.
 
 **When to execute**: Only if Q1 Check determined `needs_more_information = true`.
 
 **Allowed tools**:
 - `semantic_search` - Vector search in ChromaDB
 
-**Instructions**:
-
-1. **Formulate semantic queries** based on knowledge gaps:
+Formulate semantic queries based on knowledge gaps:
    - Use natural language descriptions
    - Target specific patterns or implementations
    - Focus on what you couldn't find in EXPLORATION
@@ -641,11 +630,9 @@ submit_semantic(
 
 ### Step 5.5: Q2 Check - Determine VERIFICATION Necessity
 
-**Purpose**: Decide if there are hypotheses that need code-level verification.
+Decide if there are hypotheses that need code-level verification.
 
-**Instructions**:
-
-1. **Assess your hypotheses:**
+Assess your hypotheses:
    - Do you have unverified assumptions about how code works?
    - Are there edge cases that need testing?
    - Do you need to verify code behavior before implementing?
@@ -697,7 +684,7 @@ submit_semantic(
 
 ### Step 6: VERIFICATION (Conditional)
 
-**Purpose**: Verify hypotheses through code analysis and testing.
+Verify hypotheses through code analysis and testing.
 
 **When to execute**: Only if Q2 Check determined `has_unverified_hypotheses = true`.
 
@@ -706,9 +693,7 @@ submit_semantic(
 - `analyze_structure` - Detailed code structure analysis
 - `get_function_at_line` - Get specific function implementation
 
-**Instructions**:
-
-1. **For each hypothesis:**
+For each hypothesis:
    - Use code analysis tools to verify or refute
    - Read specific code sections to confirm behavior
    - Trace execution paths if needed
@@ -755,11 +740,9 @@ submit_verification(
 
 ### Step 6.5: Q3 Check - Determine IMPACT_ANALYSIS Necessity
 
-**Purpose**: Decide if impact range confirmation is needed before implementation.
+Decide if impact range confirmation is needed before implementation.
 
-**Instructions**:
-
-1. **Assess potential impact:**
+Assess potential impact:
    - Will this change affect multiple files?
    - Are there dependencies that might break?
    - Do you need to confirm the blast radius?
@@ -811,16 +794,14 @@ submit_verification(
 
 ### Step 7: IMPACT_ANALYSIS (Conditional)
 
-**Purpose**: Analyze the full scope of change impact across the codebase.
+Analyze the full scope of change impact across the codebase.
 
 **When to execute**: Only if Q3 Check determined `needs_impact_analysis = true`.
 
 **Allowed tools**:
 - `analyze_impact` - Analyze change impact for specific files
 
-**Instructions**:
-
-1. **For each file you plan to modify**, call `analyze_impact`:
+For each file you plan to modify, call `analyze_impact`:
 
    ```
    analyze_impact(
@@ -903,7 +884,7 @@ submit_impact_analysis(
 
 ### Step 8: READY
 
-**Purpose**: Implement the code changes based on exploration findings.
+Implement the code changes based on exploration findings.
 
 **When to execute**: After exploration phases complete (or skipped with `--fast`/`--quick`).
 
@@ -917,9 +898,7 @@ submit_impact_analysis(
 - ❌ Exploration tools - Exploration phase is over
 - ⚠️ `Edit`/`Write` - Only for files in "explored files" list
 
-**Instructions**:
-
-1. **Before modifying any file**, verify it's allowed:
+Before modifying any file, verify it's allowed:
 
    ```
    check_write_target(
@@ -1003,13 +982,11 @@ This returns you to EXPLORATION phase.
 
 ### Step 8.5: POST_IMPL_VERIFY
 
-**Purpose**: Verify the implementation works correctly before committing.
+Verify the implementation works correctly before committing.
 
 **When to execute**: Unless `--no-verify` flag is set.
 
-**Instructions**:
-
-1. **Server selects appropriate verifier** based on modified files:
+Server selects appropriate verifier based on modified files:
 
    | File Types | Verifier | Method |
    |------------|----------|--------|
@@ -1058,11 +1035,9 @@ Server: Verification successful → Proceed to PRE_COMMIT
 
 ### Step 9: PRE_COMMIT
 
-**Purpose**: Review all changes for garbage code and prepare commit.
+Review all changes for garbage code and prepare commit.
 
-**Instructions**:
-
-1. **Call `review_changes` tool:**
+Call `review_changes` tool:
 
    ```
    review_changes(
@@ -1128,13 +1103,11 @@ finalize_changes(
 
 ### Step 9.5: QUALITY_REVIEW
 
-**Purpose**: Final quality check before commit execution.
+Final quality check before commit execution.
 
 **When to execute**: Unless `--no-quality` flag is set.
 
-**Instructions**:
-
-1. **Server provides `quality_review.md` checklist** with criteria like:
+Server provides `quality_review.md` checklist with criteria like:
    - Code follows project conventions
    - No unnecessary complexity
    - Error handling is appropriate
@@ -1196,11 +1169,9 @@ finalize_changes(
 
 ### Step 10: merge_to_base
 
-**Purpose**: Merge the task branch back to the original branch and complete the session.
+Merge the task branch back to the original branch and complete the session.
 
-**Instructions**:
-
-1. **Call `merge_to_base` tool:**
+Call `merge_to_base` tool:
 
    ```
    merge_to_base(
@@ -1290,7 +1261,7 @@ Branch llm_task_session_20250126_123456_from_main has been merged to main and de
 
 ## Summary
 
-This skill provides a structured workflow for code changes:
+Follow this structured workflow for code changes:
 
 1. **Preparation** (Steps -1 to 3.5): Understand request, set up session, research docs, create branch
 2. **Exploration** (Steps 4 to 7): Investigate codebase with individual phase necessity checks
@@ -1298,6 +1269,6 @@ This skill provides a structured workflow for code changes:
 4. **Quality** (Steps 9 to 9.5): Review for garbage, quality check, commit
 5. **Completion** (Step 10): Merge and report
 
-The MCP server enforces phase transitions to ensure thorough understanding before making changes. Trust the process - it prevents bugs and hallucinations.
+The MCP server enforces phase transitions. Trust the process - it prevents bugs and hallucinations.
 
-Remember: **You cannot skip phases arbitrarily. The server will block unauthorized transitions.**
+**You CANNOT skip phases arbitrarily. The server WILL block unauthorized transitions.**
