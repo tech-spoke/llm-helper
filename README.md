@@ -1,6 +1,6 @@
 # Code Intelligence MCP Server
 
-> **Current Version: v1.8**
+> **Current Version: v1.10**
 
 An MCP server that provides Cursor IDE-like code intelligence capabilities using open source tools.
 
@@ -44,6 +44,7 @@ And have a mechanism to learn from failures.
 | Branch Lifecycle (v1.6) | Stale branch warnings, auto-deletion on failure, begin_phase_gate separation |
 | Parallel Execution (v1.7) | search_text multi-pattern support, Read/Grep parallel execution saves 27-35s |
 | Exploration-Only Mode (v1.8) | Intent-based auto-detection (INVESTIGATE/QUESTION) + --only-explore flag, no branch creation |
+| Individual Phase Checks (v1.10) | Individual necessity checks before each phase, VERIFICATION/IMPACT separation, gate_level redesign saves 20-60s |
 
 ---
 
@@ -107,10 +108,12 @@ Processing consists of 3 layers:
 └─────────────────────────────────────────────────────────────────────────────┘
                                     ↓
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│  2. Phase Gates (Server enforced)                                           │
-│     EXPLORATION → SEMANTIC* → VERIFICATION* → IMPACT_ANALYSIS → READY      │
-│     → POST_IMPL_VERIFY → PRE_COMMIT → QUALITY_REVIEW                       │
+│  2. Phase Gates (Server enforced) v1.10: Individual Check Approach         │
+│     EXPLORATION → Q1 Check → SEMANTIC* → Q2 Check → VERIFICATION*          │
+│     → Q3 Check → IMPACT_ANALYSIS*                                          │
+│     → READY → POST_IMPL_VERIFY → PRE_COMMIT → QUALITY_REVIEW              │
 │     ← --quick skips exploration, --no-verify/--no-quality skip each phase  │
+│     ← --gate=full ignores all checks, --gate=auto checks each (default)   │
 └─────────────────────────────────────────────────────────────────────────────┘
                                     ↓
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -154,11 +157,12 @@ MCP server enforces phase transitions. LLM cannot skip arbitrarily.
 | `--fast` / `-f` | ❌ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
 | `--quick` / `-q` | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
 
-### Tool Permissions by Phase
+### Tool Permissions by Phase (v1.10: Individual Check Approach)
 
 | Phase | Allowed | Forbidden |
 |-------|---------|-----------|
 | EXPLORATION | code-intel tools (query, find_definitions, find_references, search_text) | semantic_search |
+| Q1/Q2/Q3 Checks | check_phase_necessity | - |
 | SEMANTIC | semantic_search | code-intel |
 | VERIFICATION | code-intel tools | semantic_search |
 | IMPACT_ANALYSIS | analyze_impact, code-intel | semantic_search |
@@ -193,7 +197,7 @@ MCP server enforces phase transitions. LLM cannot skip arbitrarily.
 | `start_session` | Start session |
 | `set_query_frame` | Set QueryFrame (Quote verification) |
 | `get_session_status` | Check current phase/status |
-| `submit_understanding` | Complete EXPLORATION |
+| `check_phase_necessity` | Check phase necessity before each phase (Q1/Q2/Q3) (v1.10) |
 | `validate_symbol_relevance` | Embedding verification |
 | `confirm_symbol_relevance` | Confirm symbol validation results |
 | `submit_semantic` | Complete SEMANTIC |
@@ -485,6 +489,7 @@ The `context.yml` file will be automatically created on next session start.
 
 | Long | Short | Description |
 |------|-------|-------------|
+| `--gate=LEVEL` | `-g=LEVEL` | Gate level: f(ull), a(uto) [default: auto] (v1.10) |
 | `--no-verify` | - | Skip verification (and intervention) |
 | `--no-quality` | - | Skip quality review (v1.5) |
 | `--only-verify` | `-v` | Run verification only (skip implementation) |
@@ -494,6 +499,10 @@ The `context.yml` file will be automatically created on next session start.
 | `--no-doc-research` | - | Skip document research (v1.3) |
 | `--clean` | `-c` | Cleanup stale sessions |
 | `--rebuild` | `-r` | Force full re-index |
+
+**gate_level options (v1.10):**
+- `--gate=full` or `-g=f`: Ignore all checks and execute all phases
+- `--gate=auto` or `-g=a`: Check before each phase (default)
 
 **Default behavior:** full mode (explore + implement + verify + garbage + quality)
 
@@ -688,6 +697,7 @@ For version history and detailed changes, see:
 
 | Version | Description | Link |
 |---------|-------------|------|
+| v1.10 | Individual Phase Checks (individual necessity checks before each phase, VERIFICATION/IMPACT separation, gate_level redesign - saves 20-60s) | [v1.10](docs/updates/v1.10_ja.md) |
 | v1.9 | sync_index batch processing, VERIFICATION+IMPACT_ANALYSIS integration (saves 15-20s) | [v1.9](docs/updates/v1.9.md) |
 | v1.8 | Exploration-Only Mode (Intent-based + --only-explore, no branch creation) | [v1.8](docs/updates/v1.8.md) |
 | v1.7 | Parallel Execution (search_text, Read, Grep - saves 27-35s) | [v1.7](docs/updates/v1.7.md) |

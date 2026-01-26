@@ -49,7 +49,7 @@ from tools.outcome_log import (
 )
 from tools.query_frame import (
     QueryFrame, QueryDecomposer, SlotSource, SlotEvidence,
-    validate_slot, assess_risk_level, generate_investigation_guidance,
+    validate_slot, generate_investigation_guidance,
 )
 from tools.context_provider import ContextProvider, get_summary_prompts
 from tools.impact_analyzer import analyze_impact
@@ -609,7 +609,7 @@ async def list_tools() -> list[Tool]:
             description="Start a new code implementation session with phase-gated execution. "
                         "v1.6: Preparation phase only. Branch creation moved to begin_phase_gate. "
                         "After calling this, call begin_phase_gate to start phase gates. "
-                        "gate_level controls exploration phase requirements (none skips to READY).",
+                        "v1.10: gate_level='full' forces all phases, 'auto' checks necessity before each.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -629,9 +629,9 @@ async def list_tools() -> list[Tool]:
                     },
                     "gate_level": {
                         "type": "string",
-                        "enum": ["high", "middle", "low", "auto", "none"],
-                        "description": "Gate level for exploration phases. 'none' skips exploration and goes directly to READY (--quick / -g=n).",
-                        "default": "high",
+                        "enum": ["full", "auto"],
+                        "description": "v1.10: Gate level for phase checks. 'full' forces all phases, 'auto' checks necessity before each phase.",
+                        "default": "auto",
                     },
                     "skip_quality": {
                         "type": "boolean",
@@ -728,43 +728,8 @@ async def list_tools() -> list[Tool]:
                 "properties": {},
             },
         ),
-        Tool(
-            name="submit_understanding",
-            description="Submit exploration results to complete Phase 1 (EXPLORATION). "
-                        "Confidence is calculated by SERVER, not from LLM input. "
-                        "Server evaluates results (symbols, entry_points, tools_used) "
-                        "and determines if SEMANTIC phase is needed or can proceed to READY.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "symbols_identified": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "List of key symbols found (classes, functions, etc.)",
-                    },
-                    "entry_points": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "List of entry points identified",
-                    },
-                    "existing_patterns": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "List of existing patterns found (e.g., 'Service + Repository')",
-                    },
-                    "files_analyzed": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "List of files that were analyzed",
-                    },
-                    "notes": {
-                        "type": "string",
-                        "description": "Additional notes about the exploration",
-                    },
-                },
-                "required": ["symbols_identified", "entry_points", "files_analyzed"],
-            },
-        ),
+        # v1.10 note: submit_understanding removed (replaced by check_phase_necessity)
+        # LLM should use check_phase_necessity after exploration to determine next phase
         Tool(
             name="submit_semantic",
             description="Submit semantic search results to complete Phase 2 (SEMANTIC). "
@@ -810,6 +775,72 @@ async def list_tools() -> list[Tool]:
                     },
                 },
                 "required": ["hypotheses", "semantic_reason"],
+            },
+        ),
+        Tool(
+            name="check_phase_necessity",
+            description="[v1.10] Check if a phase is necessary before executing it. "
+                        "Used for Q1 (SEMANTIC), Q2 (VERIFICATION), Q3 (IMPACT_ANALYSIS) checks. "
+                        "LLM decides necessity based on actual code inspection results. "
+                        "gate_level='full' forces execution, 'auto' respects assessment.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "phase": {
+                        "type": "string",
+                        "enum": ["SEMANTIC", "VERIFICATION", "IMPACT_ANALYSIS"],
+                        "description": "Phase to check necessity for",
+                    },
+                    "assessment": {
+                        "type": "object",
+                        "description": "Necessity assessment for the phase",
+                        "oneOf": [
+                            {
+                                "description": "Q1: SEMANTIC necessity check",
+                                "properties": {
+                                    "needs_more_information": {
+                                        "type": "boolean",
+                                        "description": "true: need additional information, false: information sufficient",
+                                    },
+                                    "needs_more_information_reason": {
+                                        "type": "string",
+                                        "description": "Reason for needing (or not needing) more information",
+                                    },
+                                },
+                                "required": ["needs_more_information", "needs_more_information_reason"],
+                            },
+                            {
+                                "description": "Q2: VERIFICATION necessity check",
+                                "properties": {
+                                    "has_unverified_hypotheses": {
+                                        "type": "boolean",
+                                        "description": "true: have unverified hypotheses, false: no hypotheses or already verified",
+                                    },
+                                    "has_unverified_hypotheses_reason": {
+                                        "type": "string",
+                                        "description": "Reason for having (or not having) unverified hypotheses",
+                                    },
+                                },
+                                "required": ["has_unverified_hypotheses", "has_unverified_hypotheses_reason"],
+                            },
+                            {
+                                "description": "Q3: IMPACT_ANALYSIS necessity check",
+                                "properties": {
+                                    "needs_impact_analysis": {
+                                        "type": "boolean",
+                                        "description": "true: need impact analysis, false: impact already confirmed",
+                                    },
+                                    "needs_impact_analysis_reason": {
+                                        "type": "string",
+                                        "description": "Reason for needing (or not needing) impact analysis",
+                                    },
+                                },
+                                "required": ["needs_impact_analysis", "needs_impact_analysis_reason"],
+                            },
+                        ],
+                    },
+                },
+                "required": ["phase", "assessment"],
             },
         ),
         Tool(
@@ -1345,75 +1376,83 @@ async def list_tools() -> list[Tool]:
                 "required": ["verified_files"],
             },
         ),
-        Tool(
-            name="submit_verification_and_impact",
-            description="[v1.9] Integrated VERIFICATION + IMPACT_ANALYSIS submission. "
-                        "Combines verification of semantic hypotheses with impact analysis in a single phase, "
-                        "eliminating LLM round-trip wait. Use this instead of separate submit_verification + submit_impact_analysis calls.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "verified": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "hypothesis": {"type": "string"},
-                                "status": {
-                                    "type": "string",
-                                    "enum": ["confirmed", "partial", "rejected"],
-                                },
-                                "evidence": {
-                                    "type": "object",
-                                    "properties": {
-                                        "tool": {"type": "string"},
-                                        "target": {"type": "string"},
-                                        "result": {"type": "string"},
-                                        "files": {
-                                            "type": "array",
-                                            "items": {"type": "string"},
-                                        },
-                                    },
-                                    "required": ["tool", "target", "result", "files"],
-                                },
-                            },
-                            "required": ["hypothesis", "status", "evidence"],
-                        },
-                        "description": "List of verified hypotheses from SEMANTIC phase",
-                    },
-                    "verified_files": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "file": {
-                                    "type": "string",
-                                    "description": "File path that was verified",
-                                },
-                                "status": {
-                                    "type": "string",
-                                    "enum": ["will_modify", "no_change_needed", "not_affected"],
-                                    "description": "Verification status for this file",
-                                },
-                                "reason": {
-                                    "type": "string",
-                                    "description": "Reason for status (required when status != will_modify)",
-                                },
-                            },
-                            "required": ["file", "status"],
-                        },
-                        "description": "List of verified files from impact analysis",
-                    },
-                    "inferred_from_rules": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Additional files inferred from project_rules naming conventions",
-                    },
-                },
-                "required": ["verified", "verified_files"],
-            },
-        ),
+        # v1.10 note: submit_verification_and_impact removed (v1.9 integration reverted)
+        # Use separate submit_verification and submit_impact_analysis instead
     ]
+
+
+def _validate_phase_assessment(phase: str, assessment: dict) -> tuple[bool, str]:
+    """
+    Validate phase necessity assessment.
+
+    Args:
+        phase: "SEMANTIC", "VERIFICATION", or "IMPACT_ANALYSIS"
+        assessment: Assessment dictionary
+
+    Returns:
+        (is_valid, error_message)
+    """
+    if phase == "SEMANTIC":
+        if "needs_more_information" not in assessment:
+            return False, "needs_more_information field is required for SEMANTIC assessment"
+        if "needs_more_information_reason" not in assessment:
+            return False, "needs_more_information_reason field is required for SEMANTIC assessment"
+        if not isinstance(assessment["needs_more_information"], bool):
+            return False, "needs_more_information must be a boolean"
+        if len(assessment["needs_more_information_reason"]) < 10:
+            return False, "needs_more_information_reason must be at least 10 characters"
+
+    elif phase == "VERIFICATION":
+        if "has_unverified_hypotheses" not in assessment:
+            return False, "has_unverified_hypotheses field is required for VERIFICATION assessment"
+        if "has_unverified_hypotheses_reason" not in assessment:
+            return False, "has_unverified_hypotheses_reason field is required for VERIFICATION assessment"
+        if not isinstance(assessment["has_unverified_hypotheses"], bool):
+            return False, "has_unverified_hypotheses must be a boolean"
+        if len(assessment["has_unverified_hypotheses_reason"]) < 10:
+            return False, "has_unverified_hypotheses_reason must be at least 10 characters"
+
+    elif phase == "IMPACT_ANALYSIS":
+        if "needs_impact_analysis" not in assessment:
+            return False, "needs_impact_analysis field is required for IMPACT_ANALYSIS assessment"
+        if "needs_impact_analysis_reason" not in assessment:
+            return False, "needs_impact_analysis_reason field is required for IMPACT_ANALYSIS assessment"
+        if not isinstance(assessment["needs_impact_analysis"], bool):
+            return False, "needs_impact_analysis must be a boolean"
+        if len(assessment["needs_impact_analysis_reason"]) < 10:
+            return False, "needs_impact_analysis_reason must be at least 10 characters"
+
+    return True, ""
+
+
+def _get_next_instruction(phase: str, phase_required: bool, next_phase: str) -> str:
+    """
+    Generate instruction for the next step after phase necessity check.
+
+    Args:
+        phase: The phase that was checked
+        phase_required: Whether the phase is required
+        next_phase: The next phase or checkpoint
+
+    Returns:
+        Instruction string
+    """
+    if phase_required:
+        if phase == "SEMANTIC":
+            return "Execute SEMANTIC phase: Use semantic_search to gather additional information, then call submit_semantic."
+        elif phase == "VERIFICATION":
+            return "Execute VERIFICATION phase: Verify hypotheses using code-intel tools, then call submit_verification."
+        elif phase == "IMPACT_ANALYSIS":
+            return "Execute IMPACT_ANALYSIS phase: Analyze impact range using analyze_impact, then call submit_impact_analysis."
+    else:
+        if next_phase == "Q2_CHECK":
+            return "SEMANTIC skipped. Now check VERIFICATION necessity using check_phase_necessity(phase='VERIFICATION', assessment={...})."
+        elif next_phase == "Q3_CHECK":
+            return "VERIFICATION skipped. Now check IMPACT_ANALYSIS necessity using check_phase_necessity(phase='IMPACT_ANALYSIS', assessment={...})."
+        elif next_phase == "READY":
+            return "IMPACT_ANALYSIS skipped. Proceed to READY phase for implementation."
+
+    return "Proceed to next step."
 
 
 def check_phase_access(tool_name: str) -> dict | None:
@@ -1458,7 +1497,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         intent = arguments["intent"]
         query = arguments["query"]
         repo_path = arguments.get("repo_path", ".")
-        gate_level = arguments.get("gate_level", "high")
+        gate_level = arguments.get("gate_level", "auto")  # v1.10: default changed from "high" to "auto"
         skip_quality = arguments.get("skip_quality", False)
         skip_implementation = arguments.get("skip_implementation", False)
         print(f"[DEBUG start_session] skip_implementation argument = {skip_implementation}, type = {type(skip_implementation)}")
@@ -1483,10 +1522,10 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         extraction_prompt = QueryDecomposer.get_extraction_prompt(query)
 
         # v1.6: Phase is now None (unset) until begin_phase_gate is called
-        # For backward compatibility with gate_level="none", set READY directly
-        if gate_level == "none":
-            phase_message = f"Session started with gate=none. Phase: {session.phase.name} (READY)"
-            next_step_message = "Proceed directly to implementation. Call set_query_frame for context, then Edit/Write."
+        # v1.10: gate_level="none" removed (use "full" or "auto" instead)
+        if gate_level not in ("full", "auto"):
+            phase_message = f"Session started with invalid gate_level={gate_level}. Valid values: 'full' or 'auto'."
+            next_step_message = "Update gate_level to 'full' (execute all phases) or 'auto' (check before each)."
         else:
             phase_message = f"Session started. v1.6: Call begin_phase_gate to start phase gates."
             next_step_message = "Extract slots from query using the prompt, call set_query_frame, then call begin_phase_gate."
@@ -1507,7 +1546,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 "next_step": next_step_message,
             },
             # v1.6: Next step indicator
-            "next_step": "Call begin_phase_gate to start phase gates" if gate_level != "none" else None,
+            # v1.10: gate_level is now "full" or "auto" only
+            "next_step": "Call begin_phase_gate to start phase gates" if gate_level in ("full", "auto") else None,
         }
 
         # v1.1: Essential context provision (design docs + project rules)
@@ -1618,7 +1658,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             result["exploration_hint"] = (
                 "v3.9: Use semantic_search to find past agreements (map) and relevant code (forest). "
                 "If no hit, use code-intel tools to fill missing slots. "
-                "Then call submit_understanding."
+                "Then call submit_exploration and check_phase_necessity to determine next steps."
             )
         return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
@@ -1697,11 +1737,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
             if current_info.get("is_task_branch"):
                 # Already on a task branch - continue there
-                # Check gate_level to determine starting phase
-                if session.gate_level == "none":
-                    session.transition_to_phase(Phase.READY, reason="resume_current_gate_none")
-                else:
-                    session.transition_to_phase(Phase.EXPLORATION, reason="resume_current")
+                # v1.10: Always start from EXPLORATION (gate_level=none removed)
+                session.transition_to_phase(Phase.EXPLORATION, reason="resume_current")
                 session.task_branch_enabled = True
                 session.task_branch_name = current_info["current_branch"]
 
@@ -1730,11 +1767,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             setup_result = await branch_manager.setup_session(session.session_id)
 
             if setup_result.success:
-                # Check gate_level to determine starting phase
-                if session.gate_level == "none":
-                    session.transition_to_phase(Phase.READY, reason="begin_phase_gate_gate_none")
-                else:
-                    session.transition_to_phase(Phase.EXPLORATION, reason="begin_phase_gate")
+                # v1.10: Always start from EXPLORATION (gate_level=none removed)
+                session.transition_to_phase(Phase.EXPLORATION, reason="begin_phase_gate")
                 session.task_branch_enabled = True
                 session.task_branch_name = setup_result.branch_name
 
@@ -1822,8 +1856,26 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         # Set frame on session
         session.query_frame = frame
 
-        # Assess risk level
-        risk_level = assess_risk_level(frame, session.intent)
+        # v1.10: Assess risk level (inlined from assess_risk_level())
+        # Determine risk based on QueryFrame completeness
+        if frame.desired_action and not frame.observed_issue:
+            risk_level = "HIGH"
+        elif session.intent == "MODIFY" and not frame.target_feature:
+            risk_level = "HIGH"
+        elif session.intent == "IMPLEMENT" and not any([
+            frame.target_feature,
+            frame.trigger_condition,
+            frame.observed_issue,
+            frame.desired_action,
+        ]):
+            risk_level = "HIGH"
+        elif frame.observed_issue and len(frame.observed_issue) < 10:
+            risk_level = "MEDIUM"
+        elif frame.get_hypothesis_slots():
+            risk_level = "MEDIUM"
+        else:
+            risk_level = "LOW"
+
         session.risk_level = risk_level
 
         # Get missing slots and investigation guidance
@@ -1859,39 +1911,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             result = session.get_status()
         return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
-    elif name == "submit_understanding":
-        session = session_manager.get_active_session()
-        if session is None:
-            result = {"error": "no_active_session", "message": "No active session."}
-        else:
-            # v3.3: confidence は入力から削除。サーバー側で算出する。
-            symbols_identified = arguments.get("symbols_identified", [])
-            exploration = ExplorationResult(
-                symbols_identified=symbols_identified,
-                entry_points=arguments.get("entry_points", []),
-                existing_patterns=arguments.get("existing_patterns", []),
-                files_analyzed=arguments.get("files_analyzed", []),
-                tools_used=[tc["tool"] for tc in session.tool_calls],
-                notes=arguments.get("notes", ""),
-            )
-
-            # v3.8: symbols_identified を query_frame.mapped_symbols に自動追加
-            if session.query_frame and symbols_identified:
-                for symbol in symbols_identified:
-                    session.query_frame.add_mapped_symbol(
-                        name=symbol,
-                        source=SlotSource.FACT,  # EXPLORATION で発見 = FACT
-                        confidence=0.5,  # デフォルト値（validate_symbol_relevance で更新可能）
-                    )
-
-            result = session.submit_exploration(exploration)
-
-            # v3.8: 追加されたシンボル数を結果に含める
-            if session.query_frame:
-                result["mapped_symbols_count"] = len(session.query_frame.mapped_symbols)
-                result["mapped_symbols"] = [s.name for s in session.query_frame.mapped_symbols]
-
-        return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+    # v1.10 note: submit_understanding handler removed (replaced by check_phase_necessity)
+    # LLM should call check_phase_necessity after EXPLORATION to determine if SEMANTIC is needed
 
     elif name == "submit_semantic":
         session = session_manager.get_active_session()
@@ -1931,6 +1952,82 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 search_queries=arguments.get("search_queries", []),
             )
             result = session.submit_semantic(semantic)
+        return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+
+    elif name == "check_phase_necessity":
+        # v1.10: Check phase necessity before execution
+        session = session_manager.get_active_session()
+        if session is None:
+            result = {"error": "no_active_session", "message": "No active session."}
+        else:
+            phase = arguments["phase"]
+            assessment = arguments["assessment"]
+
+            # Validate assessment fields based on phase
+            valid, error_msg = _validate_phase_assessment(phase, assessment)
+            if not valid:
+                result = {"error": "invalid_assessment", "message": error_msg}
+                return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+
+            # gate_level="full" forces execution of all phases
+            if session.gate_level == "full":
+                session.phase = Phase[phase]
+                session.phase_assessments[phase] = assessment
+                result = {
+                    "success": True,
+                    "phase_required": True,
+                    "next_phase": phase,
+                    "reason": "gate_level=full: All phases are executed regardless of assessment",
+                    "assessment": assessment,
+                }
+                return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+
+            # gate_level="auto": Use assessment to determine
+            phase_required = False
+            next_phase = None
+
+            if phase == "SEMANTIC":
+                needs_more_info = assessment.get("needs_more_information", False)
+                if needs_more_info:
+                    phase_required = True
+                    next_phase = "SEMANTIC"
+                    session.phase = Phase.SEMANTIC
+                else:
+                    # Skip SEMANTIC, proceed to Q2 check
+                    next_phase = "Q2_CHECK"
+
+            elif phase == "VERIFICATION":
+                has_unverified = assessment.get("has_unverified_hypotheses", False)
+                if has_unverified:
+                    phase_required = True
+                    next_phase = "VERIFICATION"
+                    session.phase = Phase.VERIFICATION
+                else:
+                    # Skip VERIFICATION, proceed to Q3 check
+                    next_phase = "Q3_CHECK"
+
+            elif phase == "IMPACT_ANALYSIS":
+                needs_impact = assessment.get("needs_impact_analysis", False)
+                if needs_impact:
+                    phase_required = True
+                    next_phase = "IMPACT_ANALYSIS"
+                    session.phase = Phase.IMPACT_ANALYSIS
+                else:
+                    # Skip IMPACT_ANALYSIS, proceed to READY
+                    next_phase = "READY"
+                    session.phase = Phase.READY
+
+            # Record assessment
+            session.phase_assessments[phase] = assessment
+
+            result = {
+                "success": True,
+                "phase_required": phase_required,
+                "next_phase": next_phase,
+                "assessment": assessment,
+                "instruction": _get_next_instruction(phase, phase_required, next_phase),
+            }
+
         return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
     elif name == "submit_verification":
@@ -2729,7 +2826,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
             if not_found:
                 result["not_found"] = not_found
-                result["hint"] = "These symbols were not in mapped_symbols. Call submit_understanding first to add them."
+                result["hint"] = "These symbols were not in mapped_symbols. Call submit_exploration first to add them."
 
         return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
@@ -2977,55 +3074,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
         return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
-    elif name == "submit_verification_and_impact":
-        # v1.9: Integrated VERIFICATION + IMPACT_ANALYSIS submission
-        session = session_manager.get_active_session()
-        if session is None:
-            result = {"error": "no_active_session", "message": "No active session."}
-        else:
-            # Convert verified hypotheses
-            verified_list = []
-            for v in arguments.get("verified", []):
-                evidence_data = v.get("evidence", {})
-                evidence = VerificationEvidence(
-                    tool=evidence_data.get("tool", ""),
-                    target=evidence_data.get("target", ""),
-                    result=evidence_data.get("result", ""),
-                    files=evidence_data.get("files", []),
-                )
-                verified_hypothesis = VerifiedHypothesis(
-                    hypothesis=v.get("hypothesis", ""),
-                    status=v.get("status", "rejected"),
-                    evidence=evidence,
-                )
-                verified_list.append(verified_hypothesis)
-
-            # Get verified files and inferred rules
-            verified_files = arguments.get("verified_files", [])
-            inferred_from_rules = arguments.get("inferred_from_rules", [])
-
-            # Convert to dict format for session method
-            verified_hypotheses_dict = [
-                {
-                    "hypothesis": vh.hypothesis,
-                    "status": vh.status,
-                    "evidence": {
-                        "tool": vh.evidence.tool,
-                        "target": vh.evidence.target,
-                        "result": vh.evidence.result,
-                        "files": vh.evidence.files,
-                    }
-                }
-                for vh in verified_list
-            ]
-
-            result = session.submit_verification_and_impact(
-                verified_hypotheses=verified_hypotheses_dict,
-                verified_files=verified_files,
-                inferred_from_rules=inferred_from_rules,
-            )
-
-        return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+    # v1.10 note: submit_verification_and_impact handler removed (v1.9 integration reverted)
+    # Use separate submit_verification and submit_impact_analysis instead
 
     # Check phase access for other tools
     phase_error = check_phase_access(name)

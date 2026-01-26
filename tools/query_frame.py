@@ -433,93 +433,9 @@ def generate_investigation_guidance(missing_slots: list[str]) -> dict:
 # Risk Level Assessment
 # =============================================================================
 
-def assess_risk_level(frame: QueryFrame, intent: str) -> str:
-    """
-    QueryFrameに基づいてリスクレベルを判定。
-
-    Args:
-        frame: QueryFrame
-        intent: IMPLEMENT, MODIFY, INVESTIGATE, QUESTION
-
-    Returns:
-        "HIGH" | "MEDIUM" | "LOW"
-    """
-    # desired_action があるのに observed_issue がない → 高リスク
-    if frame.desired_action and not frame.observed_issue:
-        return "HIGH"
-
-    # MODIFY で target_feature が不明 → 高リスク
-    if intent == "MODIFY" and not frame.target_feature:
-        return "HIGH"
-
-    # IMPLEMENT で何も埋まっていない → 高リスク
-    if intent == "IMPLEMENT" and not any([
-        frame.target_feature,
-        frame.trigger_condition,
-        frame.observed_issue,
-        frame.desired_action,
-    ]):
-        return "HIGH"
-
-    # observed_issue が曖昧 → 中リスク
-    if frame.observed_issue and len(frame.observed_issue) < 10:
-        return "MEDIUM"
-
-    # HYPOTHESISスロットがある → 中リスク
-    if frame.get_hypothesis_slots():
-        return "MEDIUM"
-
-    return "LOW"
-
-
-# =============================================================================
-# Dynamic Exploration Requirements
-# =============================================================================
-
-def get_exploration_requirements(risk_level: str, intent: str) -> dict:
-    """
-    リスクレベルに応じた成果条件を返す。
-
-    Args:
-        risk_level: "HIGH" | "MEDIUM" | "LOW"
-        intent: IMPLEMENT, MODIFY, INVESTIGATE, QUESTION
-
-    Returns:
-        成果条件の辞書
-    """
-    base = {
-        "symbols_identified": 3,
-        "entry_points": 1,
-        "files_analyzed": 2,
-        "existing_patterns": 1,
-        "required_slot_evidence": [],
-    }
-
-    if intent not in ("IMPLEMENT", "MODIFY"):
-        # INVESTIGATE は緩い条件
-        return {
-            "symbols_identified": 1,
-            "entry_points": 0,
-            "files_analyzed": 1,
-            "existing_patterns": 0,
-            "required_slot_evidence": [],
-        }
-
-    if risk_level == "HIGH":
-        return {
-            "symbols_identified": 5,
-            "entry_points": 2,
-            "files_analyzed": 4,
-            "existing_patterns": 2,
-            "required_slot_evidence": ["target_feature", "observed_issue"],
-        }
-    elif risk_level == "MEDIUM":
-        return {
-            **base,
-            "required_slot_evidence": ["target_feature"],
-        }
-    else:
-        return base
+# v1.10: assess_risk_level() and get_exploration_requirements() removed
+# - assess_risk_level() inlined into code_intel_server.py set_query_frame handler
+# - get_exploration_requirements() inlined into session.py evaluate_exploration_v36()
 
 
 # =============================================================================

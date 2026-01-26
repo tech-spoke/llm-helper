@@ -1,6 +1,6 @@
 # Code Intelligence MCP Server
 
-> **Current Version: v1.8**
+> **Current Version: v1.10**
 
 Cursor IDE のようなコードインテリジェンス機能をオープンソースツールで実現する MCP サーバー。
 
@@ -44,6 +44,7 @@ LLM に判断をさせない。守らせるのではなく、守らないと進�
 | ブランチライフサイクル（v1.6） | stale ブランチ警告、失敗時自動削除、begin_phase_gate 分離 |
 | 並列実行最適化（v1.7） | search_text 複数パターン対応、Read/Grep 並列実行で27-35秒削減 |
 | 探索のみモード（v1.8） | Intent自動判定（INVESTIGATE/QUESTION）+ --only-explore フラグ、ブランチ作成なし |
+| 個別フェーズチェック（v1.10） | 各フェーズ前の必要性チェック、VERIFICATION/IMPACT分離、gate_level再編で20-60秒削減 |
 
 ---
 
@@ -107,11 +108,13 @@ LLM に判断をさせない。守らせるのではなく、守らないと進�
 └─────────────────────────────────────────────────────────────────────────────┘
                                     ↓
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│  2. フェーズゲート（Server 強制）                                           │
-│     EXPLORATION → SEMANTIC* → VERIFICATION* → IMPACT_ANALYSIS              │
+│  2. フェーズゲート（Server 強制）v1.10: 個別チェック方式                    │
+│     EXPLORATION → Q1チェック → SEMANTIC* → Q2チェック → VERIFICATION*       │
+│     → Q3チェック → IMPACT_ANALYSIS*                                        │
 │     → [--only-explore で終了] or [READY → POST_IMPL_VERIFY → PRE_COMMIT]  │
 │     → QUALITY_REVIEW                                                       │
 │     ← --quick で探索スキップ、--no-verify/--no-quality で各フェーズスキップ │
+│     ← --gate=full で全チェック無視、--gate=auto で都度チェック（デフォルト） │
 └─────────────────────────────────────────────────────────────────────────────┘
                                     ↓
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -147,20 +150,26 @@ MCP サーバーがフェーズ遷移を強制。LLM が勝手にスキップで
 
 #### フェーズマトリックス
 
-| オプション | 探索 | 実装 | 検証 | 介入 | ゴミ取 | 品質 | ブランチ |
-|-----------|:----:|:----:|:----:|:----:|:------:|:----:|:-------:|
-| (デフォルト) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `--only-explore` / `-e` | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
-| `--no-verify` | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | ✅ |
-| `--no-quality` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
-| `--fast` / `-f` | ❌ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
-| `--quick` / `-q` | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| オプション | DOC調査 | ソース探索 | 実装 | 検証 | 介入 | ゴミ取 | 品質 | ブランチ |
+|-----------|:----:|:----:|:----:|:----:|:------:|:----:|:-------:|:-------:|
+| (デフォルト) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `--only-explore` / `-e` | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `--no-verify` | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | ✅ |
+| `--no-quality` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
+| `--fast` / `-f` | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
+| `--quick` / `-q` | ✅ | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| `--no-doc-research` | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 
-### フェーズ別ツール許可
+**凡例**:
+- **DOC調査**: DOCUMENT_RESEARCH (Step 2.5)
+- **ソース探索**: EXPLORATION, SEMANTIC, VERIFICATION, IMPACT_ANALYSIS (Steps 4-7)
+
+### フェーズ別ツール許可（v1.10: 個別チェック方式）
 
 | フェーズ | 許可 | 禁止 |
 |----------|------|------|
 | EXPLORATION | code-intel ツール (query, find_definitions, find_references, search_text) | semantic_search |
+| Q1/Q2/Q3チェック | check_phase_necessity | - |
 | SEMANTIC | semantic_search | code-intel |
 | VERIFICATION | code-intel ツール | semantic_search |
 | IMPACT_ANALYSIS | analyze_impact, code-intel | semantic_search |
@@ -196,7 +205,7 @@ MCP サーバーがフェーズ遷移を強制。LLM が勝手にスキップで
 | `start_session` | セッション開始 |
 | `set_query_frame` | QueryFrame 設定（Quote 検証） |
 | `get_session_status` | 現在のフェーズ・状態を確認 |
-| `submit_understanding` | EXPLORATION 完了 |
+| `check_phase_necessity` | 各フェーズ前の必要性チェック（Q1/Q2/Q3）（v1.10） |
 | `validate_symbol_relevance` | Embedding 検証 |
 | `confirm_symbol_relevance` | シンボル検証結果を確認 |
 | `submit_semantic` | SEMANTIC 完了 |
@@ -464,6 +473,7 @@ MCP サーバーを再読み込みするために再起動。
 
 | Long | Short | 説明 |
 |------|-------|------|
+| `--gate=LEVEL` | `-g=LEVEL` | ゲートレベル: f(ull), a(uto) [default: auto]（v1.10） |
 | `--no-verify` | - | 検証をスキップ（介入もスキップ） |
 | `--no-quality` | - | 品質レビューをスキップ（v1.5） |
 | `--only-verify` | `-v` | 検証のみ実行（実装スキップ） |
@@ -475,6 +485,10 @@ MCP サーバーを再読み込みするために再起動。
 | `--no-intervention` | `-ni` | 介入システムをスキップ（v1.4） |
 | `--clean` | `-c` | stale セッションのクリーンアップ |
 | `--rebuild` | `-r` | 全インデックスを強制再構築 |
+
+**gate_level オプション（v1.10）:**
+- `--gate=full` または `-g=f`: 全チェックを無視して全フェーズ実行
+- `--gate=auto` または `-g=a`: 各フェーズ前に都度チェック（デフォルト）
 
 **デフォルト動作:** フルモード（探索 + 実装 + 検証 + ゴミ取り + 品質）
 
@@ -539,16 +553,18 @@ MCP サーバーを再読み込みするために再起動。
 5. DOCUMENT_RESEARCH（v1.3） ← `--no-doc-research` でスキップ
 6. QueryFrame 抽出・検証
 7. EXPLORATION（find_definitions, find_references 等） ← `--quick` でスキップ
-8. シンボル検証（Embedding） ← `--quick` でスキップ
-9. 必要に応じて SEMANTIC ← `--quick` でスキップ
-10. VERIFICATION（仮説検証） ← `--quick` でスキップ
-11. IMPACT ANALYSIS（v1.1 - 影響範囲の分析） ← `--quick` でスキップ
-12. READY（実装）
-13. POST_IMPLEMENTATION_VERIFICATION ← `--no-verify` でスキップ
-14. INTERVENTION（v1.4） ← 検証3回連続失敗で発動
-15. GARBAGE DETECTION ← `--quick` でスキップ
-16. QUALITY REVIEW（v1.5） ← `--no-quality` または `--quick` でスキップ
-17. Finalize & Merge
+8. Q1チェック（v1.10 - SEMANTIC必要性判断） ← `--gate=full` で無視
+9. SEMANTIC（Q1=YES の場合のみ） ← `--quick` でスキップ
+10. Q2チェック（v1.10 - VERIFICATION必要性判断） ← `--gate=full` で無視
+11. VERIFICATION（Q2=YES の場合のみ） ← `--quick` でスキップ
+12. Q3チェック（v1.10 - IMPACT_ANALYSIS必要性判断） ← `--gate=full` で無視
+13. IMPACT ANALYSIS（Q3=YES の場合のみ） ← `--quick` でスキップ
+14. READY（実装）
+15. POST_IMPLEMENTATION_VERIFICATION ← `--no-verify` でスキップ
+16. INTERVENTION（v1.4） ← 検証3回連続失敗で発動
+17. GARBAGE DETECTION ← `--quick` でスキップ
+18. QUALITY REVIEW（v1.5） ← `--no-quality` または `--quick` でスキップ
+19. Finalize & Merge
 
 ### 直接ツールを呼び出す
 
@@ -672,6 +688,7 @@ your-project/
 
 | Version | Description | Link |
 |---------|-------------|------|
+| v1.10 | Individual Phase Checks（各フェーズ前の個別チェック、VERIFICATION/IMPACT分離、gate_level再編 - 20-60秒削減） | [v1.10](docs/updates/v1.10_ja.md) |
 | v1.9 | sync_index バッチ処理、VERIFICATION+IMPACT_ANALYSIS統合（15-20秒削減） | [v1.9](docs/updates/v1.9_ja.md) |
 | v1.8 | Exploration-Only Mode（Intent自動判定 + --only-explore、ブランチ作成なし） | [v1.8](docs/updates/v1.8_ja.md) |
 | v1.7 | Parallel Execution（並列実行 - 27-35秒削減） | [v1.7](docs/updates/v1.7_ja.md) |

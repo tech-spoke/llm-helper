@@ -88,8 +88,16 @@ class TestSyncIndexBatchProcessing:
         assert result.errors == 0
 
 
+@pytest.mark.skip(reason="v1.10: VERIFICATION_AND_IMPACT separated into VERIFICATION + IMPACT_ANALYSIS")
 class TestVerificationAndImpactIntegration:
-    """Test v1.9 VERIFICATION + IMPACT_ANALYSIS integration"""
+    """Test v1.9 VERIFICATION + IMPACT_ANALYSIS integration
+
+    NOTE: These tests are skipped in v1.10 because:
+    - Phase.VERIFICATION_AND_IMPACT was separated into Phase.VERIFICATION and Phase.IMPACT_ANALYSIS
+    - submit_verification_and_impact() was replaced by submit_verification() and submit_impact_analysis()
+
+    See test_v1_10_features.py for the new tests.
+    """
 
     def test_integrated_phase_exists(self):
         """Test that VERIFICATION_AND_IMPACT phase exists"""

@@ -1,6 +1,6 @@
-# Code Intelligence MCP Server - 設計ドキュメント v1.8
+# Code Intelligence MCP Server - 設計ドキュメント v1.10
 
-> このドキュメントは v1.8 時点の完全なシステム仕様を記述しています。
+> このドキュメントは v1.10 時点の完全なシステム仕様を記述しています。
 > バージョン履歴については [CHANGELOG](#changelog) を参照してください。
 
 ---
@@ -107,7 +107,7 @@ LLM に決めさせない。従わないと進めない設計にする。
 
 ## 処理フロー
 
-処理は4つのレイヤーで構成されます（v1.8）。
+処理は4つのレイヤーで構成されます（v1.10）。
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -124,37 +124,53 @@ Step 3.5: begin_phase_gate        フェーズゲート開始、ブランチ作�
 │  探索フェーズ（Server強制）                                                 │
 └─────────────────────────────────────────────────────────────────────────────┘
 Step 4:   EXPLORATION             ソース調査（find_definitions, find_references, search_text）
-Step 5:   Symbol Validation       Embeddingで関連性検証
-Step 6:   SEMANTIC                セマンティック検索（信頼度低い場合のみ）
-Step 7:   VERIFICATION            仮説検証（SEMANTIC実行時のみ）
-Step 8:   IMPACT_ANALYSIS         影響範囲分析
+
+          ★ v1.10: 各フェーズ前に個別チェック方式
+          ↓
+Step 4.5: Q1チェック              追加の情報収集が必要か？
+          ├─ YES → SEMANTIC実行
+          └─ NO → SEMANTICスキップ
+          ↓
+Step 5:   SEMANTIC                セマンティック検索（Q1=YES の場合のみ）
+          ↓
+Step 5.5: Q2チェック              検証が必要な仮説はあるか？
+          ├─ YES → VERIFICATION実行
+          └─ NO → VERIFICATIONスキップ
+          ↓
+Step 6:   VERIFICATION            仮説検証（Q2=YES の場合のみ）
+          ↓
+Step 6.5: Q3チェック              影響範囲の確認が必要か？
+          ├─ YES → IMPACT_ANALYSIS実行
+          └─ NO → IMPACT_ANALYSISスキップ
+          ↓
+Step 7:   IMPACT_ANALYSIS         影響範囲分析（Q3=YES の場合のみ）
           ↓
           [--only-explore ならここで終了、ユーザーに報告して完了]
 
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │  実装・検証フェーズ（Server強制）                                           │
 └─────────────────────────────────────────────────────────────────────────────┘
-Step 9:   READY                   実装（Edit/Write/Bash許可）
-Step 9.5: POST_IMPL_VERIFY        実装後検証（verifier prompts実行）← --no-verify でスキップ
-                                  失敗時は Step 9 に戻る（最大3回）
+Step 8:   READY                   実装（Edit/Write/Bash許可）
+Step 8.5: POST_IMPL_VERIFY        実装後検証（verifier prompts実行）← --no-verify でスキップ
+                                  失敗時は Step 8 に戻る（最大3回）
 
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │  コミット・品質フェーズ（Server強制）                                       │
 └─────────────────────────────────────────────────────────────────────────────┘
-Step 10:  PRE_COMMIT              コミット前レビュー
+Step 9:   PRE_COMMIT              コミット前レビュー
           ├─ review_changes       ゴミ検出（garbage_detection.md）
-          └─ finalize_changes     keep/discard判断 + コミット実行 ★ここでコミット
+          └─ finalize_changes     keep/discard判断 + コミット準備
 
-Step 10.5: QUALITY_REVIEW         品質レビュー ← --no-quality でスキップ
+Step 9.5: QUALITY_REVIEW          品質レビュー ← --no-quality でスキップ
           ├─ quality_review.md    チェックリスト確認
           └─ submit_quality_review
               ├─ 問題あり → READY に戻る（修正 → POST_IMPL_VERIFY → PRE_COMMIT → QUALITY_REVIEW）
-              └─ 問題なし → 次へ
+              └─ 問題なし → ★ここでコミット実行 → 次へ
 
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │  完了                                                                       │
 └─────────────────────────────────────────────────────────────────────────────┘
-Step 11:  merge_to_base           タスクブランチを元のブランチにマージ
+Step 10:  merge_to_base           タスクブランチを元のブランチにマージ
                                   セッション完了、結果をユーザーに報告
 ```
 
@@ -195,23 +211,31 @@ MCP サーバーがフェーズ遷移を強制。LLM が勝手にスキップで
 
 #### フェーズマトリックス
 
-| オプション | 探索 | 実装 | 検証 | 介入 | ゴミ取 | 品質 | ブランチ |
-|-----------|:----:|:----:|:----:|:----:|:------:|:----:|:-------:|
-| (デフォルト) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `--only-explore` / `-e` | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
-| `--no-verify` | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | ✅ |
-| `--no-quality` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
-| `--fast` / `-f` | ❌ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
-| `--quick` / `-q` | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| オプション | DOC調査 | ソース探索 | 実装 | 検証 | 介入 | ゴミ取 | 品質 | ブランチ |
+|-----------|:----:|:----:|:----:|:----:|:------:|:----:|:-------:|:-------:|
+| (デフォルト) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `--only-explore` / `-e` | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `--no-verify` | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | ✅ |
+| `--no-quality` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
+| `--fast` / `-f` | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
+| `--quick` / `-q` | ✅ | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| `--no-doc-research` | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 
-#### フェーズ詳細
+**凡例**:
+- **DOC調査**: DOCUMENT_RESEARCH (Step 2.5)
+- **ソース探索**: EXPLORATION, SEMANTIC, VERIFICATION, IMPACT_ANALYSIS (Steps 4-7)
+
+#### フェーズ詳細（v1.10: 個別チェック方式）
 
 | フェーズ | 目的 | 許可ツール | 遷移条件 |
 |---------|------|-----------|----------|
-| EXPLORATION | コードベース理解 | query, find_definitions, find_references, search_text | サーバー評価 "high" |
+| EXPLORATION | コードベース理解 | query, find_definitions, find_references, search_text | EXPLORATION完了 |
+| Q1チェック | SEMANTIC必要性判断 | check_phase_necessity(phase="SEMANTIC") | needs_more_information判定 |
 | SEMANTIC | 情報ギャップを埋める | semantic_search | submit_semantic 完了 |
+| Q2チェック | VERIFICATION必要性判断 | check_phase_necessity(phase="VERIFICATION") | has_unverified_hypotheses判定 |
 | VERIFICATION | 仮説を検証 | 全探索ツール | submit_verification 完了 |
-| IMPACT_ANALYSIS | 変更影響を確認 | analyze_impact | 全 must_verify ファイル確認済み |
+| Q3チェック | IMPACT_ANALYSIS必要性判断 | check_phase_necessity(phase="IMPACT_ANALYSIS") | needs_impact_analysis判定 |
+| IMPACT_ANALYSIS | 変更影響を確認 | analyze_impact | submit_impact_analysis 完了 |
 | READY | 実装 | Edit, Write（探索済みファイルのみ） | - |
 | POST_IMPL_VERIFY | 動作確認 | Playwright, pytest 等 | 検証成功（3回失敗で介入発動） |
 | PRE_COMMIT | ゴミ検出 | review_changes, finalize_changes | ゴミ除去完了 |
@@ -326,11 +350,11 @@ doc_research:
 | `get_symbols` | ファイルのシンボル一覧取得 |
 | `semantic_search` | Forest/Map のベクトル検索 |
 
-### フェーズ完了
+### フェーズ制御（v1.10）
 
 | ツール | 説明 |
 |--------|------|
-| `submit_understanding` | EXPLORATION フェーズ完了 |
+| `check_phase_necessity` | 各フェーズ前の必要性チェック（Q1/Q2/Q3） |
 | `submit_semantic` | SEMANTIC フェーズ完了 |
 | `submit_verification` | VERIFICATION フェーズ完了 |
 | `submit_impact_analysis` | IMPACT_ANALYSIS フェーズ完了 |
@@ -380,6 +404,7 @@ doc_research:
 
 | Long | Short | 説明 |
 |------|-------|------|
+| `--gate=LEVEL` | `-g=LEVEL` | ゲートレベル: f(ull), a(uto) [default: auto] (v1.10) |
 | `--no-verify` | - | 検証をスキップ（介入もスキップ） |
 | `--no-quality` | - | 品質レビューをスキップ（v1.5） |
 | `--only-verify` | `-v` | 検証のみ実行 |
@@ -390,6 +415,10 @@ doc_research:
 | `--no-doc-research` | - | ドキュメント調査をスキップ |
 | `--clean` | `-c` | ベースブランチにチェックアウトし、stale な `llm_task_*` ブランチを削除 |
 | `--rebuild` | `-r` | 全インデックスを強制再構築 |
+
+**gate_level オプション（v1.10）:**
+- `--gate=full` または `-g=f`: 全チェックを無視して全フェーズ実行
+- `--gate=auto` または `-g=a`: 各フェーズ前に都度チェック（デフォルト）
 
 ### 実行フロー
 
@@ -436,62 +465,87 @@ Step 3.5: begin_phase_gate（v1.6）
 └─────────────────────────────────────────────────────────────────┘
 Step 4: EXPLORATION
     ├─ find_definitions, find_references, search_text 等を使用
-    ├─ mandatory_rules を acknowledge
-    └─ submit_understanding
+    └─ mandatory_rules を acknowledge
 
-Step 5: Symbol Validation
-    └─ Embedding で NL→Symbol 関連性を検証
+★ v1.10: 各フェーズ前に個別チェック方式
 
-Step 6: SEMANTIC（信頼度が低い場合のみ）
+Step 4.5: Q1チェック - SEMANTIC必要性判断
+    ├─ check_phase_necessity(phase="SEMANTIC", assessment={...})
+    │  質問: 追加の情報収集が必要ですか？
+    │  - needs_more_information: true/false
+    │  - needs_more_information_reason: "..."
+    ├─ gate_level="full" → 強制実行
+    ├─ gate_level="auto" + needs_more_information=true → SEMANTIC実行
+    └─ gate_level="auto" + needs_more_information=false → SEMANTICスキップ
+
+Step 5: SEMANTIC（Q1=YES の場合のみ）
     └─ semantic_search → submit_semantic
 
-Step 7: VERIFICATION（SEMANTIC 実行時のみ）
+Step 5.5: Q2チェック - VERIFICATION必要性判断
+    ├─ check_phase_necessity(phase="VERIFICATION", assessment={...})
+    │  質問: 検証が必要な仮説はありますか？
+    │  - has_unverified_hypotheses: true/false
+    │  - has_unverified_hypotheses_reason: "..."
+    ├─ gate_level="full" → 強制実行
+    ├─ gate_level="auto" + has_unverified_hypotheses=true → VERIFICATION実行
+    └─ gate_level="auto" + has_unverified_hypotheses=false → VERIFICATIONスキップ
+
+Step 6: VERIFICATION（Q2=YES の場合のみ）
     └─ 仮説をコードで検証 → submit_verification
 
-Step 8: IMPACT_ANALYSIS
+Step 6.5: Q3チェック - IMPACT_ANALYSIS必要性判断
+    ├─ check_phase_necessity(phase="IMPACT_ANALYSIS", assessment={...})
+    │  質問: 変更の影響範囲の確認が必要ですか？
+    │  - needs_impact_analysis: true/false
+    │  - needs_impact_analysis_reason: "..."
+    ├─ gate_level="full" → 強制実行
+    ├─ gate_level="auto" + needs_impact_analysis=true → IMPACT_ANALYSIS実行
+    └─ gate_level="auto" + needs_impact_analysis=false → IMPACT_ANALYSISスキップ
+
+Step 7: IMPACT_ANALYSIS（Q3=YES の場合のみ）
     ├─ 対象ファイルの analyze_impact
-    └─ 全 must_verify ファイルを確認 → submit_impact_analysis
+    └─ submit_impact_analysis
 
     ★ v1.8: skip_implementation=true 時（Intent=INVESTIGATE/QUESTION または --only-explore）:
        - submit_impact_analysis が exploration_complete=true を返却
-       - 調査結果をユーザーに報告して完了（Step 9 以降をスキップ）
+       - 調査結果をユーザーに報告して完了（Step 8 以降をスキップ）
        - ブランチ未作成、実装フェーズなし
 
 ┌─────────────────────────────────────────────────────────────────┐
 │ 実装・検証フェーズ（Server強制）                                 │
 └─────────────────────────────────────────────────────────────────┘
-Step 9: READY
+Step 8: READY
     ├─ 各 Edit/Write 前に check_write_target
     └─ 実装
     → submit_for_review で PRE_COMMIT へ
 
-Step 9.5: POST_IMPL_VERIFY
+Step 8.5: POST_IMPL_VERIFY
     ├─ ファイルタイプに基づき verifier を選択
     ├─ verifier プロンプトを実行（.code-intel/verifiers/）
-    ├─ 失敗時は Step 9 に戻る
+    ├─ 失敗時は Step 8 に戻る
     └─ 3回連続失敗で介入発動（v1.4）
     ← --no-verify でスキップ
 
 ┌─────────────────────────────────────────────────────────────────┐
 │ コミット・品質フェーズ（Server強制）                             │
 └─────────────────────────────────────────────────────────────────┘
-Step 10: PRE_COMMIT（ゴミ検出 + コミット準備）
+Step 9: PRE_COMMIT（ゴミ検出 + コミット準備）
     ├─ review_changes（garbage_detection.md で変更をレビュー）
     └─ finalize_changes（keep/discard 判断 + コミット準備）
        ★ v1.8: コミット準備のみ（実行は QUALITY_REVIEW 後）
 
-Step 10.5: QUALITY_REVIEW（v1.5、v1.8で順序変更）
+Step 9.5: QUALITY_REVIEW（v1.5、v1.8で順序変更）
     ├─ quality_review.md に基づき品質チェック
     ├─ 問題発見 → submit_quality_review(issues_found=true)
-    │            → Step 9 (READY) に差し戻し（準備したコミット破棄）
+    │            → Step 8 (READY) に差し戻し（準備したコミット破棄）
     └─ 問題なし → submit_quality_review(issues_found=false)
-                 → ★ここでコミット実行 → Step 11 へ
+                 → ★ここでコミット実行 → Step 10 へ
     ← --no-quality でスキップ
 
 ┌─────────────────────────────────────────────────────────────────┐
 │ 完了                                                            │
 └─────────────────────────────────────────────────────────────────┘
-Step 11: merge_to_base
+Step 10: merge_to_base
     └─ タスクブランチを元のブランチにマージ
        セッション完了、結果をユーザーに報告
 ```
@@ -647,13 +701,14 @@ class SessionState:
     phase: Phase          # 現在のフェーズ
     query_frame: QueryFrame
     task_branch_enabled: bool
-    gate_level: str       # high/middle/low/auto/none
+    gate_level: str       # full/auto (v1.10)
+    phase_assessments: dict  # 各チェックポイントの記録 (v1.10)
 
 class Phase(Enum):
     EXPLORATION = "exploration"
     SEMANTIC = "semantic"
-    VERIFICATION = "verification"
-    IMPACT_ANALYSIS = "impact_analysis"
+    VERIFICATION = "verification"        # v1.10: 分離
+    IMPACT_ANALYSIS = "impact_analysis"  # v1.10: 分離
     READY = "ready"
     PRE_COMMIT = "pre_commit"
 
@@ -720,6 +775,7 @@ get_improvement_insights(limit=100)
 
 | Version | Description | Link |
 |---------|-------------|------|
+| v1.10 | Individual Phase Checks（各フェーズ前の個別チェック、VERIFICATION/IMPACT分離、gate_level再編 - 20-60秒削減） | [v1.10](updates/v1.10_ja.md) |
 | v1.9 | Performance Optimization（sync_index バッチ処理、VERIFICATION+IMPACT統合 - 15-20秒削減） | [v1.9](updates/v1.9_ja.md) |
 | v1.8 | Exploration-Only Mode（探索のみモード - --only-explore） | [v1.8](updates/v1.8_ja.md) |
 | v1.7 | Parallel Execution（並列実行 - 27-35秒削減） | [v1.7](updates/v1.7_ja.md) |

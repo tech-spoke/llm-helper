@@ -21,115 +21,26 @@ from typing import Literal
 
 
 # =============================================================================
-# Context-Aware Constants (v1.1)
+# v1.10: Removed Context-Aware Functions
 # =============================================================================
 
-# マークアップファイル拡張子（シンボル検索が意味を成さないファイル）
-# 注意: .blade.php, .vue, .jsx, .tsx, .svelte 等は除外
-# これらはロジックと密接に結合しており、find_definitions/find_references が有効
-MARKUP_EXTENSIONS = {
-    ".html", ".htm",                    # 静的HTML
-    ".css", ".scss", ".sass", ".less",  # スタイルシート
-    ".xml", ".svg",                     # データ/グラフィック
-    ".md", ".markdown",                 # ドキュメント
-}
+# The following functions were REMOVED in v1.10 (no backward compatibility):
+# - extract_extensions_from_text(): LLM decides instead of file extension detection
+# - is_markup_context(): LLM decides phase necessity instead of automatic relaxation
+# - MARKUP_EXTENSIONS: No longer needed (LLM judges based on actual content)
+# - assess_risk_level() (in query_frame.py): Moved to LLM judgment via check_phase_necessity
+# - get_exploration_requirements() (in query_frame.py): Replaced by individual phase checks
 
-
-def extract_extensions_from_text(text: str) -> list[str]:
-    """
-    テキストからファイル拡張子を抽出。
-
-    Args:
-        text: 検索対象のテキスト（例: "sampleフォルダにhello worldのHTML"）
-
-    Returns:
-        見つかった拡張子のリスト（例: [".html"]）
-    """
-    import re
-    extensions = []
-
-    # パターン1: 明示的なファイル名（例: "hello.html", "style.css"）
-    file_pattern = r'\b[\w\-]+(\.[a-zA-Z]{2,5})\b'
-    for match in re.finditer(file_pattern, text):
-        ext = match.group(1).lower()
-        extensions.append(ext)
-
-    # パターン2: ファイルタイプの言及（例: "HTMLを作成", "CSSファイル"）
-    # 日本語と英語の両方に対応（単語境界 \b は日本語で機能しないため、パターンを調整）
-    type_mappings = {
-        r'(?i)html': '.html',
-        r'(?i)(?<![a-z])htm(?![a-z])': '.htm',
-        r'(?i)css': '.css',
-        r'(?i)scss': '.scss',
-        r'(?i)sass': '.sass',
-        r'(?i)less(?![a-z])': '.less',  # "unless" などを除外
-        r'(?i)(?<![a-z])xml(?![a-z])': '.xml',
-        r'(?i)(?<![a-z])svg(?![a-z])': '.svg',
-        r'(?i)markdown': '.md',
-        r'(?i)(?<![a-z])md(?![a-z])': '.md',
-    }
-    for pattern, ext in type_mappings.items():
-        if re.search(pattern, text):
-            if ext not in extensions:
-                extensions.append(ext)
-
-    return extensions
-
-
-def is_markup_context(files: list[str], target_files: list[str] | None = None) -> bool:
-    """
-    探索済みファイルがすべてマークアップ系かを判定。
-
-    Args:
-        files: 探索済みファイルのリスト
-        target_files: 新規作成予定のファイルリスト（任意）
-
-    Returns:
-        True if all files are markup files (or directories with markup targets)
-
-    判定ロジック:
-    1. target_files が指定されている場合、それらの拡張子をチェック
-    2. files にディレクトリ（拡張子なし or "/" で終わる）が含まれる場合:
-       - target_files があれば、そちらで判定
-       - なければ、ディレクトリは無視して他のファイルで判定
-    3. すべてのファイルがマークアップ拡張子を持つ場合 True
-    """
-    if not files and not target_files:
-        return False
-
-    # target_files が指定されている場合、そちらを優先
-    if target_files:
-        for f in target_files:
-            ext = Path(f).suffix.lower()
-            if ext and ext not in MARKUP_EXTENSIONS:
-                return False
-        return True
-
-    # files のみで判定
-    has_markup_file = False
-    for f in files:
-        # ディレクトリパスをスキップ（拡張子なし or "/" で終わる）
-        if f.endswith("/") or f.endswith("\\"):
-            continue
-        ext = Path(f).suffix.lower()
-        if not ext:
-            # 拡張子なしのパス（ディレクトリの可能性）はスキップ
-            continue
-        if ext not in MARKUP_EXTENSIONS:
-            return False
-        has_markup_file = True
-
-    # マークアップファイルが1つ以上あるか、すべてディレクトリの場合は False
-    return has_markup_file
+# v1.10 philosophy: Let LLM see actual code and decide necessity for each phase,
+# rather than pre-judging based on file extensions or QueryFrame content.
 
 
 class Phase(Enum):
-    """Execution phases in order."""
+    """Execution phases in order (v1.10: individual phase checks)."""
     EXPLORATION = auto()                 # Phase 1: code-intel required
-    SEMANTIC = auto()                    # Phase 2: semantic search allowed (if needed)
-    VERIFICATION_AND_IMPACT = auto()     # Phase 3: verify hypotheses + analyze impact (v1.9 integrated)
-    VERIFICATION = auto()                # Phase 3 (deprecated in v1.9, use VERIFICATION_AND_IMPACT)
-    IMPACT_ANALYSIS = auto()             # Phase 4 (deprecated in v1.9, use VERIFICATION_AND_IMPACT)
+    SEMANTIC = auto()                    # Phase 2: semantic search allowed (if Q1=YES)
+    VERIFICATION = auto()                # Phase 3: verify hypotheses (if Q2=YES, v1.10 separated)
+    IMPACT_ANALYSIS = auto()             # Phase 4: analyze impact (if Q3=YES, v1.10 separated)
     READY = auto()                       # Phase 5: implementation allowed
     PRE_COMMIT = auto()                  # Phase 6: garbage detection before commit (v1.2)
     QUALITY_REVIEW = auto()              # Phase 7: quality check before merge (v1.5)
@@ -185,38 +96,37 @@ STRICT_EXPLORATION_REQUIREMENTS = {
 }
 
 # =============================================================================
-# Gate Level Requirements (v1.2)
+# Gate Level (v1.10: Simplified to 2 levels)
 # =============================================================================
 
-# Gate level determines exploration thoroughness requirements
-# "none" skips exploration entirely (handled in create_session)
+# Gate level determines whether to check phase necessity
+# v1.10: Removed GATE_LEVEL_REQUIREMENTS - LLM decides phase necessity instead
+# Valid values: "full" (execute all phases) or "auto" (check before each phase)
 
-GATE_LEVEL_REQUIREMENTS = {
-    "high": {
-        # Strictest requirements - comprehensive exploration
-        "symbols_identified": 5,
-        "entry_points": 2,
-        "files_analyzed": 4,
-        "existing_patterns": 2,
-        "required_tools": {"find_definitions", "find_references", "search_text"},
-    },
-    "middle": {
-        # Standard requirements
-        "symbols_identified": 3,
-        "entry_points": 1,
-        "files_analyzed": 2,
-        "existing_patterns": 1,
-        "required_tools": {"find_definitions", "find_references"},
-    },
-    "low": {
-        # Minimal requirements
-        "symbols_identified": 1,
-        "entry_points": 0,
-        "files_analyzed": 1,
-        "existing_patterns": 0,
-        "required_tools": {"find_definitions"},
-    },
-    "auto": None,  # Determined by server based on risk_level
+# v1.10 note: The following constants are REMOVED in v1.10:
+# - GATE_LEVEL_REQUIREMENTS (5 levels → 2 levels)
+# - is_markup_context() (LLM decides instead of file extension)
+# - extract_extensions_from_text() (no longer needed)
+# - assess_risk_level() (moved to LLM judgment)
+# - get_exploration_requirements() (no longer needed)
+
+# Old MIN/STRICT requirements kept for compatibility with evaluate_exploration_v36
+# (will be simplified in future cleanup)
+MIN_EXPLORATION_REQUIREMENTS = {
+    "symbols_identified": 1,
+    "entry_points": 0,
+    "files_analyzed": 1,
+    "existing_patterns": 0,
+    "required_tools": {"find_definitions"},
+}
+
+# Strict requirements for IMPLEMENT/MODIFY to proceed to READY
+STRICT_EXPLORATION_REQUIREMENTS = {
+    "symbols_identified": 3,
+    "entry_points": 1,
+    "files_analyzed": 2,
+    "required_tools": {"find_definitions", "find_references"},
+    "existing_patterns": 1,
 }
 
 
@@ -242,21 +152,12 @@ def evaluate_exploration(
     missing = []
     tools_used = set(result.tools_used)
 
-    # v1.2: Gate level determines requirements
-    if gate_level in GATE_LEVEL_REQUIREMENTS and GATE_LEVEL_REQUIREMENTS[gate_level] is not None:
-        reqs = GATE_LEVEL_REQUIREMENTS[gate_level]
-    elif gate_level == "auto":
-        # Auto mode: use old behavior based on intent
-        if intent in ("IMPLEMENT", "MODIFY"):
-            reqs = STRICT_EXPLORATION_REQUIREMENTS
-        else:
-            reqs = MIN_EXPLORATION_REQUIREMENTS
+    # v1.10: Gate level simplified to "full" or "auto"
+    # Use intent-based requirements
+    if intent in ("IMPLEMENT", "MODIFY"):
+        reqs = STRICT_EXPLORATION_REQUIREMENTS
     else:
-        # Fallback to old behavior (high by default)
-        if intent in ("IMPLEMENT", "MODIFY"):
-            reqs = STRICT_EXPLORATION_REQUIREMENTS
-        else:
-            reqs = MIN_EXPLORATION_REQUIREMENTS
+        reqs = MIN_EXPLORATION_REQUIREMENTS
 
     # Check each requirement
     if len(result.symbols_identified) < reqs["symbols_identified"]:
@@ -314,44 +215,7 @@ def can_proceed_to_ready(
 # Dynamic Exploration Requirements based on risk_level
 # =============================================================================
 
-def get_dynamic_requirements(risk_level: str, intent: str) -> dict:
-    """
-    リスクレベルに応じた成果条件を返す。
-
-    HIGH リスクでは条件を厳しく、LOW では緩く。
-    """
-    base = {
-        "symbols_identified": 3,
-        "entry_points": 1,
-        "files_analyzed": 2,
-        "existing_patterns": 1,
-        "required_slot_evidence": [],
-    }
-
-    if intent not in ("IMPLEMENT", "MODIFY"):
-        return {
-            "symbols_identified": 1,
-            "entry_points": 0,
-            "files_analyzed": 1,
-            "existing_patterns": 0,
-            "required_slot_evidence": [],
-        }
-
-    if risk_level == "HIGH":
-        return {
-            "symbols_identified": 5,
-            "entry_points": 2,
-            "files_analyzed": 4,
-            "existing_patterns": 2,
-            "required_slot_evidence": ["target_feature", "observed_issue"],
-        }
-    elif risk_level == "MEDIUM":
-        return {
-            **base,
-            "required_slot_evidence": ["target_feature"],
-        }
-    else:
-        return base
+# v1.10: get_dynamic_requirements() removed - inlined into evaluate_exploration_v36()
 
 
 def evaluate_exploration_v36(
@@ -381,41 +245,43 @@ def evaluate_exploration_v36(
     missing = []
     tools_used = set(result.tools_used)
 
-    # v1.2: gate_level が指定されている場合はそれを優先
-    if gate_level != "auto" and gate_level in GATE_LEVEL_REQUIREMENTS:
-        if GATE_LEVEL_REQUIREMENTS[gate_level] is not None:
-            reqs = GATE_LEVEL_REQUIREMENTS[gate_level].copy()
-            # 必須スロットチェック用のフィールドを追加（互換性のため）
-            reqs["required_slot_evidence"] = []
-        else:
-            # none は来ないはず（create_session で READY にスキップ）
-            reqs = get_dynamic_requirements(risk_level, intent)
-    else:
-        # auto or fallback: 従来の risk_level ベースの要件を使用
-        reqs = get_dynamic_requirements(risk_level, intent)
-
-    # v1.1: マークアップコンテキストの判定
-    # v1.2: QueryFrame の target_feature からも拡張子を抽出して判定
-    markup_context = is_markup_context(result.files_analyzed)
-
-    # files_analyzed だけでは判定できない場合、target_feature からヒントを得る
-    if not markup_context and query_frame and query_frame.target_feature:
-        inferred_extensions = extract_extensions_from_text(query_frame.target_feature)
-        if inferred_extensions:
-            # すべての推定拡張子がマークアップ系かチェック
-            all_markup = all(ext in MARKUP_EXTENSIONS for ext in inferred_extensions)
-            if all_markup:
-                markup_context = True
-
-    # v1.1: マークアップの場合は要件を緩和
-    if markup_context:
+    # v1.10: gate_level は "full" または "auto" のみ
+    # risk_level に応じた要件を使用（get_dynamic_requirements() の内容を直接展開）
+    if intent not in ("IMPLEMENT", "MODIFY"):
         reqs = {
-            "symbols_identified": 0,  # シンボル不要
+            "symbols_identified": 1,
             "entry_points": 0,
             "files_analyzed": 1,
             "existing_patterns": 0,
             "required_slot_evidence": [],
         }
+    elif risk_level == "HIGH":
+        reqs = {
+            "symbols_identified": 5,
+            "entry_points": 2,
+            "files_analyzed": 4,
+            "existing_patterns": 2,
+            "required_slot_evidence": ["target_feature", "observed_issue"],
+        }
+    elif risk_level == "MEDIUM":
+        reqs = {
+            "symbols_identified": 3,
+            "entry_points": 1,
+            "files_analyzed": 2,
+            "existing_patterns": 1,
+            "required_slot_evidence": ["target_feature"],
+        }
+    else:  # LOW
+        reqs = {
+            "symbols_identified": 3,
+            "entry_points": 1,
+            "files_analyzed": 2,
+            "existing_patterns": 1,
+            "required_slot_evidence": [],
+        }
+
+    # v1.10: マークアップ検出による自動緩和を削除
+    # LLM が check_phase_necessity で判断するため、ファイル拡張子による事前判定は不要
 
     # 基本チェック
     if len(result.symbols_identified) < reqs["symbols_identified"]:
@@ -430,24 +296,20 @@ def evaluate_exploration_v36(
     if len(result.existing_patterns) < reqs.get("existing_patterns", 0):
         missing.append(f"existing_patterns: {len(result.existing_patterns)}/{reqs.get('existing_patterns', 0)}")
 
-    # v1.1: 必須ツールチェック（マークアップの場合は緩和）
-    # v1.2: gate_level 指定時は reqs["required_tools"] を使用
-    if markup_context:
-        # マークアップの場合: search_text があればOK
-        required_tools = {"search_text"}
-    elif "required_tools" in reqs:
-        # gate_level で指定された必須ツールを使用
+    # v1.10: 必須ツールチェック（マークアップ検出による緩和を削除）
+    if "required_tools" in reqs:
+        # 要件で指定された必須ツールを使用
         required_tools = reqs["required_tools"]
     else:
-        # フォールバック: 従来通り
+        # フォールバック: 基本的な要件
         required_tools = {"find_definitions", "find_references"}
 
     if not required_tools.issubset(tools_used):
         missing_tools = required_tools - tools_used
         missing.append(f"required_tools: missing {missing_tools}")
 
-    # v3.6: スロット証拠チェック（マークアップの場合はスキップ）
-    if not markup_context and query_frame and reqs.get("required_slot_evidence"):
+    # v3.6: スロット証拠チェック
+    if query_frame and reqs.get("required_slot_evidence"):
         for slot in reqs["required_slot_evidence"]:
             if slot not in query_frame.slot_evidence:
                 missing.append(f"slot_evidence: {slot} not evidenced")
@@ -913,8 +775,8 @@ class SessionState:
     task_branch_name: str | None = None  # Git branch name (llm_task_{session_id}_from_{base})
     task_branch_enabled: bool = False  # Whether task branch is active
 
-    # v1.2: Gate level for exploration phases
-    _gate_level: str = field(default="high", init=False)  # high, middle, low, auto, none
+    # v1.10: Gate level for phase necessity checks (simplified to 2 levels)
+    _gate_level: str = field(default="auto", init=False)  # full, auto
 
     # Semantic search results (Forest/Map architecture)
     map_results: list[dict] = field(default_factory=list)  # 地図検索結果
@@ -945,18 +807,31 @@ class SessionState:
     # v1.8: Only Explore Mode
     skip_implementation: bool = False  # Whether to skip implementation phase (--only-explore sets this to True)
 
+    # v1.10: Phase Necessity Assessments
+    phase_assessments: dict[str, dict] = field(default_factory=dict)  # Record of Q1/Q2/Q3 check results
+
     # v1.7: Ctags Performance Optimization
     definitions_cache: dict[tuple[str, str, str | None, bool], dict] = field(default_factory=dict)
     cache_stats: dict[str, int] = field(default_factory=lambda: {"hits": 0, "misses": 0})
 
     @property
     def gate_level(self) -> str:
-        """Get gate level for exploration phases."""
+        """Get gate level for phase necessity checks (v1.10: full or auto)."""
         return self._gate_level
 
     @gate_level.setter
     def gate_level(self, value: str) -> None:
-        """Set gate level for exploration phases."""
+        """
+        Set gate level for phase necessity checks (v1.10: full or auto).
+
+        Args:
+            value: "full" (execute all phases) or "auto" (check before each phase)
+
+        Raises:
+            ValueError: If value is not "full" or "auto"
+        """
+        if value not in ("full", "auto"):
+            raise ValueError(f"gate_level must be 'full' or 'auto', got '{value}'")
         self._gate_level = value
 
     def record_tool_call_start(self, tool: str, params: dict) -> None:
@@ -1075,7 +950,7 @@ class SessionState:
                 "query", "search_text", "find_definitions",
                 "find_references", "analyze_structure", "get_symbols",
                 "get_function_at_line", "search_files",
-                "submit_understanding",
+                "submit_exploration",  # v1.10: submit_understanding removed
             ]
         elif self.phase == Phase.SEMANTIC:
             return [
@@ -1127,7 +1002,7 @@ class SessionState:
                 return (
                     "semantic_search is not allowed in EXPLORATION phase. "
                     "First use code-intel tools (query, find_definitions, find_references). "
-                    "Then call submit_understanding. Server will evaluate if semantic search is needed."
+                    "Then call submit_exploration and check_phase_necessity(phase='SEMANTIC') to determine if semantic search is needed."
                 )
         elif self.phase == Phase.VERIFICATION:
             if tool == "semantic_search":
@@ -1314,29 +1189,15 @@ class SessionState:
                 "message": f"Cannot submit exploration in phase {self.phase.name}",
             }
 
-        # v1.1: マークアップコンテキストの場合、リスクレベルを再評価
-        # trigger_condition欠損によるHIGHリスクを緩和
-        # v1.2: QueryFrame の target_feature からも拡張子を抽出して判定
-        effective_risk_level = self.risk_level
-        markup_context = is_markup_context(result.files_analyzed)
-
-        # files_analyzed だけでは判定できない場合、target_feature からヒントを得る
-        if not markup_context and self.query_frame and self.query_frame.target_feature:
-            inferred_extensions = extract_extensions_from_text(self.query_frame.target_feature)
-            if inferred_extensions:
-                all_markup = all(ext in MARKUP_EXTENSIONS for ext in inferred_extensions)
-                if all_markup:
-                    markup_context = True
-
-        if markup_context and self.risk_level == "HIGH":
-            effective_risk_level = "LOW"
+        # v1.10: マークアップ検出による自動緩和を削除
+        # LLM が check_phase_necessity で判断するため、ファイル拡張子による事前判定は不要
 
         # v3.6: リスクレベルを考慮した成果評価
         # v1.2: gate_level も渡す
         confidence, missing = evaluate_exploration_v36(
             result,
             self.intent,
-            effective_risk_level,
+            self.risk_level,  # v1.10: effective_risk_levelではなく直接risk_levelを使用
             self.query_frame,
             self._gate_level,
         )
@@ -1384,8 +1245,9 @@ class SessionState:
         can_proceed = confidence == "high" and not consistency_errors and not hypothesis_block
 
         if can_proceed:
-            # v1.1: READY ではなく IMPACT_ANALYSIS へ
-            self.transition_to_phase(Phase.IMPACT_ANALYSIS, reason="submit_understanding_approved")
+            # v1.10: EXPLORATION complete, stay in EXPLORATION for Q1 check
+            # Do not auto-transition to next phase
+            # self.transition_to_phase(Phase.IMPACT_ANALYSIS, reason="submit_exploration_approved")
             response = {
                 "success": True,
                 "next_phase": Phase.IMPACT_ANALYSIS.name,
@@ -1522,14 +1384,14 @@ class SessionState:
             "timestamp": datetime.now().isoformat(),
         })
 
-        # v1.9: Transition to integrated VERIFICATION_AND_IMPACT phase
-        self.transition_to_phase(Phase.VERIFICATION_AND_IMPACT, reason="submit_semantic")
+        # v1.10: SEMANTIC complete, return to EXPLORATION to trigger Q2 check
+        # Stay in SEMANTIC phase, LLM will call check_phase_necessity for Q2
         return {
             "success": True,
-            "next_phase": Phase.VERIFICATION_AND_IMPACT.name,
-            "message": "Semantic search complete. Now verify hypotheses and analyze impact (integrated phase).",
+            "next_phase": "Q2_CHECK",
+            "message": "Semantic search complete. Now check if VERIFICATION is necessary.",
             "hypotheses_to_verify": [h.to_dict() for h in result.hypotheses],
-            "next_step": "Call analyze_impact first, then submit_verification_and_impact with both verified hypotheses and verified_files.",
+            "next_step": "Call check_phase_necessity(phase='VERIFICATION', assessment={...}) to determine if hypothesis verification is needed.",
         }
 
     def submit_verification(self, result: VerificationResult) -> dict:
@@ -1736,187 +1598,8 @@ class SessionState:
 
         return response
 
-    def submit_verification_and_impact(
-        self,
-        verified_hypotheses: list[dict],
-        verified_files: list[dict],
-        inferred_from_rules: list[str] | None = None,
-    ) -> dict:
-        """
-        v1.9: Integrated VERIFICATION + IMPACT_ANALYSIS submission.
-
-        Combines verification of semantic hypotheses with impact analysis
-        in a single phase, eliminating LLM round-trip wait.
-
-        Args:
-            verified_hypotheses: List of verified hypotheses (same format as submit_verification)
-            verified_files: List of verified files (same format as submit_impact_analysis)
-            inferred_from_rules: Files inferred from project rules
-
-        Returns: {"success": bool, "next_phase": str, "message": str}
-        """
-        if self.phase != Phase.VERIFICATION_AND_IMPACT:
-            return {
-                "success": False,
-                "next_phase": self.phase.name,
-                "message": f"Cannot submit verification and impact in phase {self.phase.name}",
-            }
-
-        # Validate verification data
-        if not verified_hypotheses:
-            return {
-                "success": False,
-                "next_phase": self.phase.name,
-                "message": "Must verify at least one hypothesis.",
-            }
-
-        # Convert verified_hypotheses to VerifiedHypothesis objects
-        verified = []
-        for vh in verified_hypotheses:
-            evidence_data = vh["evidence"]
-            evidence = VerificationEvidence(
-                tool=evidence_data["tool"],
-                target=evidence_data["target"],
-                result=evidence_data["result"],
-                files=evidence_data.get("files", []),
-            )
-            verified.append(VerifiedHypothesis(
-                hypothesis=vh["hypothesis"],
-                status=vh["status"],
-                evidence=evidence,
-            ))
-
-        # Validate evidence structure
-        for vh in verified:
-            is_valid, error = validate_verification_evidence(vh.evidence)
-            if not is_valid:
-                return {
-                    "success": False,
-                    "next_phase": self.phase.name,
-                    "message": f"Invalid evidence for hypothesis '{vh.hypothesis}': {error}",
-                    "valid_tools": list(VALID_VERIFICATION_TOOLS),
-                }
-
-        # Validate impact analysis data
-        if self.impact_analysis is None:
-            return {
-                "success": False,
-                "next_phase": self.phase.name,
-                "message": "Must call analyze_impact before submit_verification_and_impact.",
-            }
-
-        # Convert verified_files to VerifiedFile objects
-        verified_impact = []
-        for vf in verified_files:
-            verified_impact.append(VerifiedFile(
-                file=vf["file"],
-                status=vf["status"],
-                reason=vf.get("reason"),
-            ))
-
-        # Validate: all must_verify files must have a response
-        verified_paths = {v.file for v in verified_impact}
-        missing_must_verify = []
-        for must_file in self.impact_analysis.must_verify:
-            if must_file not in verified_paths:
-                missing_must_verify.append(must_file)
-
-        if missing_must_verify:
-            return {
-                "success": False,
-                "next_phase": self.phase.name,
-                "message": "Not all must_verify files have been verified.",
-                "missing_must_verify": missing_must_verify,
-                "hint": "Provide status for all must_verify files before proceeding.",
-            }
-
-        # Validate: status != will_modify requires reason
-        missing_reasons = []
-        for v in verified_impact:
-            if v.status != "will_modify" and not v.reason:
-                missing_reasons.append(v.file)
-
-        if missing_reasons:
-            return {
-                "success": False,
-                "next_phase": self.phase.name,
-                "message": "Files with status != will_modify require a reason.",
-                "missing_reasons": missing_reasons,
-            }
-
-        # Store verification results
-        self.verification = VerificationResult(verified=verified)
-
-        # Update impact_analysis result
-        self.impact_analysis.verified_files = verified_impact
-        self.impact_analysis.inferred_from_rules = inferred_from_rules or []
-
-        # Record combined phase transition
-        self.phase_history.append({
-            "from": Phase.VERIFICATION_AND_IMPACT.name,
-            "verification_result": self.verification.to_dict(),
-            "impact_result": self.impact_analysis.to_dict(),
-            "timestamp": datetime.now().isoformat(),
-        })
-
-        # v1.8: If skip_implementation is enabled, do not transition to READY
-        if self.skip_implementation:
-            response = {
-                "success": True,
-                "next_phase": Phase.VERIFICATION_AND_IMPACT.name,
-                "exploration_complete": True,
-                "message": "Exploration complete. Implementation skipped (--only-explore mode).",
-                "verified_hypotheses_count": len(verified),
-                "verified_files_count": len(verified_impact),
-                "will_modify": [v.file for v in verified_impact if v.status == "will_modify"],
-            }
-
-            # Check for should_verify warnings
-            should_verify_missing = []
-            for should_file in self.impact_analysis.should_verify:
-                if should_file not in verified_paths:
-                    should_verify_missing.append(should_file)
-
-            if should_verify_missing:
-                response["warning"] = f"Some should_verify files were not verified: {should_verify_missing}"
-
-            return response
-
-        # Normal flow: transition to READY
-        self.transition_to_phase(Phase.READY, reason="submit_verification_and_impact")
-
-        # Check for rejected hypotheses
-        rejected = [v for v in verified if v.status == "rejected"]
-        rejected_warning = None
-        if rejected:
-            rejected_warning = f"{len(rejected)} hypotheses were rejected. Do NOT implement based on rejected hypotheses."
-
-        # Check for should_verify warnings
-        should_verify_missing = []
-        for should_file in self.impact_analysis.should_verify:
-            if should_file not in verified_paths:
-                should_verify_missing.append(should_file)
-
-        response = {
-            "success": True,
-            "next_phase": Phase.READY.name,
-            "message": "Verification and impact analysis complete. Ready for implementation.",
-            "verified_hypotheses_count": len(verified),
-            "verified_files_count": len(verified_impact),
-            "will_modify": [v.file for v in verified_impact if v.status == "will_modify"],
-        }
-
-        # Add warnings if present
-        warnings = []
-        if rejected_warning:
-            warnings.append(rejected_warning)
-        if should_verify_missing:
-            warnings.append(f"Some should_verify files were not verified: {should_verify_missing}")
-
-        if warnings:
-            response["warning"] = "; ".join(warnings)
-
-        return response
+    # v1.10: submit_verification_and_impact removed (v1.9 integration reverted)
+    # Use separate submit_verification and submit_impact_analysis instead
 
     def submit_for_review(self) -> dict:
         """

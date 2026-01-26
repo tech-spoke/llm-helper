@@ -1,6 +1,6 @@
-# Code Intelligence MCP Server - Design Document v1.8
+# Code Intelligence MCP Server - Design Document v1.10
 
-> This document describes the complete system specification as of v1.8.
+> This document describes the complete system specification as of v1.10.
 > For version history, see [CHANGELOG](#changelog).
 
 ---
@@ -107,7 +107,7 @@ And have a mechanism to learn from failures.
 
 ## Processing Flow
 
-Processing consists of 4 layers (v1.8):
+Processing consists of 4 layers (v1.10):
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -124,38 +124,54 @@ Step 3.5: begin_phase_gate        Start phase gates, create branch, stale warnin
 │  Exploration Phase (Server enforced)                                        │
 └─────────────────────────────────────────────────────────────────────────────┘
 Step 4:   EXPLORATION             Source investigation (find_definitions, find_references, search_text)
-Step 5:   Symbol Validation       Embedding-based relevance validation
-Step 6:   SEMANTIC                Semantic search (only if confidence is low)
-Step 7:   VERIFICATION            Hypothesis verification (only if SEMANTIC executed)
-Step 8:   IMPACT_ANALYSIS         Impact range analysis
+
+          ★ v1.10: Individual phase check approach
+          ↓
+Step 4.5: Q1 Check                Is additional information collection needed?
+          ├─ YES → Execute SEMANTIC
+          └─ NO → Skip SEMANTIC
+          ↓
+Step 5:   SEMANTIC                Semantic search (only if Q1=YES)
+          ↓
+Step 5.5: Q2 Check                Are there hypotheses that need verification?
+          ├─ YES → Execute VERIFICATION
+          └─ NO → Skip VERIFICATION
+          ↓
+Step 6:   VERIFICATION            Hypothesis verification (only if Q2=YES)
+          ↓
+Step 6.5: Q3 Check                Is impact range confirmation needed?
+          ├─ YES → Execute IMPACT_ANALYSIS
+          └─ NO → Skip IMPACT_ANALYSIS
+          ↓
+Step 7:   IMPACT_ANALYSIS         Impact range analysis (only if Q3=YES)
           ↓
           [If --only-explore: End here, report findings to user]
 
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │  Implementation & Verification Phase (Server enforced)                      │
 └─────────────────────────────────────────────────────────────────────────────┘
-Step 9:   READY                   Implementation (Edit/Write/Bash allowed)
-Step 9.5: POST_IMPL_VERIFY        Post-implementation verification (verifier prompts)
+Step 8:   READY                   Implementation (Edit/Write/Bash allowed)
+Step 8.5: POST_IMPL_VERIFY        Post-implementation verification (verifier prompts)
                                   ← skip with --no-verify
-                                  On failure, loop back to Step 9 (max 3 times)
+                                  On failure, loop back to Step 8 (max 3 times)
 
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │  Commit & Quality Phase (Server enforced)                                   │
 └─────────────────────────────────────────────────────────────────────────────┘
-Step 10:  PRE_COMMIT              Pre-commit review
+Step 9:   PRE_COMMIT              Pre-commit review
           ├─ review_changes       Garbage detection (garbage_detection.md)
-          └─ finalize_changes     Keep/discard decision + commit execution ★Commit here
+          └─ finalize_changes     Keep/discard decision + commit preparation
 
-Step 10.5: QUALITY_REVIEW         Quality review ← skip with --no-quality
+Step 9.5: QUALITY_REVIEW          Quality review ← skip with --no-quality
           ├─ quality_review.md    Checklist review
           └─ submit_quality_review
               ├─ Issues found → Revert to READY (fix → POST_IMPL_VERIFY → PRE_COMMIT → QUALITY_REVIEW)
-              └─ No issues → Next
+              └─ No issues → ★Commit execution here → Next
 
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │  Completion                                                                 │
 └─────────────────────────────────────────────────────────────────────────────┘
-Step 11:  merge_to_base           Merge task branch to original branch
+Step 10:  merge_to_base           Merge task branch to original branch
                                   Session complete, report results to user
 ```
 
@@ -196,23 +212,31 @@ MCP server enforces phase transitions. LLM cannot skip arbitrarily.
 
 #### Phase Matrix
 
-| Option | Explore | Implement | Verify | Intervene | Garbage | Quality | Branch |
-|--------|:-------:|:---------:|:------:|:---------:|:-------:|:-------:|:------:|
-| (default) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `--only-explore` / `-e` | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
-| `--no-verify` | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | ✅ |
-| `--no-quality` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
-| `--fast` / `-f` | ❌ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
-| `--quick` / `-q` | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Option | Doc Research | Source Explore | Implement | Verify | Intervene | Garbage | Quality | Branch |
+|--------|:-------:|:-------:|:---------:|:------:|:---------:|:-------:|:-------:|:------:|
+| (default) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `--only-explore` / `-e` | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `--no-verify` | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | ✅ |
+| `--no-quality` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
+| `--fast` / `-f` | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
+| `--quick` / `-q` | ✅ | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| `--no-doc-research` | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 
-#### Phase Details
+**Legend**:
+- **Doc Research**: DOCUMENT_RESEARCH (Step 2.5)
+- **Source Explore**: EXPLORATION, SEMANTIC, VERIFICATION, IMPACT_ANALYSIS (Steps 4-7)
+
+#### Phase Details (v1.10: Individual Check Approach)
 
 | Phase | Purpose | Allowed Tools | Transition Condition |
 |-------|---------|---------------|---------------------|
-| EXPLORATION | Understand codebase | query, find_definitions, find_references, search_text, analyze_structure | Server evaluation "high" |
+| EXPLORATION | Understand codebase | query, find_definitions, find_references, search_text, analyze_structure | EXPLORATION completed |
+| Q1 Check | Determine SEMANTIC necessity | check_phase_necessity(phase="SEMANTIC") | needs_more_information decision |
 | SEMANTIC | Fill information gaps | semantic_search | submit_semantic completed |
+| Q2 Check | Determine VERIFICATION necessity | check_phase_necessity(phase="VERIFICATION") | has_unverified_hypotheses decision |
 | VERIFICATION | Verify hypotheses | All exploration tools | submit_verification completed |
-| IMPACT_ANALYSIS | Check change impact | analyze_impact | All must_verify files confirmed |
+| Q3 Check | Determine IMPACT_ANALYSIS necessity | check_phase_necessity(phase="IMPACT_ANALYSIS") | needs_impact_analysis decision |
+| IMPACT_ANALYSIS | Check change impact | analyze_impact | submit_impact_analysis completed |
 | READY | Implementation | Edit, Write (explored files only) | - |
 | POST_IMPL_VERIFY | Run verification | Verifier prompts (Playwright, pytest) | Success (3 failures trigger intervention) |
 | PRE_COMMIT | Review changes | review_changes, finalize_changes | Garbage removed |
@@ -318,11 +342,11 @@ doc_research:
 | `get_symbols` | Get symbol list for a file |
 | `semantic_search` | Vector search in Forest/Map |
 
-### Phase Completion
+### Phase Control (v1.10)
 
 | Tool | Description |
 |------|-------------|
-| `submit_understanding` | Complete EXPLORATION phase |
+| `check_phase_necessity` | Check phase necessity before each phase (Q1/Q2/Q3) |
 | `submit_semantic` | Complete SEMANTIC phase |
 | `submit_verification` | Complete VERIFICATION phase |
 | `submit_impact_analysis` | Complete IMPACT_ANALYSIS phase |
@@ -372,18 +396,22 @@ doc_research:
 
 | Long | Short | Description |
 |------|-------|-------------|
+| `--gate=LEVEL` | `-g=LEVEL` | Gate level: f(ull), a(uto) [default: auto] (v1.10) |
 | `--no-verify` | - | Skip post-implementation verification (and intervention) |
 | `--no-quality` | - | Skip quality review (v1.5) |
 | `--only-verify` | `-v` | Run verification only |
 | `--only-explore` | `-e` | Run exploration only (skip implementation) (v1.8) |
-| `--gate=LEVEL` | `-g=LEVEL` | Gate level: h(igh), m(iddle), l(ow), a(uto), n(one) |
-| `--fast` | `-f` | Skip exploration with branch (= `-g=n` + branch) |
-| `--quick` | `-q` | Skip exploration, no branch (= `-g=n` + `skip_branch`) |
+| `--fast` | `-f` | Skip exploration with branch |
+| `--quick` | `-q` | Skip exploration, no branch |
 | `--doc-research=PROMPTS` | - | Specify research prompts |
 | `--no-doc-research` | - | Skip document research |
 | `--no-intervention` | `-ni` | Skip intervention system (v1.4) |
 | `--clean` | `-c` | Checkout to base branch, delete stale `llm_task_*` branches |
 | `--rebuild` | `-r` | Force full re-index |
+
+**gate_level options (v1.10):**
+- `--gate=full` or `-g=f`: Ignore all checks and execute all phases
+- `--gate=auto` or `-g=a`: Check before each phase (default)
 
 ### Execution Flow
 
@@ -430,62 +458,87 @@ Step 3.5: begin_phase_gate (v1.6)
 └─────────────────────────────────────────────────────────────────┘
 Step 4: EXPLORATION
     ├─ Use find_definitions, find_references, search_text, etc.
-    ├─ Acknowledge mandatory_rules
-    └─ submit_understanding
+    └─ Acknowledge mandatory_rules
 
-Step 5: Symbol Validation
-    └─ Verify NL→Symbol relevance via embedding
+★ v1.10: Individual phase check approach
 
-Step 6: SEMANTIC (only if confidence is low)
+Step 4.5: Q1 Check - Determine SEMANTIC necessity
+    ├─ check_phase_necessity(phase="SEMANTIC", assessment={...})
+    │  Question: Is additional information collection needed?
+    │  - needs_more_information: true/false
+    │  - needs_more_information_reason: "..."
+    ├─ gate_level="full" → Force execute
+    ├─ gate_level="auto" + needs_more_information=true → Execute SEMANTIC
+    └─ gate_level="auto" + needs_more_information=false → Skip SEMANTIC
+
+Step 5: SEMANTIC (only if Q1=YES)
     └─ semantic_search → submit_semantic
 
-Step 7: VERIFICATION (only if SEMANTIC executed)
+Step 5.5: Q2 Check - Determine VERIFICATION necessity
+    ├─ check_phase_necessity(phase="VERIFICATION", assessment={...})
+    │  Question: Are there hypotheses that need verification?
+    │  - has_unverified_hypotheses: true/false
+    │  - has_unverified_hypotheses_reason: "..."
+    ├─ gate_level="full" → Force execute
+    ├─ gate_level="auto" + has_unverified_hypotheses=true → Execute VERIFICATION
+    └─ gate_level="auto" + has_unverified_hypotheses=false → Skip VERIFICATION
+
+Step 6: VERIFICATION (only if Q2=YES)
     └─ Verify hypotheses with code → submit_verification
 
-Step 8: IMPACT_ANALYSIS
+Step 6.5: Q3 Check - Determine IMPACT_ANALYSIS necessity
+    ├─ check_phase_necessity(phase="IMPACT_ANALYSIS", assessment={...})
+    │  Question: Is change impact range confirmation needed?
+    │  - needs_impact_analysis: true/false
+    │  - needs_impact_analysis_reason: "..."
+    ├─ gate_level="full" → Force execute
+    ├─ gate_level="auto" + needs_impact_analysis=true → Execute IMPACT_ANALYSIS
+    └─ gate_level="auto" + needs_impact_analysis=false → Skip IMPACT_ANALYSIS
+
+Step 7: IMPACT_ANALYSIS (only if Q3=YES)
     ├─ analyze_impact for target files
-    └─ Confirm all must_verify files → submit_impact_analysis
+    └─ submit_impact_analysis
 
     ★ v1.8: If skip_implementation=true (Intent=INVESTIGATE/QUESTION or --only-explore):
        - submit_impact_analysis returns exploration_complete=true
-       - Report findings to user and complete (skip Step 9 onwards)
+       - Report findings to user and complete (skip Step 8 onwards)
        - No branch created, no implementation phases
 
 ┌─────────────────────────────────────────────────────────────────┐
 │ Implementation & Verification Phase (Server enforced)           │
 └─────────────────────────────────────────────────────────────────┘
-Step 9: READY
+Step 8: READY
     ├─ check_write_target before each Edit/Write
     └─ Implementation
     → submit_for_review to PRE_COMMIT
 
-Step 9.5: POST_IMPL_VERIFY
+Step 8.5: POST_IMPL_VERIFY
     ├─ Select verifier based on file types
     ├─ Run verifier prompts (.code-intel/verifiers/)
-    ├─ Loop back to Step 9 on failure
+    ├─ Loop back to Step 8 on failure
     └─ Intervention on 3 consecutive failures (v1.4)
     ← skip with --no-verify
 
 ┌─────────────────────────────────────────────────────────────────┐
 │ Commit & Quality Phase (Server enforced)                        │
 └─────────────────────────────────────────────────────────────────┘
-Step 10: PRE_COMMIT (garbage detection + commit preparation)
+Step 9: PRE_COMMIT (garbage detection + commit preparation)
     ├─ review_changes (review with garbage_detection.md)
     └─ finalize_changes (keep/discard decision + commit preparation)
        ★ v1.8: Prepare commit only (execution after QUALITY_REVIEW)
 
-Step 10.5: QUALITY_REVIEW (v1.5, order changed in v1.8)
+Step 9.5: QUALITY_REVIEW (v1.5, order changed in v1.8)
     ├─ quality_review.md checklist
     ├─ Issues found → submit_quality_review(issues_found=true)
-    │                → Revert to Step 9 (READY) (discard prepared commit)
+    │                → Revert to Step 8 (READY) (discard prepared commit)
     └─ No issues → submit_quality_review(issues_found=false)
-                 → ★Commit execution happens here → Step 11
+                 → ★Commit execution happens here → Step 10
     ← skip with --no-quality
 
 ┌─────────────────────────────────────────────────────────────────┐
 │ Completion                                                      │
 └─────────────────────────────────────────────────────────────────┘
-Step 11: merge_to_base
+Step 10: merge_to_base
     └─ Merge task branch to original branch
        Session complete, report results to user
 ```
@@ -641,13 +694,14 @@ class SessionState:
     phase: Phase          # Current phase
     query_frame: QueryFrame
     task_branch_enabled: bool
-    gate_level: str       # high/middle/low/auto/none
+    gate_level: str       # full/auto (v1.10)
+    phase_assessments: dict  # Record of each checkpoint (v1.10)
 
 class Phase(Enum):
     EXPLORATION = "exploration"
     SEMANTIC = "semantic"
-    VERIFICATION = "verification"
-    IMPACT_ANALYSIS = "impact_analysis"
+    VERIFICATION = "verification"        # v1.10: Separated
+    IMPACT_ANALYSIS = "impact_analysis"  # v1.10: Separated
     READY = "ready"
     PRE_COMMIT = "pre_commit"
 
@@ -714,6 +768,7 @@ For version history and detailed changes:
 
 | Version | Description | Link |
 |---------|-------------|------|
+| v1.10 | Individual Phase Checks (individual necessity checks before each phase, VERIFICATION/IMPACT separation, gate_level redesign - saves 20-60s) | [v1.10](updates/v1.10_ja.md) |
 | v1.9 | Performance Optimization (sync_index batch, VERIFICATION+IMPACT integration - saves 15-20s) | [v1.9](updates/v1.9.md) |
 | v1.8 | Exploration-Only Mode (--only-explore) | [v1.8](updates/v1.8.md) |
 | v1.7 | Parallel Execution (search_text, Read, Grep - saves 27-35s) | [v1.7](updates/v1.7.md) |
