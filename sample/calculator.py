@@ -53,6 +53,7 @@ def main():
     print(f"5 + 3 = {calc.add(5, 3)}")
     print(f"10 - 4 = {calc.subtract(10, 4)}")
     print(f"3 * 7 = {calc.multiply(3, 7)}")
+    print(f"10 / 2 = {calc.divide(10, 2)}")
     print(f"Sum of [1,2,3,4,5] = {calculate_sum([1, 2, 3, 4, 5])}")
     print(f"Average of [1,2,3,4,5] = {calculate_average([1, 2, 3, 4, 5])}")
 
