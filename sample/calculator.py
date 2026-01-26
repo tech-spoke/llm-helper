@@ -29,6 +29,11 @@ class Calculator:
         self.result = a / b
         return self.result
 
+    def power(self, a, b):
+        """Return a raised to the power of b."""
+        self.result = a ** b
+        return self.result
+
 
 def calculate_sum(numbers):
     """Calculate sum of a list of numbers."""

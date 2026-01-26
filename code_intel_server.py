@@ -2238,6 +2238,14 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         reviewed_files = arguments.get("reviewed_files", [])
         commit_message = arguments.get("commit_message")
 
+        # Handle string-serialized reviewed_files (MCP client workaround)
+        if isinstance(reviewed_files, str):
+            try:
+                reviewed_files = json.loads(reviewed_files)
+            except json.JSONDecodeError as e:
+                result = {"error": "invalid_reviewed_files", "message": f"Failed to parse reviewed_files JSON: {e}"}
+                return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+
         # Submit review to session
         review_result = session.submit_pre_commit_review(
             reviewed_files=reviewed_files,
