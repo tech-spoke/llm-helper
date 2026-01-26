@@ -52,6 +52,7 @@ def main():
     calc = Calculator()
     print(f"5 + 3 = {calc.add(5, 3)}")
     print(f"10 - 4 = {calc.subtract(10, 4)}")
+    print(f"2 ^ 10 = {calc.power(2, 10)}")
     print(f"Sum of [1,2,3,4,5] = {calculate_sum([1, 2, 3, 4, 5])}")
     print(f"Average of [1,2,3,4,5] = {calculate_average([1, 2, 3, 4, 5])}")
 
