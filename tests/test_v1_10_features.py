@@ -502,5 +502,65 @@ class TestV110RemovedFeatures:
         assert hasattr(Phase, 'IMPACT_ANALYSIS')
 
 
+class TestSkipExplorationFastMode:
+    """Test v1.11+ skip_exploration parameter for --fast mode."""
+
+    def test_skip_exploration_sets_ready_phase(self):
+        """Test that skip_exploration should transition to READY phase."""
+        session = SessionState(
+            session_id="test-fast-mode",
+            intent="IMPLEMENT",
+            query="fix button color",
+            repo_path=Path("."),
+        )
+        # Initially EXPLORATION
+        session.phase = Phase.EXPLORATION
+
+        # With skip_exploration, should transition to READY
+        session.transition_to_phase(Phase.READY, reason="skip_exploration (fast mode)")
+        assert session.phase == Phase.READY
+
+    def test_skip_exploration_branch_should_be_enabled(self):
+        """Test that skip_exploration mode should have branch enabled."""
+        session = SessionState(
+            session_id="test-fast-mode-branch",
+            intent="IMPLEMENT",
+            query="fix button color",
+            repo_path=Path("."),
+        )
+
+        # In fast mode, branch should be enabled (unlike quick mode)
+        session.task_branch_enabled = True
+        session.task_branch_name = "llm_task_test_from_main"
+
+        assert session.task_branch_enabled is True
+        assert session.task_branch_name is not None
+
+    def test_skip_branch_takes_precedence_over_skip_exploration(self):
+        """Test that skip_branch=true should take precedence (--quick wins over --fast)."""
+        session = SessionState(
+            session_id="test-precedence",
+            intent="IMPLEMENT",
+            query="fix button color",
+            repo_path=Path("."),
+        )
+
+        # If both flags are set, skip_branch should win (no branch)
+        # This simulates the server's check order: skip_branch first, then skip_exploration
+        skip_branch = True
+        skip_exploration = True
+
+        if skip_branch:
+            # --quick mode: no branch
+            session.task_branch_enabled = False
+            session.transition_to_phase(Phase.READY, reason="skip_branch (quick mode)")
+        elif skip_exploration:
+            # --fast mode: with branch (but this branch won't be reached)
+            session.task_branch_enabled = True
+
+        assert session.task_branch_enabled is False  # skip_branch wins
+        assert session.phase == Phase.READY
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

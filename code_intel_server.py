@@ -719,6 +719,7 @@ async def list_tools() -> list[Tool]:
             description="v1.6: Start phase gate and create task branch. Call after start_session. "
                         "If stale branches exist, returns error with recovery options (user must decide). "
                         "Use skip_branch=true for --quick mode. "
+                        "Use skip_exploration=true for --fast mode (creates branch, skips to READY). "
                         "Use resume_current=true to continue on current branch (for 'Continue as-is' option).",
             inputSchema={
                 "type": "object",
@@ -729,7 +730,13 @@ async def list_tools() -> list[Tool]:
                     },
                     "skip_branch": {
                         "type": "boolean",
-                        "description": "Skip branch creation (for --quick mode). Transitions directly to READY.",
+                        "description": "Skip branch creation (for --quick mode). Transitions directly to READY without branch.",
+                        "default": False,
+                    },
+                    "skip_exploration": {
+                        "type": "boolean",
+                        "description": "Skip exploration phases (for --fast mode). Creates branch and transitions directly to READY. "
+                                       "Use this when skip_branch=false but exploration should be skipped.",
                         "default": False,
                     },
                     "resume_current": {
@@ -1739,6 +1746,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         # v1.11: Branch creation moved to READY phase transition
         session_id = arguments["session_id"]
         skip_branch = arguments.get("skip_branch", False)
+        skip_exploration = arguments.get("skip_exploration", False)
         resume_current = arguments.get("resume_current", False)
 
         session = session_manager.get_session(session_id)
@@ -1802,6 +1810,23 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                         "reason": "skip_branch=true (quick mode)",
                     },
                 }
+            return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+
+        # Handle skip_exploration (--fast mode): skip exploration but create branch
+        if skip_exploration:
+            # Create branch and go directly to READY
+            branch_result = await _create_branch_for_ready(session)
+            if not branch_result.get("success", False) and "error" in branch_result:
+                # Branch creation failed
+                return [TextContent(type="text", text=json.dumps(branch_result, indent=2, ensure_ascii=False))]
+
+            session.transition_to_phase(Phase.READY, reason="skip_exploration (fast mode)")
+            result = {
+                "success": True,
+                "phase": "READY",
+                "branch": branch_result.get("branch"),
+                "message": "Exploration skipped. Branch created. Ready for implementation.",
+            }
             return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
         # Handle resume_current

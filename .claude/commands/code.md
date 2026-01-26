@@ -377,9 +377,16 @@ QueryFrame:
 
    ```
    begin_phase_gate(
-     session_id="<session_id>"
+     session_id="<session_id>",
+     skip_exploration=<true if --fast flag>,
+     skip_branch=<true if --quick flag>
    )
    ```
+
+   **Flag handling:**
+   - `--fast` / `-f`: Call with `skip_exploration=true` (creates branch, skips to READY)
+   - `--quick` / `-q`: Call with `skip_branch=true` (no branch, skips to READY)
+   - Normal: Call with no extra parameters (exploration phase starts)
 
 2. **Stale branch detection:**
    - The server checks for existing `llm_task_*` branches while not on a task branch
@@ -404,24 +411,23 @@ QueryFrame:
      - Merge: Call `cleanup_stale_branches(session_id, action="merge")`
      - Continue: Call `begin_phase_gate` again with `resume_current=true`
 
-4. **Branch creation logic (v1.11):**
-   - **Branch is NOT created at this step**
-   - Branch creation is deferred to READY phase transition
-   - This allows exploration to complete before committing to implementation
+4. **Branch creation logic (v1.11+):**
 
-   - **Branch will be created when:**
-     - Q3 Check skips IMPACT_ANALYSIS → READY transition
-     - submit_impact_analysis completes → READY transition
+   | Mode | Parameter | Branch Created | Phase |
+   |------|-----------|----------------|-------|
+   | Normal | (none) | Deferred to READY transition | EXPLORATION |
+   | `--fast` | `skip_exploration=true` | **Immediately** | READY |
+   | `--quick` | `skip_branch=true` | No | READY |
 
-   - **No branch is created if:**
-     - `skip_implementation = true` (exploration-only mode)
-     - `skip_branch = true` (--quick mode)
+   - **Normal mode**: Branch created when Q3 skips IMPACT_ANALYSIS or submit_impact_analysis completes
+   - **Fast mode**: Branch created immediately at begin_phase_gate, then READY
+   - **Quick mode**: No branch created, direct to READY
 
 5. **Phase gates started:**
-   - Server sets initial phase to EXPLORATION
-   - All subsequent phase transitions will be enforced
+   - Normal: Server sets initial phase to EXPLORATION
+   - Fast/Quick: Server sets initial phase to READY
 
-**Next**: Proceed to Step 4 (EXPLORATION), or skip to Step 8 (READY) if `skip_exploration=true`.
+**Next**: Proceed to Step 4 (EXPLORATION), or skip to Step 8 (READY) if `skip_exploration=true` or `skip_branch=true`.
 
 ---
 
