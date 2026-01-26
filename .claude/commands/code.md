@@ -47,28 +47,6 @@ The MCP server enforces phase gates to ensure thorough understanding before impl
 | `--clean` | `-c` | Checkout to base branch, delete stale `llm_task_*` branches |
 | `--rebuild` | `-r` | Force full re-index |
 
-### Phase Matrix
-
-| Option | DOC調査 | ソース探索 | 実装 | 検証 | 介入 | ゴミ取 | 品質 | ブランチ |
-|--------|:-------:|:----------:|:----:|:----:|:----:|:------:|:----:|:--------:|
-| (default) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `--only-explore` / `-e` | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `--no-verify` | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | ✅ |
-| `--no-quality` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
-| `--fast` / `-f` | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
-| `--quick` / `-q` | ✅ | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
-| `--no-doc-research` | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-
-**Legend**:
-- **DOC調査**: DOCUMENT_RESEARCH (Step 2.5)
-- **ソース探索**: EXPLORATION, SEMANTIC, VERIFICATION, IMPACT_ANALYSIS (Steps 4-7)
-- **実装**: READY phase implementation
-- **検証**: POST_IMPL_VERIFY phase
-- **介入**: Intervention system on verification failures
-- **ゴミ取**: PRE_COMMIT garbage detection
-- **品質**: QUALITY_REVIEW phase
-- **ブランチ**: Task branch creation
-
 ---
 
 ## Execution Flow
@@ -139,6 +117,15 @@ Step 10:  merge_to_base           Merge task branch to original branch
 1. Parse the command line arguments to extract flags.
 2. Set internal flags based on detected options:
 
+   - **If `--rebuild` or `-r` detected:**
+     - Call `sync_index` with `force_rebuild=true`
+     - **End execution** (do not proceed to Step 1)
+
+   - **If `--only-verify` or `-v` detected:**
+     - Skip to Step 8.5 (POST_IMPL_VERIFY)
+     - Run verification on existing code without implementation
+     - **Do NOT proceed to Step 1**
+
    - **If `--only-explore` or `-e` detected:**
      - `skip_implementation = true`
      - `skip_branch = true`
@@ -167,6 +154,10 @@ Step 10:  merge_to_base           Merge task branch to original branch
 
    - **If `--no-doc-research` detected:**
      - `skip_doc_research = true`
+
+   - **If `--doc-research=PROMPTS` detected:**
+     - `doc_research_prompts = PROMPTS` (comma-separated list)
+     - Use specified prompts instead of defaults from context.yml
 
    - **If `--gate=LEVEL` or `-g=LEVEL` detected:**
      - `gate_level = "full"` (if LEVEL is `f` or `full`)
@@ -1242,82 +1233,6 @@ Branch llm_task_session_20250126_123456_from_main has been merged to main and de
 
 ---
 
-## Optional Tools
-
-### Symbol Validation
-
-**When to use**: When you have a list of discovered symbols and want to verify their relevance to the task.
-
-**Tools**:
-
-1. **`validate_symbol_relevance`**
-
-   ```
-   validate_symbol_relevance(
-     session_id="<session_id>",
-     symbols=["<symbol1>", "<symbol2>"],
-     target_feature="<feature from QueryFrame>"
-   )
-   ```
-
-   **Returns:**
-   - `cached_matches`: Symbols previously approved for similar tasks
-   - `embedding_suggestions`: Symbols with similarity scores
-
-   **Use the results to:**
-   - Prioritize `cached_matches` (high confidence)
-   - Review `embedding_suggestions` (scores > 0.6 are relevant)
-
-2. **`confirm_symbol_relevance`**
-
-   ```
-   confirm_symbol_relevance(
-     session_id="<session_id>",
-     mapped_symbols=[
-       {
-         "symbol": "<symbol1>",
-         "approved": true,
-         "code_evidence": "<why it's relevant>"
-       },
-       {
-         "symbol": "<symbol2>",
-         "approved": false,
-         "code_evidence": ""
-       }
-     ]
-   )
-   ```
-
-   **Server validates** your decisions using embedding similarity:
-   - Similarity > 0.6: Fact (strong agreement)
-   - Similarity 0.3-0.6: High-risk hallucination
-   - Similarity < 0.3: Rejected
-
-**Example**:
-```
-validate_symbol_relevance(
-  symbols=["LoginButton", "AuthService", "Logger"],
-  target_feature="login button color"
-)
-
-Result:
-  cached_matches: []
-  embedding_suggestions:
-    - {symbol: "LoginButton", score: 0.89}
-    - {symbol: "AuthService", score: 0.42}
-    - {symbol: "Logger", score: 0.15}
-
-confirm_symbol_relevance(
-  mapped_symbols=[
-    {symbol: "LoginButton", approved: true, code_evidence: "Direct target of color change"},
-    {symbol: "AuthService", approved: false, code_evidence: ""},
-    {symbol: "Logger", approved: false, code_evidence: ""}
-  ]
-)
-```
-
----
-
 ## Common Patterns
 
 ### Error Handling
@@ -1359,88 +1274,11 @@ confirm_symbol_relevance(
    - Note important findings
    - Build clear mental model
 
-6. **Use parallel execution (MANDATORY - saves 15-35 seconds):**
-
-   **a) search_text with multiple patterns:**
-   ```
-   ✅ CORRECT (saves 15-20 seconds):
-   search_text(patterns=["modal", "dialog", "popup"])
-   → All patterns execute in parallel (0.06 seconds total)
-
-   ❌ WRONG (wastes time):
-   search_text("modal")     # Wait 10s
-   search_text("dialog")    # Wait 10s
-   search_text("popup")     # Total: 20s wasted
-   ```
-
-   **b) Multiple tool calls in one message:**
-   ```
-   ✅ CORRECT (saves 5-10 seconds):
-   Call find_definitions, find_references, Read in SINGLE message
-   → All execute in parallel
-
-   ❌ WRONG (wastes time):
-   Call find_definitions → wait → call find_references → wait
-   ```
-
-   **c) Read multiple files in parallel:**
-   ```
-   ✅ CORRECT (saves 5-10 seconds):
-   Send ONE message with multiple Read tool calls
-   → All files read in parallel
-
-   ❌ WRONG (wastes time):
-   Read file1 → wait → Read file2 → wait
-   ```
-
-   **Limits:**
-   - search_text: Maximum 5 patterns per call
-   - Claude Code supports parallel tool execution automatically
-
-### Usage Examples
-
-**Quick fix (--quick):**
-```
-/code --quick Fix typo in README.md: "recieve" → "receive"
-```
-- Skips exploration (obvious fix)
-- Executes implementation + verification
-- No branch, no garbage detection, no quality review
-- Fast execution for trivial changes
-
-**Fast implementation (--fast):**
-```
-/code --fast Add error logging to auth service
-```
-- Skips exploration
-- Executes implementation + verification
-- Creates branch, garbage detection enabled
-- Quality review skipped for speed
-- Use when you already know what to do
-
-**Exploration only (--only-explore):**
-```
-/code --only-explore How does the caching system work?
-```
-- Full exploration (EXPLORATION → SEMANTIC → VERIFICATION → IMPACT_ANALYSIS)
-- No implementation phases
-- No branch creation
-- Reports findings to user
-
-**Full workflow (default):**
-```
-/code Add user profile picture upload feature
-```
-- Complete flow: All phases executed
-- Maximum safety and thoroughness
-- Use for complex features
-
-**With custom gate level:**
-```
-/code --gate=full Refactor authentication module
-```
-- Forces execution of ALL phases regardless of necessity checks
-- Use when you want maximum thoroughness
+6. **Use parallel execution (MANDATORY):**
+   - See Step 4 for detailed examples
+   - Call ALL independent tools in ONE message
+   - Use `search_text(patterns=[...])` for multiple patterns
+   - Limit: 5 patterns per search_text call
 
 ---
 
