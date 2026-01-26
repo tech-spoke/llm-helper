@@ -7,7 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 usage() {
     echo "Usage: $0 <project-path> [options]"
     echo ""
-    echo "Initialize a project for Code Intel MCP Server v1.7"
+    echo "Initialize a project for Code Intel MCP Server v1.11"
     echo ""
     echo "Arguments:"
     echo "  project-path    Path to the target project (required)"
@@ -80,7 +80,7 @@ PROJECT_PATH="$(cd "$PROJECT_PATH" 2>/dev/null && pwd)" || {
     exit 1
 }
 
-echo "=== Code Intel Project Initialization v1.7 ==="
+echo "=== Code Intel Project Initialization v1.11 ==="
 echo ""
 echo "Project: $PROJECT_PATH"
 echo "MCP Server: $SCRIPT_DIR"
@@ -93,12 +93,16 @@ mkdir -p "$PROJECT_PATH/.code-intel/chroma"
 mkdir -p "$PROJECT_PATH/.code-intel/logs"
 mkdir -p "$PROJECT_PATH/.code-intel/verifiers"
 mkdir -p "$PROJECT_PATH/.code-intel/doc_research"
+mkdir -p "$PROJECT_PATH/.code-intel/review_prompts"
+mkdir -p "$PROJECT_PATH/.code-intel/interventions"
 echo "  ✓ .code-intel/"
 echo "  ✓ .code-intel/agreements/"
 echo "  ✓ .code-intel/chroma/"
 echo "  ✓ .code-intel/logs/"
 echo "  ✓ .code-intel/verifiers/"
 echo "  ✓ .code-intel/doc_research/"
+echo "  ✓ .code-intel/review_prompts/"
+echo "  ✓ .code-intel/interventions/"
 
 # Process --include (default to "." for entire project)
 if [ -z "$INCLUDE_DIRS" ]; then
@@ -250,6 +254,32 @@ if [ -d "$SCRIPT_DIR/.code-intel/doc_research" ]; then
     done
 fi
 
+# Copy review_prompts (garbage_detection, quality_review)
+if [ -d "$SCRIPT_DIR/.code-intel/review_prompts" ]; then
+    for file in "$SCRIPT_DIR/.code-intel/review_prompts"/*.md; do
+        if [ -f "$file" ]; then
+            filename=$(basename "$file")
+            if [ ! -f "$PROJECT_PATH/.code-intel/review_prompts/$filename" ]; then
+                cp "$file" "$PROJECT_PATH/.code-intel/review_prompts/"
+                echo "  ✓ .code-intel/review_prompts/$filename"
+            fi
+        fi
+    done
+fi
+
+# Copy interventions prompts (v1.4)
+if [ -d "$SCRIPT_DIR/.code-intel/interventions" ]; then
+    for file in "$SCRIPT_DIR/.code-intel/interventions"/*.md; do
+        if [ -f "$file" ]; then
+            filename=$(basename "$file")
+            if [ ! -f "$PROJECT_PATH/.code-intel/interventions/$filename" ]; then
+                cp "$file" "$PROJECT_PATH/.code-intel/interventions/"
+                echo "  ✓ .code-intel/interventions/$filename"
+            fi
+        fi
+    done
+fi
+
 # Copy .claude directory (project rules, guides, and skills)
 if [ -d "$SCRIPT_DIR/.claude" ]; then
     mkdir -p "$PROJECT_PATH/.claude/commands"
@@ -333,6 +363,8 @@ echo "      ├── chroma/              (ChromaDB vector database)"
 echo "      ├── logs/                (DecisionLog, OutcomeLog)"
 echo "      ├── verifiers/           (verification prompts)"
 echo "      ├── doc_research/        (document research prompts)"
+echo "      ├── review_prompts/      (garbage detection, quality review)"
+echo "      ├── interventions/       (intervention prompts)"
 echo "      └── sync_state.json      (incremental sync state)"
 echo ""
 echo "=== Next Steps ==="
@@ -367,9 +399,13 @@ echo "• AST-based chunking for PHP, Python, JS, Blade, etc."
 echo "• Fingerprint-based incremental sync (SHA256)"
 echo "• Phase-gated implementation workflow"
 echo "• Document research with sub-agent (v1.3)"
-echo "• Git branch isolation for garbage detection (v1.2)"
-echo "• Post-implementation verification"
+echo "• Intervention system for verification failures (v1.4)"
+echo "• Quality review phase (v1.5)"
+echo "• Git branch isolation for garbage detection (v1.2/v1.6)"
 echo "• Parallel execution for search_text, Read, Grep (v1.7 - saves 27-35s)"
+echo "• Optimized phase transitions with skip_implementation (v1.8)"
+echo "• Phase necessity checks Q1/Q2/Q3 (v1.10)"
+echo "• Deferred branch creation to READY phase (v1.11)"
 echo ""
 echo "Use '/code' skill for guided implementation workflow."
 echo "Use 'sync_index' tool to manually trigger re-indexing."
