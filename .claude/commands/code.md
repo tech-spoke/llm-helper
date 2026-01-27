@@ -2,6 +2,15 @@
 
 You are a code implementation agent. You understand user instructions, investigate the codebase, and perform implementations or modifications using the Code Intelligence MCP Server.
 
+## 🔧 MCP TOOL ACCESS
+
+**All tools in this skill use the `mcp__code-intel__` prefix.** Examples:
+- `mcp__code-intel__start_session`
+- `mcp__code-intel__begin_phase_gate`
+- `mcp__code-intel__check_phase_necessity`
+
+Use ToolSearch with `select:mcp__code-intel__<tool_name>` to load each tool before calling it.
+
 ## ⚡ IMMEDIATE ACTION
 
 **When this skill is invoked:**
@@ -16,7 +25,7 @@ This is NOT documentation. You MUST execute and REPORT each step.
 1. **Phase Gate System is MANDATORY**: After calling `begin_phase_gate`, you MUST follow the phase progression
 2. **Edit/Write/Bash are FORBIDDEN** until READY phase (Step 8)
 3. **Phase progression**: EXPLORATION → Q1 Check → SEMANTIC* → Q2 Check → VERIFICATION* → Q3 Check → IMPACT_ANALYSIS* → READY (*: only if check says YES)
-4. **If unsure**: Call `get_session_status` to check current phase before using Edit/Write/Bash
+4. **If unsure**: Call `mcp__code-intel__get_session_status` to check current phase before using Edit/Write/Bash
 5. **Parallel execution is MANDATORY**: Use parallel tool calls to save 15-35 seconds (see Best Practices section)
 
 **Important**: The server enforces phase gates. Steps cannot be skipped without server approval.
@@ -125,7 +134,7 @@ Parse command line options and set execution flags.
 2. Set internal flags based on detected options:
 
    - **If `--rebuild` or `-r` detected:**
-     - Call `sync_index` with `force_rebuild=true`
+     - Call `mcp__code-intel__sync_index` with `force_rebuild: true`
      - **End execution** (do not proceed to Step 1)
 
    - **If `--only-verify` or `-v` detected:**
@@ -223,15 +232,14 @@ Request: "How does the login system handle sessions?"
 
 Initialize the session and retrieve project-wide rules.
 
-Call `start_session` tool:
+Call `mcp__code-intel__start_session`:
 
    ```
-   start_session(
-     intent="<IMPLEMENT|MODIFY|INVESTIGATE|QUESTION>",
-     user_query="<original user request>",
-     skip_implementation=<true if INVESTIGATE/QUESTION or --only-explore>,
-     gate_level="<auto|full>"
-   )
+   mcp__code-intel__start_session
+     intent: "IMPLEMENT"  # or MODIFY/INVESTIGATE/QUESTION from Step 1
+     query: "user's original request"
+     skip_implementation: false  # true if INVESTIGATE/QUESTION or --only-explore
+     gate_level: "auto"  # or "full"
    ```
 
 2. **The server returns:**
@@ -326,21 +334,14 @@ Extract structured information from the user's request:
 
 2. **Quote verification**: For each slot, extract a direct quote from the user's request that supports the interpretation.
 
-3. **Call `set_query_frame` tool:**
+3. **Call `mcp__code-intel__set_query_frame`:**
 
    ```
-   set_query_frame(
-     session_id="<session_id>",
-     target_feature="<feature>",
-     action_type="<action>",
-     constraints=["<constraint1>", "<constraint2>"],
-     success_criteria=["<criterion1>", "<criterion2>"],
-     quotes={
-       "target_feature": "<quote from user request>",
-       "action_type": "<quote from user request>",
-       ...
-     }
-   )
+   mcp__code-intel__set_query_frame
+     target_feature: {"value": "login feature", "quote": "login feature"}
+     trigger_condition: {"value": "when empty password", "quote": "password is empty"}
+     observed_issue: {"value": "passes without error", "quote": "no error"}
+     desired_action: {"value": "add validation", "quote": "add check"}
    ```
 
 4. **The server validates quotes** against the original query to prevent hallucination.
@@ -368,14 +369,13 @@ QueryFrame:
 
 Start phase gates and handle stale branches. Branch creation is deferred to READY phase (v1.11).
 
-Call `begin_phase_gate` tool:
+Call `mcp__code-intel__begin_phase_gate`:
 
    ```
-   begin_phase_gate(
-     session_id="<session_id>",
-     skip_exploration=<true if --fast flag>,
-     skip_branch=<true if --quick flag>
-   )
+   mcp__code-intel__begin_phase_gate
+     session_id: "session_id from step 2"
+     skip_exploration: true  # for --fast mode
+     skip_branch: false  # true for --quick mode
    ```
 
    **Flag handling:**
@@ -402,9 +402,9 @@ Call `begin_phase_gate` tool:
      - **Continue**: Leave stale branches as-is and proceed
 
    - Based on user's choice:
-     - Delete: Call `cleanup_stale_branches(session_id, action="delete")`
-     - Merge: Call `cleanup_stale_branches(session_id, action="merge")`
-     - Continue: Call `begin_phase_gate` again with `resume_current=true`
+     - Delete: Call `mcp__code-intel__cleanup_stale_branches`
+     - Merge: Call `mcp__code-intel__merge_to_base` for each branch
+     - Continue: Call `mcp__code-intel__begin_phase_gate` with `resume_current: true`
 
 4. **Branch creation logic (v1.11+):**
 
@@ -455,7 +455,7 @@ Start with high-level search to locate relevant files:
    **IMPORTANT: Use parallel execution (saves 15-20 seconds):**
    - Call ALL search tools in ONE message for parallel execution
    - For search_text: Use multiple patterns in single call
-   - Example: `search_text(patterns=["AuthService", "login", "authenticate"])`
+   - Example: `mcp__code-intel__search_text(patterns=["AuthService", "login", "authenticate"])`
 
 2. **Read and understand** the discovered files:
    - Use Claude Code's `Read` tool to examine file contents
@@ -489,9 +489,9 @@ If ALL target files are pure markup (`.html`, `.css`, `.scss`, `.md`):
 **Example exploration (with parallel execution)**:
 ```
 1. Parallel search (ONE message with multiple tools):
-   - find_definitions(symbol="login")
-   - search_text(patterns=["brand.*blue", "#0066CC", "button.*color"])
-   - find_references(symbol="LoginButton")
+   - mcp__code-intel__find_definitions(symbol="login")
+   - mcp__code-intel__search_text(patterns=["brand.*blue", "#0066CC", "button.*color"])
+   - mcp__code-intel__find_references(symbol="LoginButton")
 
    Results:
    → Definitions: src/auth/LoginController.php:15, src/components/LoginButton.vue:8
@@ -521,17 +521,14 @@ Assess your current understanding:
    - Are there knowledge gaps that semantic search could fill?
    - Would vector similarity search help discover related code?
 
-2. **Call `check_phase_necessity` tool:**
+2. **Call `mcp__code-intel__check_phase_necessity`:**
 
    ```
-   check_phase_necessity(
-     session_id="<session_id>",
-     phase="SEMANTIC",
-     assessment={
-       "needs_more_information": <true|false>,
-       "needs_more_information_reason": "<explanation>"
-     }
-   )
+   mcp__code-intel__check_phase_necessity
+     phase: "SEMANTIC"
+     assessment:
+       needs_more_information: true  # or false
+       needs_more_information_reason: "explanation"
    ```
 
 3. **Server decision logic:**
@@ -578,14 +575,12 @@ Formulate semantic queries based on knowledge gaps:
    - Target specific patterns or implementations
    - Focus on what you couldn't find in EXPLORATION
 
-2. **Call `semantic_search` tool:**
+2. **Call `mcp__code-intel__semantic_search` tool:**
 
    ```
-   semantic_search(
-     session_id="<session_id>",
-     query="<natural language query>",
-     top_k=10
-   )
+   mcp__code-intel__semantic_search
+     query: "<natural language query>"
+     top_k: 10
    ```
 
 3. **Review results:**
@@ -596,32 +591,31 @@ Formulate semantic queries based on knowledge gaps:
 4. **Complete SEMANTIC phase:**
 
    ```
-   submit_semantic(
-     session_id="<session_id>",
-     findings={
-       "discovered_patterns": ["<pattern1>", "<pattern2>"],
-       "relevant_files": ["<file1>", "<file2>"],
-       "confidence_level": "<high|medium|low>"
-     }
-   )
+   mcp__code-intel__submit_semantic
+     hypotheses:
+       - text: "AuthService is called directly from Controller"
+         confidence: "high"
+       - text: "Uses JWT tokens"
+         confidence: "medium"
+     semantic_reason: "no_similar_implementation"
+     search_queries: ["authentication flow"]
    ```
 
 **Example**:
 ```
-semantic_search(
-  query="button color change with CSS variables",
-  top_k=10
-)
+mcp__code-intel__semantic_search
+  query: "button color change with CSS variables"
+  top_k: 10
+
 → Discovers similar color update patterns in other components
 → Finds CSS variable definitions in theme.css
 
-submit_semantic(
-  findings={
-    "discovered_patterns": ["CSS variable pattern in theme.css"],
-    "relevant_files": ["src/styles/theme.css"],
-    "confidence_level": "high"
-  }
-)
+mcp__code-intel__submit_semantic
+  hypotheses:
+    - text: "CSS variables are used for theming"
+      confidence: "high"
+  semantic_reason: "no_similar_implementation"
+  search_queries: ["button color change with CSS variables"]
 ```
 
 **Next**: Proceed to Step 5.5 (Q2 Check).
@@ -637,18 +631,14 @@ Assess your hypotheses:
    - Are there edge cases that need testing?
    - Do you need to verify code behavior before implementing?
 
-2. **Call `check_phase_necessity` tool:**
+2. **Call `mcp__code-intel__check_phase_necessity`:**
 
    ```
-   check_phase_necessity(
-     session_id="<session_id>",
-     phase="VERIFICATION",
-     assessment={
-       "has_unverified_hypotheses": <true|false>,
-       "has_unverified_hypotheses_reason": "<explanation>",
-       "hypotheses_to_verify": ["<hypothesis1>", "<hypothesis2>"]
-     }
-   )
+   mcp__code-intel__check_phase_necessity
+     phase: "VERIFICATION"
+     assessment:
+       has_unverified_hypotheses: true  # or false
+       has_unverified_hypotheses_reason: "explanation"
    ```
 
 3. **Server decision logic:**
@@ -706,15 +696,15 @@ For each hypothesis:
 3. **Complete VERIFICATION phase:**
 
    ```
-   submit_verification(
-     session_id="<session_id>",
-     verification_results={
-       "verified_hypotheses": ["<hypothesis1>"],
-       "refuted_hypotheses": ["<hypothesis2>"],
-       "new_findings": ["<finding1>"],
-       "confidence_level": "<high|medium|low>"
-     }
-   )
+   mcp__code-intel__submit_verification
+     verified:
+       - hypothesis: "AuthService is called from Controller"
+         status: "confirmed"
+         evidence:
+           tool: "find_references"
+           target: "AuthService"
+           result: "AuthService.login() called at UserController.py:45"
+           files: ["controllers/UserController.py"]
    ```
 
 **Example**:
@@ -724,14 +714,15 @@ Hypothesis: "LoginButton component uses CSS-in-JS for styling"
 1. Read src/components/LoginButton.vue
    → Confirmed: Uses scoped <style> section, not CSS-in-JS
 
-submit_verification(
-  verification_results={
-    "verified_hypotheses": [],
-    "refuted_hypotheses": ["Uses CSS-in-JS"],
-    "new_findings": ["Uses Vue scoped styles instead"],
-    "confidence_level": "high"
-  }
-)
+mcp__code-intel__submit_verification
+  verified:
+    - hypothesis: "Uses CSS-in-JS"
+      status: "rejected"
+      evidence:
+        tool: "Read"
+        target: "src/components/LoginButton.vue"
+        result: "Uses Vue scoped styles instead"
+        files: ["src/components/LoginButton.vue"]
 ```
 
 **Next**: Proceed to Step 6.5 (Q3 Check).
@@ -747,18 +738,14 @@ Assess potential impact:
    - Are there dependencies that might break?
    - Do you need to confirm the blast radius?
 
-2. **Call `check_phase_necessity` tool:**
+2. **Call `mcp__code-intel__check_phase_necessity`:**
 
    ```
-   check_phase_necessity(
-     session_id="<session_id>",
-     phase="IMPACT_ANALYSIS",
-     assessment={
-       "needs_impact_analysis": <true|false>,
-       "needs_impact_analysis_reason": "<explanation>",
-       "estimated_impact_scope": "<isolated|moderate|wide>"
-     }
-   )
+   mcp__code-intel__check_phase_necessity
+     phase: "IMPACT_ANALYSIS"
+     assessment:
+       needs_impact_analysis: true  # or false
+       needs_impact_analysis_reason: "explanation"
    ```
 
 3. **Server decision logic:**
@@ -801,14 +788,12 @@ Analyze the full scope of change impact across the codebase.
 **Allowed tools**:
 - `analyze_impact` - Analyze change impact for specific files
 
-For each file you plan to modify, call `analyze_impact`:
+For each file you plan to modify, call `mcp__code-intel__analyze_impact`:
 
    ```
-   analyze_impact(
-     session_id="<session_id>",
-     target_files=["<file1>", "<file2>"],
-     change_description="<what you're changing>"
-   )
+   mcp__code-intel__analyze_impact
+     target_files: ["src/components/LoginButton.vue"]
+     change_description: "Change button color to #0066CC"
    ```
 
 2. **The server returns:**
@@ -826,24 +811,22 @@ For each file you plan to modify, call `analyze_impact`:
 4. **Add impacted files to explored list** if you need to modify them:
 
    ```
-   add_explored_files(
-     session_id="<session_id>",
-     files=["<file1>", "<file2>"]
-   )
+   mcp__code-intel__add_explored_files
+     files: ["src/pages/LoginPage.vue", "src/styles/buttons.css"]
    ```
 
 5. **Complete IMPACT_ANALYSIS phase:**
 
    ```
-   submit_impact_analysis(
-     session_id="<session_id>",
-     impact_summary={
-       "files_to_modify": ["<file1>", "<file2>"],
-       "files_to_verify": ["<file3>", "<file4>"],
-       "estimated_risk": "<low|medium|high>",
-       "mitigation_plan": "<how to minimize risk>"
-     }
-   )
+   mcp__code-intel__submit_impact_analysis
+     verified_files:
+       - file: "src/Services/CartService.php"
+         status: "will_modify"
+         reason: null
+       - file: "tests/Feature/ProductTest.php"
+         status: "no_change_needed"
+         reason: "Test uses mock data, not affected"
+     inferred_from_rules: ["Added ProductResource.php based on project_rules"]
    ```
 
 6. **Exploration-only mode exit:**
@@ -854,24 +837,24 @@ For each file you plan to modify, call `analyze_impact`:
 
 **Example**:
 ```
-analyze_impact(
-  target_files=["src/components/LoginButton.vue"],
-  change_description="Change button color to #0066CC"
-)
+mcp__code-intel__analyze_impact
+  target_files: ["src/components/LoginButton.vue"]
+  change_description: "Change button color to #0066CC"
 
 Result:
   must_verify: []
   should_verify: ["src/pages/LoginPage.vue"]  # Uses LoginButton
   cross_references: ["src/styles/buttons.css"]  # Button styles
 
-submit_impact_analysis(
-  impact_summary={
-    "files_to_modify": ["src/components/LoginButton.vue"],
-    "files_to_verify": ["src/pages/LoginPage.vue"],
-    "estimated_risk": "low",
-    "mitigation_plan": "Visual verification of login page after change"
-  }
-)
+mcp__code-intel__submit_impact_analysis
+  verified_files:
+    - file: "src/components/LoginButton.vue"
+      status: "will_modify"
+      reason: null
+    - file: "src/pages/LoginPage.vue"
+      status: "no_change_needed"
+      reason: "Visual verification only needed"
+  inferred_from_rules: []
 ```
 
 **Next**:
@@ -901,10 +884,8 @@ Implement the code changes based on exploration findings.
 Before modifying any file, verify it's allowed:
 
    ```
-   check_write_target(
-     session_id="<session_id>",
-     file_path="<file_to_modify>"
-   )
+   mcp__code-intel__check_write_target
+     file_path: "src/components/LoginButton.vue"
    ```
 
    **Response when allowed:**
@@ -926,8 +907,8 @@ Before modifying any file, verify it's allowed:
    ```
 
    **Recovery when blocked:**
-   - Lightweight: `add_explored_files(session_id, files=["path/to/file"])`
-   - Full recovery: `revert_to_exploration(session_id, reason="...")`
+   - Lightweight: `mcp__code-intel__add_explored_files` with files list
+   - Full recovery: `mcp__code-intel__revert_to_exploration` with reason
 
 2. **Implement changes** according to:
    - User's original request
@@ -948,31 +929,29 @@ Before modifying any file, verify it's allowed:
 5. **After implementation complete**, transition to verification:
 
    ```
-   submit_for_review(
-     session_id="<session_id>"
-   )
+   mcp__code-intel__submit_for_review
    ```
 
 **If you realize you need more exploration:**
 
 ```
-revert_to_exploration(
-  session_id="<session_id>",
-  reason="<why more exploration is needed>"
-)
+mcp__code-intel__revert_to_exploration
+  keep_results: true
+  reason: "Need to explore additional files"
 ```
 
 This returns you to EXPLORATION phase.
 
 **Example**:
 ```
-1. check_write_target(file_path="src/components/LoginButton.vue")
+1. mcp__code-intel__check_write_target
+     file_path: "src/components/LoginButton.vue"
    → Allowed (file was explored)
 
 2. Edit src/components/LoginButton.vue
    Change: background-color: #1a73e8 → background-color: #0066CC
 
-3. submit_for_review(session_id="...")
+3. mcp__code-intel__submit_for_review
    → Transition to POST_IMPL_VERIFY
 ```
 
@@ -1037,12 +1016,10 @@ Server: Verification successful → Proceed to PRE_COMMIT
 
 Review all changes for garbage code and prepare commit.
 
-Call `review_changes` tool:
+Call `mcp__code-intel__review_changes`:
 
    ```
-   review_changes(
-     session_id="<session_id>"
-   )
+   mcp__code-intel__review_changes
    ```
 
 2. **Server returns:**
@@ -1061,14 +1038,14 @@ Call `review_changes` tool:
 4. **Decide keep/discard for each file:**
 
    ```
-   finalize_changes(
-     session_id="<session_id>",
-     decisions={
-       "keep": ["<file1>", "<file2>"],
-       "discard": ["<file3>"],
-       "commit_message": "<commit message>"
-     }
-   )
+   mcp__code-intel__finalize_changes
+     reviewed_files:
+       - path: "src/components/LoginButton.vue"
+         decision: "keep"
+       - path: "debug.log"
+         decision: "discard"
+         reason: "Debug output not needed"
+     commit_message: "fix: update login button color to brand blue"
    ```
 
 5. **Commit preparation:**
@@ -1081,20 +1058,21 @@ Call `review_changes` tool:
 
 **Example**:
 ```
-review_changes()
+mcp__code-intel__review_changes
 
 Result:
   Modified files:
     - src/components/LoginButton.vue (CLEAN)
     - src/utils/debug.js (GARBAGE: debug console.log)
 
-finalize_changes(
-  decisions={
-    "keep": ["src/components/LoginButton.vue"],
-    "discard": ["src/utils/debug.js"],
-    "commit_message": "fix: update login button color to brand blue (#0066CC)"
-  }
-)
+mcp__code-intel__finalize_changes
+  reviewed_files:
+    - path: "src/components/LoginButton.vue"
+      decision: "keep"
+    - path: "src/utils/debug.js"
+      decision: "discard"
+      reason: "Debug console.log not needed"
+  commit_message: "fix: update login button color to brand blue (#0066CC)"
 ```
 
 **Next**: Proceed to Step 9.5 (QUALITY_REVIEW), or skip to Step 10 if `skip_quality_review=true`.
@@ -1120,12 +1098,10 @@ Server provides `quality_review.md` checklist with criteria like:
 3. **Report quality review result:**
 
    ```
-   submit_quality_review(
-     session_id="<session_id>",
-     issues_found=<true|false>,
-     review_notes="<detailed notes>",
-     issues=["<issue1>", "<issue2>"]  # if issues_found=true
-   )
+   mcp__code-intel__submit_quality_review
+     issues_found: false  # or true
+     notes: "All checks passed"
+     issues: []  # list issues if issues_found=true
    ```
 
 4. **Server decision:**
@@ -1171,12 +1147,10 @@ Server provides `quality_review.md` checklist with criteria like:
 
 Merge the task branch back to the original branch and complete the session.
 
-Call `merge_to_base` tool:
+Call `mcp__code-intel__merge_to_base`:
 
    ```
-   merge_to_base(
-     session_id="<session_id>"
-   )
+   mcp__code-intel__merge_to_base
    ```
 
 2. **Server performs:**
@@ -1254,7 +1228,7 @@ Branch llm_task_session_20250126_123456_from_main has been merged to main and de
 6. **Use parallel execution (MANDATORY):**
    - See Step 4 for detailed examples
    - Call ALL independent tools in ONE message
-   - Use `search_text(patterns=[...])` for multiple patterns
+   - Use `mcp__code-intel__search_text(patterns=[...])` for multiple patterns
    - Limit: 5 patterns per search_text call
 
 ---
