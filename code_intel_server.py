@@ -1765,22 +1765,46 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             stale_info = await BranchManager.list_stale_branches(repo_path)
             stale_branches = stale_info.get("stale_branches", [])
             is_on_task_branch = stale_info.get("is_on_task_branch", False)
+            current_branch = stale_info.get("current_branch", "")
 
-            # If not on task branch and stale branches exist, block and require user decision
-            if not is_on_task_branch and stale_branches:
-                result = {
-                    "success": False,
-                    "error": "stale_branches_detected",
-                    "stale_branches": {
-                        "branches": stale_branches,
-                        "message": "Previous task branches exist. User action required.",
-                    },
-                    "recovery_options": {
-                        "delete": "Run cleanup_stale_sessions, then retry begin_phase_gate",
-                        "merge": "Run merge_to_base for each branch, then retry begin_phase_gate",
-                        "continue": "Call begin_phase_gate(resume_current=true) to leave stale branches and continue",
-                    },
-                }
+            # v1.12: Trigger intervention if ANY task branch exists (including current)
+            # This ensures user always chooses what to do with existing task branches
+            if stale_branches:
+                if is_on_task_branch:
+                    # Currently on a task branch - offer to continue, merge+start fresh, or delete+start fresh
+                    result = {
+                        "success": False,
+                        "error": "on_task_branch",
+                        "has_task_branch": True,
+                        "task_branch": current_branch,
+                        "intervention_needed": True,
+                        "stale_branches": {
+                            "branches": stale_branches,
+                            "message": f"Currently on task branch '{current_branch}'. User action required.",
+                        },
+                        "recovery_options": {
+                            "continue": "Call begin_phase_gate(resume_current=true) to continue on current task branch",
+                            "merge_and_fresh": "Run merge_to_base, then retry begin_phase_gate (creates new branch)",
+                            "delete_and_fresh": "Run cleanup_stale_branches, then retry begin_phase_gate (creates new branch)",
+                        },
+                    }
+                else:
+                    # Not on task branch but stale branches exist
+                    result = {
+                        "success": False,
+                        "error": "stale_branches_detected",
+                        "has_task_branch": True,
+                        "intervention_needed": True,
+                        "stale_branches": {
+                            "branches": stale_branches,
+                            "message": "Previous task branches exist. User action required.",
+                        },
+                        "recovery_options": {
+                            "delete": "Run cleanup_stale_branches, then retry begin_phase_gate",
+                            "merge": "Run merge_to_base for each branch, then retry begin_phase_gate",
+                            "continue": "Call begin_phase_gate(resume_current=true) to leave stale branches and continue",
+                        },
+                    }
                 return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
         # Handle skip_branch
