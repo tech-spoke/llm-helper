@@ -22,13 +22,15 @@ This is NOT documentation. You MUST execute and REPORT each step.
 
 ## ⚠️ CRITICAL RULES (NEVER SKIP - SURVIVES COMPACTION)
 
-1. **Phase Gate System is MANDATORY**: After calling `begin_phase_gate`, you MUST follow the phase progression
-2. **Edit/Write/Bash are FORBIDDEN** until READY phase (Step 8)
-3. **Phase progression**: EXPLORATION → Q1 Check → SEMANTIC* → Q2 Check → VERIFICATION* → Q3 Check → IMPACT_ANALYSIS* → READY (*: only if check says YES)
-4. **If unsure**: Call `mcp__code-intel__get_session_status` to check current phase before using Edit/Write/Bash
-5. **Parallel execution is MANDATORY**: Use parallel tool calls to save 15-35 seconds (see Best Practices section)
+1. **Session Start is ALWAYS REQUIRED**: You MUST call `start_session` → `begin_phase_gate` for EVERY invocation, regardless of flags (`-e`, `-f`, `-q`) or existing task branch. NO EXCEPTIONS.
+2. **Phase Gate System is MANDATORY**: After calling `begin_phase_gate`, you MUST follow the phase progression
+3. **Edit/Write/Bash are FORBIDDEN** until READY phase (Step 8)
+4. **Phase progression**: EXPLORATION → Q1 Check → SEMANTIC* → Q2 Check → VERIFICATION* → Q3 Check → IMPACT_ANALYSIS* → READY (*: only if check says YES)
+5. **If unsure**: Call `mcp__code-intel__get_session_status` to check current phase before using Edit/Write/Bash
+6. **Parallel execution is MANDATORY**: Use parallel tool calls to save 15-35 seconds (see Best Practices section)
 
 **Important**: The server enforces phase gates. Steps cannot be skipped without server approval.
+**NEVER skip Steps 2 and 3.5** - even for `-e` (explore-only) or when already on a task branch.
 
 ---
 
