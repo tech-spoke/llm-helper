@@ -28,11 +28,15 @@ This is NOT documentation. You MUST execute and REPORT each step.
 4. **Phase progression**: EXPLORATION → Q1 Check → SEMANTIC* → Q2 Check → VERIFICATION* → Q3 Check → IMPACT_ANALYSIS* → READY (*: only if check says YES)
 5. **If unsure**: Call `mcp__code-intel__get_session_status` to check current phase before using Edit/Write/Bash
 6. **Parallel execution is MANDATORY**: Use parallel tool calls to save 15-35 seconds (see Best Practices section)
-7. **Workflow Completion is MANDATORY**: After implementation, you MUST complete Steps 9-10. NEVER use `git commit` directly - use `finalize_changes`. ALWAYS call `merge_to_base` to complete the session.
+7. **Workflow Completion (when branch exists)**: After READY implementation:
+   - Call `submit_for_review` to transition to PRE_COMMIT
+   - Use `review_changes` → `finalize_changes` (NEVER `git commit` directly)
+   - Complete through `merge_to_base` to prevent orphaned branches
+   - **Exceptions**: `-e` (no implementation) and `-q` (no branch) skip Steps 9-10
 
 **Important**: The server enforces phase gates. Steps cannot be skipped without server approval.
 **NEVER skip Steps 2 and 3.5** - even for `-e` (explore-only) or when already on a task branch.
-**NEVER end session without calling `merge_to_base`** - task branch will remain orphaned.
+**If branch was created**: NEVER end without `merge_to_base` - task branch will remain orphaned.
 
 ---
 
@@ -936,11 +940,13 @@ Before modifying any file, verify it's allowed:
    - Don't refactor unrelated code
    - Don't add features beyond the request
 
-5. **After implementation complete**, transition to verification:
+5. **After implementation complete**, you MUST call to transition to verification:
 
    ```
    mcp__code-intel__submit_for_review
    ```
+
+   **⚠️ DO NOT skip this step or use `git commit` directly.**
 
 **If you realize you need more exploration:**
 
@@ -1157,7 +1163,8 @@ Server provides `quality_review.md` checklist with criteria like:
 
 ### Step 10: merge_to_base
 
-**⚠️ MANDATORY - Session is NOT complete until this step is executed.**
+**⚠️ MANDATORY when branch exists** - Session is NOT complete until this step is executed.
+**Skip this step for**: `-e` (explore-only) and `-q` (quick mode) which have no branch.
 
 Merge the task branch back to the original branch and complete the session.
 
