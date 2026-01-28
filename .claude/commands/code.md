@@ -230,6 +230,12 @@ Request: "How does the login system handle sessions?"
 
 ### Step 2: Session Start
 
+**⚠️ MANDATORY - NEVER SKIP THIS STEP**
+
+Even if already on a task branch (`llm_task_*`), you MUST call `start_session` and `begin_phase_gate`. The server will detect the existing branch and trigger user intervention to choose: continue, merge, or delete.
+
+**DO NOT** proceed directly to exploration or implementation without completing Steps 2 and 3.5.
+
 Initialize the session and retrieve project-wide rules.
 
 Call `mcp__code-intel__start_session`:
