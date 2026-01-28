@@ -10,6 +10,7 @@ You are a code implementation agent. You understand user instructions, investiga
 4. **Phase progression**: EXPLORATION → Q1 Check → SEMANTIC* → Q2 Check → VERIFICATION* → Q3 Check → IMPACT_ANALYSIS* → READY (*: only if check says YES)
 5. **If unsure**: Call `mcp__code-intel__get_session_status` to check current phase before using Edit/Write/Bash
 6. **Task branch rules**: After branch creation (Step 8), NEVER use `git commit` directly. Complete through `mcp__code-intel__merge_to_base`.
+7. **Workflow Completion**: Follow Complete Flow diagram until endpoint. Mark ☐ → ☑ for each step. Session NOT complete until all applicable steps are ☑.
 
 **Important**: This agent operates with a phase-gate system. The system enforces each phase, so steps cannot be skipped.
 
@@ -30,17 +31,17 @@ You are a code implementation agent. You understand user instructions, investiga
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │  Step 4: EXPLORATION (Code Exploration)                                     │
 │      └── submit_exploration to complete                                     │
-│  Step 4.5: Q1 Check - SEMANTIC necessity (v1.10)  ← --gate=full to skip     │
+│  Step 4.5: Q1 Check - SEMANTIC necessity (v1.10)  ← --gate=full forces YES   │
 │      ├─ check_phase_necessity(phase="SEMANTIC", assessment={...})           │
 │      └─ If needed → Execute Step 5, else → Skip to Step 5.5                 │
 │  Step 5: SEMANTIC (Only if Q1=YES)                                          │
 │      └── submit_semantic to complete                                        │
-│  Step 5.5: Q2 Check - VERIFICATION necessity (v1.10)  ← --gate=full to skip │
+│  Step 5.5: Q2 Check - VERIFICATION necessity (v1.10)  ← --gate=full forces YES │
 │      ├─ check_phase_necessity(phase="VERIFICATION", assessment={...})       │
 │      └─ If needed → Execute Step 6, else → Skip to Step 6.5                 │
 │  Step 6: VERIFICATION (Only if Q2=YES)                                      │
 │      └── submit_verification to complete                                    │
-│  Step 6.5: Q3 Check - IMPACT_ANALYSIS necessity (v1.10)  ← --gate=full to skip │
+│  Step 6.5: Q3 Check - IMPACT_ANALYSIS necessity (v1.10)  ← --gate=full forces YES │
 │      ├─ check_phase_necessity(phase="IMPACT_ANALYSIS", assessment={...})    │
 │      └─ If needed → Execute Step 7, else → Skip to Step 8                   │
 │  Step 7: IMPACT_ANALYSIS (Only if Q3=YES)                                   │
@@ -54,13 +55,29 @@ You are a code implementation agent. You understand user instructions, investiga
 │      ↓                                                                      │
 │  Step 8.5: POST_IMPLEMENTATION_VERIFICATION    ← skip with --no-verify      │
 │      ↓ (loop back to Step 8 on failure)                                     │
-│  Step 9: PRE_COMMIT (Garbage Detection)                                     │
+│  Step 9: PRE_COMMIT (Garbage Detection)        ← skip with --quick           │
 │      ↓                                                                      │
-│  Step 9.5: QUALITY_REVIEW [v1.5]  ← skip with --no-quality or --quick       │
+│  Step 9.5: QUALITY_REVIEW [v1.5]  ← skip with --no-quality, --quick, or --fast │
 │      ↓                                                                      │
 │  Step 10: Finalize & Merge                                                  │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
+
+**⚠️ WORKFLOW TRACKING (SURVIVES COMPACTION)**
+
+Track progress by marking ☐ → ☑ for each step (respect skip conditions):
+
+| Step | Default | --fast | --quick | --only-explore | --no-verify |
+|------|:-------:|:------:|:-------:|:--------------:|:-----------:|
+| Preparation (Steps -1 to 3.5) | ☐ | ☐ | ☐ | ☐ | ☐ |
+| Exploration (Steps 4-7) | ☐ | skip | skip | ☐ → then report | ☐ |
+| READY (Step 8) | ☐ | ☐ | ☐ | N/A | ☐ |
+| POST_IMPL_VERIFY (8.5) | ☐ | ☐ | ☐ | N/A | skip |
+| PRE_COMMIT (Step 9) | ☐ | ☐ | skip | N/A | ☐ |
+| QUALITY_REVIEW (9.5) | ☐ | skip | skip | N/A | ☐ |
+| merge_to_base (Step 10) | ☐ | ☐ | skip | N/A | ☐ |
+
+**Session NOT complete until all applicable ☐ are ☑**
 
 ### Step Reference
 
@@ -83,7 +100,7 @@ You are a code implementation agent. You understand user instructions, investiga
 | 8.5 | POST_IMPL_VERIFY | Run verifier prompts (Playwright/pytest) |
 | 9 | PRE_COMMIT | Review changes, discard garbage |
 | 9.5 | QUALITY_REVIEW | v1.5: Quality check before merge |
-| 10 | Finalize | Commit and merge to main |
+| 10 | Finalize | Commit and merge to base branch |
 
 ---
 
@@ -123,7 +140,7 @@ You are a code implementation agent. You understand user instructions, investiga
    - **Do NOT proceed to Step 1**
 
 3. **If `--only-verify` or `-v` detected:**
-   - Skip to Step 9.5 (POST_IMPLEMENTATION_VERIFICATION)
+   - Skip to Step 8.5 (POST_IMPLEMENTATION_VERIFICATION)
    - Run verification on existing code
    - **Do NOT proceed to Step 1**
 
@@ -134,8 +151,8 @@ You are a code implementation agent. You understand user instructions, investiga
    - Continue to Step 1 with skip_implementation flag
 
 4. **If `--no-verify` detected:**
-   - Note that verification is disabled (skip Step 9.5)
-   - Remove flag and continue to Step 0
+   - Note that verification is disabled (skip Step 8.5)
+   - Remove flag and continue to Step 1
 
 5. **If `--gate=LEVEL` or `-g=LEVEL` detected:**
    - v1.10: Set gate level for phase necessity checks (simplified to 2 levels)
@@ -165,7 +182,7 @@ You are a code implementation agent. You understand user instructions, investiga
    - Continue to Step 1
 
 10. **If `--no-quality` detected:**
-   - Skip QUALITY_REVIEW phase (Step 10.5)
+   - Skip QUALITY_REVIEW phase (Step 9.5)
    - After PRE_COMMIT, proceed directly to merge_to_base
    - Continue to Step 1
 
@@ -308,7 +325,7 @@ mcp__code-intel__start_session
 }
 ```
 
-**Note:** Branch creation is now handled in Step 3.5 (begin_phase_gate). This separation allows for stale branch detection and user intervention before creating a new branch.
+**Note:** Branch creation is deferred to READY phase transition (v1.11). Step 3.5 (begin_phase_gate) handles stale branch detection and user intervention, but does not create branches.
 
 **v1.8: Branch creation decision:** When calling `begin_phase_gate` in Step 3.5:
 - If `skip_implementation=true` → set `skip_branch=true` (no branch needed for exploration-only)
@@ -368,10 +385,11 @@ mcp__code-intel__sync_index
 **Purpose:** Research design documents using a sub-agent to extract mandatory rules for the current task.
 
 **When executed:**
-- Intent = IMPLEMENT or MODIFY → Execute (unless `--no-doc-research`)
-- Intent = INVESTIGATE → Skip (optional)
+- Execute by default for ALL intents (IMPLEMENT, MODIFY, INVESTIGATE, QUESTION)
 - `--no-doc-research` flag → Skip
 - No docs_path detected → Skip with warning
+
+**Note:** Even in `--only-explore` mode, DOCUMENT_RESEARCH is executed to understand project context.
 
 **Two-Layer Context Architecture:**
 
@@ -544,7 +562,7 @@ mcp__code-intel__set_query_frame
 - **v1.12**: Intervention triggered even when already on a task branch
 
 ⚠️ **WORKFLOW ENFORCEMENT**: After calling begin_phase_gate, you MUST follow the phase progression:
-- EXPLORATION → SEMANTIC (if needed) → VERIFICATION (if needed) → IMPACT_ANALYSIS → READY
+- EXPLORATION → SEMANTIC (if needed) → VERIFICATION (if needed) → IMPACT_ANALYSIS (if needed) → READY
 - **Edit/Write/Bash tools are FORBIDDEN until READY phase**
 - This rule survives conversation compaction and must always be followed
 
@@ -647,7 +665,7 @@ AskUserQuestion:
 
 | Choice | Action |
 |--------|--------|
-| Delete and continue | `cleanup_stale_sessions` → retry `begin_phase_gate` |
+| Delete and continue | `cleanup_stale_branches` → retry `begin_phase_gate` |
 | Merge and continue | `merge_to_base` for each → retry `begin_phase_gate` |
 | Continue as-is | `begin_phase_gate(resume_current=true)` |
 
@@ -872,7 +890,7 @@ Answer **NO (needs_more_information: false)** if:
 
 ---
 
-## Step 5: Symbol Validation (Optional)
+## Step 4.8: Symbol Validation (Optional)
 
 **Purpose:** Verify discovered symbols are related to target_feature using Embedding
 
@@ -917,7 +935,7 @@ mcp__code-intel__validate_symbol_relevance
 
 ---
 
-## Step 6: SEMANTIC Phase (Only if Q1=YES)
+## Step 5: SEMANTIC Phase (Only if Q1=YES)
 
 **Purpose:** Supplement missing information with semantic search
 
@@ -963,11 +981,11 @@ mcp__code-intel__submit_semantic
 | files_analyzed | context_fragmented, architecture_unknown |
 
 **After SEMANTIC completes:**
-Call `submit_semantic` with hypotheses, then proceed to **Step 6.5 (Q2 Check)**.
+Call `submit_semantic` with hypotheses, then proceed to **Step 5.5 (Q2 Check)**.
 
 ---
 
-## Step 6.5: Q2 Check - VERIFICATION Necessity Determination (v1.10)
+## Step 5.5: Q2 Check - VERIFICATION Necessity Determination (v1.10)
 
 **Purpose:** Decide if hypothesis verification is needed
 
@@ -1001,16 +1019,16 @@ Answer **NO (has_unverified_hypotheses: false)** if:
 **gate_level behavior:**
 - `gate_level="full"`: Executes VERIFICATION regardless
 - `gate_level="auto"` (default): Respects assessment
-  - YES → Execute Step 7 (VERIFICATION)
-  - NO → Skip to Step 7.5 (Q3 Check)
+  - YES → Execute Step 6 (VERIFICATION)
+  - NO → Skip to Step 6.5 (Q3 Check)
 
 **Next step:**
-- If phase_required=true → **Go to Step 7 (VERIFICATION)**
-- If phase_required=false → **Skip to Step 7.5 (Q3 Check)**
+- If phase_required=true → **Go to Step 6 (VERIFICATION)**
+- If phase_required=false → **Skip to Step 6.5 (Q3 Check)**
 
 ---
 
-## Step 7: VERIFICATION Phase (Only if Q2=YES, v1.10 Separated)
+## Step 6: VERIFICATION Phase (Only if Q2=YES, v1.10 Separated)
 
 **Purpose:** Verify hypotheses with actual code examination
 
@@ -1065,11 +1083,11 @@ mcp__code-intel__submit_verification
 ```
 
 **After VERIFICATION completes:**
-Proceed to **Step 7.5 (Q3 Check)**.
+Proceed to **Step 6.5 (Q3 Check)**.
 
 ---
 
-## Step 7.5: Q3 Check - IMPACT_ANALYSIS Necessity Determination (v1.10)
+## Step 6.5: Q3 Check - IMPACT_ANALYSIS Necessity Determination (v1.10)
 
 **Purpose:** Decide if impact range analysis is needed
 
@@ -1103,16 +1121,16 @@ Answer **NO (needs_impact_analysis: false)** if:
 **gate_level behavior:**
 - `gate_level="full"`: Executes IMPACT_ANALYSIS regardless
 - `gate_level="auto"` (default): Respects assessment
-  - YES → Execute Step 8 (IMPACT_ANALYSIS)
+  - YES → Execute Step 7 (IMPACT_ANALYSIS)
   - NO → Skip to READY phase
 
 **Next step:**
-- If phase_required=true → **Go to Step 8 (IMPACT_ANALYSIS)**
+- If phase_required=true → **Go to Step 7 (IMPACT_ANALYSIS)**
 - If phase_required=false → **Skip to READY phase**
 
 ---
 
-## Step 8: IMPACT_ANALYSIS Phase (Only if Q3=YES, v1.10 Separated)
+## Step 7: IMPACT_ANALYSIS Phase (Only if Q3=YES, v1.10 Separated)
 
 **Purpose:** Analyze impact range and verify affected files
 
@@ -1190,12 +1208,12 @@ mcp__code-intel__submit_impact_analysis
 **v1.8: --only-explore mode:**
 If `exploration_complete: true` is returned in submit_impact_analysis response:
 - Report exploration findings to user
-- **STOP HERE - Do NOT proceed to Step 9 (READY)**
+- **STOP HERE - Do NOT proceed to Step 8 (READY)**
 - Exploration is complete, implementation is skipped
 
 ---
 
-## Step 9: READY Phase (Implementation Allowed)
+## Step 8: READY Phase (Implementation Allowed)
 
 🔓 **PHASE GATE UNLOCKED**: Edit/Write/Bash tools are **ONLY** available in this phase.
 
@@ -1207,6 +1225,19 @@ If `exploration_complete: true` is returned in submit_impact_analysis response:
 - You can ONLY reach READY phase by completing: EXPLORATION → Q1 → SEMANTIC* → Q2 → VERIFICATION* → Q3 → IMPACT_ANALYSIS* → READY (*: only if Q check says YES)
 - **NEVER use Edit/Write/Bash in EXPLORATION, SEMANTIC, VERIFICATION, or IMPACT_ANALYSIS phases**
 - If unsure of current phase, call `get_session_status` first
+
+### ⚠️ REMAINING STEPS AFTER READY (SURVIVES COMPACTION)
+
+After implementation in READY, you MUST complete these (check your mode):
+
+| Step | Default | --fast | --quick | --no-verify |
+|------|:-------:|:------:|:-------:|:-----------:|
+| ☐ POST_IMPL_VERIFY | required | required | required | skip |
+| ☐ PRE_COMMIT | required | required | skip | required |
+| ☐ QUALITY_REVIEW | required | skip | skip | required |
+| ☐ merge_to_base | required | required | skip | required |
+
+**FORBIDDEN to report "完了" until all required steps for your mode are ☑**
 
 **Always check before Write:**
 ```
@@ -1314,21 +1345,21 @@ When searching for multiple file patterns, call ALL Glob tools in ONE message:
 1. Verify all changes have been saved (Edit/Write operations completed)
 2. Check if `--no-verify` flag was set:
    - If `--no-verify` flag was **NOT** set:
-     → **Proceed to Step 9.5 (POST_IMPLEMENTATION_VERIFICATION)**
+     → **Proceed to Step 8.5 (POST_IMPLEMENTATION_VERIFICATION)**
    - If `--no-verify` flag **was** set:
-     → **Skip Step 9.5, proceed directly to Step 10 (PRE_COMMIT)**
+     → **Skip Step 8.5, proceed directly to Step 9 (PRE_COMMIT)**
 
-**IMPORTANT:** Do NOT stop after implementation. You MUST proceed to the next step (9.5 or 10) to complete the workflow.
+**IMPORTANT:** Do NOT stop after implementation. You MUST proceed to the next step (8.5 or 9) to complete the workflow.
 
 ---
 
-## Step 9.5: POST_IMPLEMENTATION_VERIFICATION (default, skip with --no-verify)
+## Step 8.5: POST_IMPLEMENTATION_VERIFICATION (default, skip with --no-verify)
 
 **When executed:** After implementation in READY phase (default behavior, skipped if `--no-verify` flag specified)
 
 **Purpose:** Run verification to ensure implementation works correctly before proceeding to PRE_COMMIT
 
-### 9.5.1: Select Verifier
+### 8.5.1: Select Verifier
 
 **Available verifiers in `.code-intel/verifiers/`:**
 
@@ -1344,7 +1375,7 @@ When searching for multiple file patterns, call ALL Glob tools in ONE message:
 - Config/docs/other → `generic.md`
 - Mixed → Use primary category or run multiple
 
-### 9.5.2: Execute Verification
+### 8.5.2: Execute Verification
 
 1. Read the selected verifier prompt:
    ```
@@ -1355,28 +1386,100 @@ When searching for multiple file patterns, call ALL Glob tools in ONE message:
 
 3. Report result: "検証成功" or "検証失敗"
 
-### 9.5.3: Handle Result
+### 8.5.3: Handle Result
 
 **On "検証成功":**
-→ Proceed to Step 10 (PRE_COMMIT)
+→ Proceed to Step 9 (PRE_COMMIT)
 
 **On "検証失敗":**
-1. Analyze the failure
-2. Return to Step 9 (READY) to fix the issue
-3. After fix, return to Step 9.5 to re-verify
+1. Record the failure:
+   ```
+   mcp__code-intel__record_verification_failure
+     session_id: "session_id"
+     failure_details: "Description of what failed and why"
+   ```
+2. Return to Step 8 (READY) to fix the issue
+3. After fix, return to Step 8.5 to re-verify
 4. Loop until verification passes
 
-**Loop limit:** If verification fails 3 times consecutively, ask user for guidance.
+### 8.5.4: Intervention System (v1.4)
+
+**Purpose:** Break "stuck" loops when verification fails repeatedly by suggesting alternative approaches.
+
+**Skip conditions (介入❌):**
+- `--no-intervention` or `-ni` flag specified
+- `--quick` or `-q` mode (DESIGN: 介入❌)
+- `--no-verify` mode (verification itself is skipped, so intervention never triggers)
+
+**Trigger:** After 3 consecutive verification failures (configurable via `context.yml: interventions.threshold`)
+
+**Workflow:**
+
+```
+検証が3回以上失敗
+    ↓
+get_intervention_status で介入判定
+    ↓
+介入プロンプトを選択・実行
+    ↓
+変更を revert して別のアプローチを試す
+    ↓
+2回介入しても解決しない → user_escalation (強制)
+```
+
+**Step 1: Check intervention status:**
+```
+mcp__code-intel__get_intervention_status
+  session_id: "session_id"
+```
+
+**Response (intervention triggered):**
+```json
+{
+  "intervention_needed": true,
+  "failure_count": 3,
+  "failure_history": [
+    {"attempt": 1, "error": "..."},
+    {"attempt": 2, "error": "..."},
+    {"attempt": 3, "error": "..."}
+  ],
+  "suggested_prompts": ["step_back"],
+  "force_escalation": false
+}
+```
+
+**Step 2: Select and execute intervention prompt:**
+
+| File | Purpose | When to use |
+|------|---------|-------------|
+| `structure_review.md` | Structure review | Repeating layout/positioning adjustments |
+| `hypothesis_review.md` | Hypothesis review | Different error messages each time |
+| `step_back.md` | Step back and rethink | General stuck state |
+| `user_escalation.md` | Consult user | 2+ interventions without resolution (forced) |
+
+1. Read `.code-intel/interventions/{prompt}.md`
+2. Follow the instructions in the prompt
+3. Revert changes and try a different approach
+
+**Step 3: Record intervention:**
+```
+mcp__code-intel__record_intervention_used
+  session_id: "session_id"
+  intervention_prompt: "step_back"
+  result: "Description of new approach taken"
+```
+
+**Force escalation:** If `force_escalation: true` in response (after 2 interventions), you MUST use `user_escalation.md` and ask the user for guidance.
 
 ---
 
-## Step 10: PRE_COMMIT Phase (v1.2, Garbage Detection)
+## Step 9: PRE_COMMIT Phase (v1.2, Garbage Detection)
 
 **When executed:** After implementation in READY phase, when task branch is enabled
 
 **Purpose:** Review all changes before commit to detect and discard garbage (debug logs, commented code, unrelated modifications)
 
-### 10.1: Submit for Review
+### 9.1: Submit for Review
 
 ```
 mcp__code-intel__submit_for_review
@@ -1391,7 +1494,7 @@ mcp__code-intel__submit_for_review
 }
 ```
 
-### 10.2: Review Changes
+### 9.2: Review Changes
 
 ```
 mcp__code-intel__review_changes
@@ -1425,7 +1528,7 @@ mcp__code-intel__review_changes
 - Unrelated modifications
 - Temporary hacks / workarounds
 
-### 10.3: Finalize Changes
+### 9.3: Finalize Changes
 
 ```
 mcp__code-intel__finalize_changes
@@ -1465,16 +1568,18 @@ mcp__code-intel__finalize_changes
 
 ---
 
-## Step 10.5: QUALITY_REVIEW Phase (v1.5)
+## Step 9.5: QUALITY_REVIEW Phase (v1.5)
 
 **When executed:** After PRE_COMMIT (finalize_changes), before merge_to_base
 
 **Skip conditions:**
 - `--no-quality` flag specified
+- `--quick` or `-q` mode
+- `--fast` or `-f` mode
 
 **Purpose:** Post-PRE_COMMIT, pre-merge quality check based on `.code-intel/review_prompts/quality_review.md`
 
-### 10.5.1: Execute Quality Review
+### 9.5.1: Execute Quality Review
 
 1. Read `.code-intel/review_prompts/quality_review.md`
 
@@ -1487,7 +1592,7 @@ mcp__code-intel__finalize_changes
 | Security | Hardcoded secrets, sensitive data in logs, input validation |
 | Performance | N+1 queries, unnecessary loops, memory leaks |
 
-### 10.5.2: Report Results
+### 9.5.2: Report Results
 
 **When issues found:**
 ```
@@ -1530,7 +1635,7 @@ mcp__code-intel__submit_quality_review
 }
 ```
 
-### 10.5.3: Handle Revert
+### 9.5.3: Handle Revert
 
 **When issues found → Reverted to READY:**
 1. Fix the issues in READY phase
@@ -1539,7 +1644,7 @@ mcp__code-intel__submit_quality_review
 
 **Important:** Fixes are forbidden in QUALITY_REVIEW phase. Always report → revert → fix in READY.
 
-### 10.5.4: Error Handling
+### 9.5.4: Error Handling
 
 **max_revert_count exceeded (default: 3):**
 ```json
@@ -1566,7 +1671,7 @@ mcp__code-intel__submit_quality_review
 
 ---
 
-## Step 11: Merge to Base (v1.2, Optional)
+## Step 10: Merge to Base (v1.2, Optional)
 
 **Purpose:** Merge task branch back to the base branch (where session started)
 
@@ -1751,9 +1856,10 @@ mcp__code-intel__sync_index
 |------|-------|-------------|
 | `--no-verify` | - | Skip post-implementation verification |
 | `--only-verify` | `-v` | Run verification only |
+| `--only-explore` | `-e` | Run exploration only (skip implementation) |
 | `--gate=LEVEL` | `-g=LEVEL` | Gate level: f(ull), a(uto) |
-| `--quick` | `-q` | Skip exploration, no branch (= `-g=n` + `skip_branch`) |
-| `--fast` | `-f` | Skip exploration, with branch (= `-g=n` + branch) |
+| `--quick` | `-q` | Skip exploration, no branch, no PRE_COMMIT, no QUALITY_REVIEW |
+| `--fast` | `-f` | Skip exploration, with branch, no QUALITY_REVIEW |
 | `--doc-research=PROMPTS` | - | Document research prompts (comma-separated) |
 | `--no-doc-research` | - | Skip document research phase |
 | `--no-quality` | - | Skip quality review phase (v1.5) |

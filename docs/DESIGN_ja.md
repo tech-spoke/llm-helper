@@ -159,11 +159,11 @@ Step 8.5: POST_IMPL_VERIFY        実装後検証（verifier prompts実行）←
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │  コミット・品質フェーズ（Server強制）                                       │
 └─────────────────────────────────────────────────────────────────────────────┘
-Step 9:   PRE_COMMIT              コミット前レビュー
+Step 9:   PRE_COMMIT              コミット前レビュー          ← --quick でスキップ
           ├─ review_changes       ゴミ検出（garbage_detection.md）
           └─ finalize_changes     keep/discard判断 + コミット準備
 
-Step 9.5: QUALITY_REVIEW          品質レビュー ← --no-quality でスキップ
+Step 9.5: QUALITY_REVIEW          品質レビュー ← --no-quality / --fast / --quick でスキップ
           ├─ quality_review.md    チェックリスト確認
           └─ submit_quality_review
               ├─ 問題あり → READY に戻る（修正 → POST_IMPL_VERIFY → PRE_COMMIT → QUALITY_REVIEW）
@@ -184,7 +184,7 @@ Skill プロンプト（code.md）が制御。サーバーは関与しない。
 |---------|------|---------|
 | Step -1: Flag Check | コマンドオプション（`--quick`, `--only-explore` 等）をパース | - |
 | Step 1: Intent Classification | IMPLEMENT / MODIFY / INVESTIGATE / QUESTION を判定 | - |
-| Step 2: Session Start | セッション開始、project_rules 取得（ブランチ作成は v1.6 で分離） | - |
+| Step 2: Session Start | セッション開始、project_rules 取得（ブランチ未作成、v1.11 で READY に移動） | - |
 | Step 2.5: **DOCUMENT_RESEARCH** | サブエージェントで設計ドキュメントを調査、mandatory_rules 抽出 | `--no-doc-research` |
 | Step 3: QueryFrame Setup | ユーザー要求を構造化スロットに分解、Quote 検証 | - |
 
@@ -197,7 +197,7 @@ Skill プロンプト（code.md）が制御。サーバーは関与しない。
 **--only-explore フラグ（v1.8）:**
 - Step -1 で検出時に `skip_implementation=true` フラグを設定
 - Session Start（Step 2）時に `skip_implementation` パラメータを渡す
-- IMPACT_ANALYSIS（Step 8）完了後、実装フェーズをスキップして終了
+- IMPACT_ANALYSIS（Step 7）完了後、実装フェーズをスキップして終了
 
 ### 1.5. フェーズゲート開始（v1.6、v1.11更新）
 
@@ -235,14 +235,14 @@ MCP サーバーがフェーズ遷移を強制。LLM が勝手にスキップで
 
 | フェーズ | 目的 | 許可ツール | 遷移条件 |
 |---------|------|-----------|----------|
-| EXPLORATION | コードベース理解 | query, find_definitions, find_references, search_text | EXPLORATION完了 |
+| EXPLORATION | コードベース理解 | query, find_definitions, find_references, search_text, analyze_structure | EXPLORATION完了 |
 | Q1チェック | SEMANTIC必要性判断 | check_phase_necessity(phase="SEMANTIC") | needs_more_information判定 |
 | SEMANTIC | 情報ギャップを埋める | semantic_search | submit_semantic 完了 |
 | Q2チェック | VERIFICATION必要性判断 | check_phase_necessity(phase="VERIFICATION") | has_unverified_hypotheses判定 |
 | VERIFICATION | 仮説を検証 | 全探索ツール | submit_verification 完了 |
 | Q3チェック | IMPACT_ANALYSIS必要性判断 | check_phase_necessity(phase="IMPACT_ANALYSIS") | needs_impact_analysis判定 |
 | IMPACT_ANALYSIS | 変更影響を確認 | analyze_impact | submit_impact_analysis 完了 |
-| READY | 実装 | Edit, Write（探索済みファイルのみ） | - |
+| READY | 実装 | Edit, Write, Bash（探索済みファイルのみ） | - |
 | POST_IMPL_VERIFY | 動作確認 | Playwright, pytest 等 | 検証成功（3回失敗で介入発動） |
 | PRE_COMMIT | ゴミ検出 | review_changes, finalize_changes | ゴミ除去完了 |
 | QUALITY_REVIEW | 品質チェック | submit_quality_review（Edit/Write 禁止） | 問題なし → 完了、問題あり → READY 差し戻し |
@@ -364,6 +364,7 @@ doc_research:
 | `submit_semantic` | SEMANTIC フェーズ完了 |
 | `submit_verification` | VERIFICATION フェーズ完了 |
 | `submit_impact_analysis` | IMPACT_ANALYSIS フェーズ完了 |
+| `submit_exploration` | EXPLORATION フェーズ完了 |
 
 ### 実装制御
 
@@ -384,7 +385,6 @@ doc_research:
 | `finalize_changes` | keep/discard してコミット |
 | `submit_quality_review` | 品質レビュー結果を報告（v1.5） |
 | `merge_to_base` | タスクブランチを元のブランチにマージ |
-| `cleanup_stale_branches` | 中断セッションをクリーンアップ |
 
 ### ブランチライフサイクル（v1.6、v1.11）
 
@@ -392,6 +392,14 @@ doc_research:
 |--------|------|
 | `begin_phase_gate` | フェーズゲート開始（stale チェック）。v1.11: ブランチ作成はREADYに延期 |
 | `cleanup_stale_branches` | ベースブランチにチェックアウトし、全 `llm_task_*` ブランチを削除 |
+
+### 介入システム（v1.4）
+
+| ツール | 説明 |
+|--------|------|
+| `record_verification_failure` | 検証失敗を記録 |
+| `get_intervention_status` | 介入の必要性を判定 |
+| `record_intervention_used` | 使用した介入プロンプトを記録 |
 
 ### インデックス & 学習
 
@@ -419,6 +427,7 @@ doc_research:
 | `--quick` | `-q` | 最小モード: 探索スキップ、ブランチなし |
 | `--doc-research=PROMPTS` | - | 調査プロンプトを指定 |
 | `--no-doc-research` | - | ドキュメント調査をスキップ |
+| `--no-intervention` | `-ni` | 介入システムをスキップ（v1.4） |
 | `--clean` | `-c` | ベースブランチにチェックアウトし、stale な `llm_task_*` ブランチを削除 |
 | `--rebuild` | `-r` | 全インデックスを強制再構築 |
 
@@ -448,7 +457,7 @@ Step 2: Session Start
     │  - --only-explore フラグ → skip_implementation=true（明示的）
     │  - Intent=IMPLEMENT/MODIFY → skip_implementation=false（デフォルト）
     └─ ChromaDB を同期（必要時）
-    ※ ブランチ作成は Step 3.5 で実施（v1.6）
+    ※ ブランチ作成はREADYフェーズ遷移時に実施（v1.11）
 
 Step 2.5: DOCUMENT_RESEARCH (v1.3)
     ├─ 調査プロンプトでサブエージェントを起動
@@ -458,13 +467,14 @@ Step 2.5: DOCUMENT_RESEARCH (v1.3)
 Step 3: QueryFrame Setup
     └─ Quote 検証付きで構造化スロットを抽出
 
-Step 3.5: begin_phase_gate（v1.6）
+Step 3.5: begin_phase_gate（v1.6、v1.11）
     ├─ stale ブランチをチェック
     ├─ stale ブランチ存在時はユーザー介入（削除/マージ/継続）
     └─ ブランチ作成判定:
        - skip_implementation=true → skip_branch=true（ブランチなし）
-       - skip_implementation=false → タスクブランチ作成（通常フロー）
+       - skip_implementation=false → skip_branch=false（READY遷移時にブランチ作成）
        ★ v1.8: 探索専用モードではブランチ作成をスキップ
+       ★ v1.11: ブランチ作成はREADYフェーズ遷移時に延期（begin_phase_gateでは作成しない）
 
 ┌─────────────────────────────────────────────────────────────────┐
 │ 探索フェーズ（Server強制）                                       │
@@ -523,7 +533,6 @@ Step 7: IMPACT_ANALYSIS（Q3=YES の場合のみ）
 Step 8: READY
     ├─ 各 Edit/Write 前に check_write_target
     └─ 実装
-    → submit_for_review で PRE_COMMIT へ
 
 Step 8.5: POST_IMPL_VERIFY
     ├─ ファイルタイプに基づき verifier を選択
@@ -531,6 +540,7 @@ Step 8.5: POST_IMPL_VERIFY
     ├─ 失敗時は Step 8 に戻る
     └─ 3回連続失敗で介入発動（v1.4）
     ← --no-verify でスキップ
+    → submit_for_review で PRE_COMMIT へ
 
 ┌─────────────────────────────────────────────────────────────────┐
 │ コミット・品質フェーズ（Server強制）                             │
@@ -539,6 +549,7 @@ Step 9: PRE_COMMIT（ゴミ検出 + コミット準備）
     ├─ review_changes（garbage_detection.md で変更をレビュー）
     └─ finalize_changes（keep/discard 判断 + コミット準備）
        ★ v1.8: コミット準備のみ（実行は QUALITY_REVIEW 後）
+    ← --quick でスキップ
 
 Step 9.5: QUALITY_REVIEW（v1.5、v1.8で順序変更）
     ├─ quality_review.md に基づき品質チェック
@@ -546,7 +557,7 @@ Step 9.5: QUALITY_REVIEW（v1.5、v1.8で順序変更）
     │            → Step 8 (READY) に差し戻し（準備したコミット破棄）
     └─ 問題なし → submit_quality_review(issues_found=false)
                  → ★ここでコミット実行 → Step 10 へ
-    ← --no-quality でスキップ
+    ← --no-quality / --fast / --quick でスキップ
 
 ┌─────────────────────────────────────────────────────────────────┐
 │ 完了                                                            │
@@ -717,6 +728,7 @@ class Phase(Enum):
     IMPACT_ANALYSIS = "impact_analysis"  # v1.10: 分離
     READY = "ready"
     PRE_COMMIT = "pre_commit"
+    QUALITY_REVIEW = "quality_review"   # v1.5
 
 @dataclass
 class DocResearchConfig:
@@ -736,9 +748,9 @@ class DocResearchConfig:
     ↓
 [set_query_frame] → [Quote 検証付き QueryFrame]
     ↓
-[begin_phase_gate] → [stale ブランチチェック] → [ブランチ作成]
+[begin_phase_gate] → [stale ブランチチェック]
     ↓
-[EXPLORATION] → [find_definitions/references] → [submit_understanding]
+[EXPLORATION] → [find_definitions/references] → [submit_exploration]
     ↓
 [Symbol Validation] → [Embedding 類似度チェック]
     ↓
