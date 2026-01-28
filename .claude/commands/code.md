@@ -28,9 +28,11 @@ This is NOT documentation. You MUST execute and REPORT each step.
 4. **Phase progression**: EXPLORATION → Q1 Check → SEMANTIC* → Q2 Check → VERIFICATION* → Q3 Check → IMPACT_ANALYSIS* → READY (*: only if check says YES)
 5. **If unsure**: Call `mcp__code-intel__get_session_status` to check current phase before using Edit/Write/Bash
 6. **Parallel execution is MANDATORY**: Use parallel tool calls to save 15-35 seconds (see Best Practices section)
+7. **Workflow Completion is MANDATORY**: After implementation, you MUST complete Steps 9-10. NEVER use `git commit` directly - use `finalize_changes`. ALWAYS call `merge_to_base` to complete the session.
 
 **Important**: The server enforces phase gates. Steps cannot be skipped without server approval.
 **NEVER skip Steps 2 and 3.5** - even for `-e` (explore-only) or when already on a task branch.
+**NEVER end session without calling `merge_to_base`** - task branch will remain orphaned.
 
 ---
 
@@ -1022,6 +1024,8 @@ Server: Verification successful → Proceed to PRE_COMMIT
 
 ### Step 9: PRE_COMMIT
 
+**⚠️ DO NOT use `git commit` directly. Use `finalize_changes` tool instead.**
+
 Review all changes for garbage code and prepare commit.
 
 Call `mcp__code-intel__review_changes`:
@@ -1152,6 +1156,8 @@ Server provides `quality_review.md` checklist with criteria like:
 ## Completion
 
 ### Step 10: merge_to_base
+
+**⚠️ MANDATORY - Session is NOT complete until this step is executed.**
 
 Merge the task branch back to the original branch and complete the session.
 
