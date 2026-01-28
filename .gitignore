@@ -45,5 +45,8 @@ docs/old/
 # Qiita articles (private, not part of repo)
 docs/qiita/
 
+# Archived/unused command files
+.claude/commands/bak/
+
 # OverlayFS session directories
 .overlay/
