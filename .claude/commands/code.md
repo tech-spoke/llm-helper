@@ -508,9 +508,7 @@ Task tool
 
 Store the returned `mandatory_rules` in context for use in subsequent phases:
 - Reference during EXPLORATION phase
-- Include in `rule_acknowledgment` when calling `submit_exploration`
-
-**Note:** All `mandatory_rules` must be acknowledged in EXPLORATION phase.
+- Consider during implementation in READY phase
 
 ### Performance Characteristics
 
@@ -806,11 +804,6 @@ mcp__code-intel__submit_exploration
   existing_patterns: ["Service + Repository"]
   files_analyzed: ["auth/service.py", "auth/repo.py"]
   notes: "additional notes"
-  rule_acknowledgment: ["R1", "R2"]  # v1.3: Required if DOCUMENT_RESEARCH was executed
-  rule_compliance_plan: {            # v1.3: How you'll follow each rule
-    "R1": "Will use AuthService for validation logic",
-    "R2": "Will inherit from AppException for errors"
-  }
 ```
 
 **Minimum requirements (IMPLEMENT/MODIFY, logic files):**
@@ -820,16 +813,10 @@ mcp__code-intel__submit_exploration
 - existing_patterns: 1+
 - required_tools: find_definitions, find_references used
 
-**v1.3 Rule Acknowledgment (if DOCUMENT_RESEARCH was executed):**
-- All `mandatory_rules` IDs must be in `rule_acknowledgment`
-- Each acknowledged rule must have a `rule_compliance_plan` entry
-- Missing acknowledgments block transition to next phase
-
 **Consistency checks:**
 - entry_points must be linked to one of symbols_identified
 - Duplicate symbols or files are invalid (prevents padding)
 - Reporting patterns requires files_analyzed
-- v1.3: rule_acknowledgment must match mandatory_rules IDs
 
 **Next phase (v1.10):**
 - After submit_exploration completes → **Go to Step 4.5 (Q1 Check)**

@@ -802,7 +802,44 @@ async def list_tools() -> list[Tool]:
             },
         ),
         # v1.10 note: submit_understanding removed (replaced by check_phase_necessity)
-        # LLM should use check_phase_necessity after exploration to determine next phase
+        # submit_exploration validates exploration quality; check_phase_necessity handles phase transitions
+        Tool(
+            name="submit_exploration",
+            description="Submit exploration results for quality validation. "
+                        "Server evaluates confidence (symbols, entry_points, consistency, NL-symbol mapping). "
+                        "If sufficient: proceed to Q1 check (check_phase_necessity). "
+                        "If insufficient: auto-transitions to SEMANTIC for more context gathering.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "symbols_identified": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of key symbols found (classes, functions, etc.)",
+                    },
+                    "entry_points": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of entry points identified",
+                    },
+                    "existing_patterns": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of existing patterns found (e.g., 'Service + Repository')",
+                    },
+                    "files_analyzed": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of files that were analyzed",
+                    },
+                    "notes": {
+                        "type": "string",
+                        "description": "Additional notes about the exploration",
+                    },
+                },
+                "required": ["symbols_identified", "entry_points", "files_analyzed"],
+            },
+        ),
         Tool(
             name="submit_semantic",
             description="Submit semantic search results to complete Phase 2 (SEMANTIC). "
@@ -1992,7 +2029,22 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
     # v1.10 note: submit_understanding handler removed (replaced by check_phase_necessity)
-    # LLM should call check_phase_necessity after EXPLORATION to determine if SEMANTIC is needed
+    # submit_exploration validates quality; check_phase_necessity handles phase transitions
+
+    elif name == "submit_exploration":
+        session = session_manager.get_active_session()
+        if session is None:
+            result = {"error": "no_active_session", "message": "No active session."}
+        else:
+            exploration = ExplorationResult(
+                symbols_identified=arguments.get("symbols_identified", []),
+                entry_points=arguments.get("entry_points", []),
+                existing_patterns=arguments.get("existing_patterns", []),
+                files_analyzed=arguments.get("files_analyzed", []),
+                notes=arguments.get("notes", ""),
+            )
+            result = session.submit_exploration(exploration)
+        return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
     elif name == "submit_semantic":
         session = session_manager.get_active_session()

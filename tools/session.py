@@ -1227,19 +1227,14 @@ class SessionState:
             "missing_requirements": missing,
             "consistency_errors": consistency_errors,
             "risk_level": self.risk_level,
-            "effective_risk_level": effective_risk_level,  # v1.1
-            "markup_context": markup_context,  # v1.1
             "timestamp": datetime.now().isoformat(),
         })
 
         # v3.6: HYPOTHESISスロットが残っていればREADYに進めない
-        # v1.1: マークアップコンテキストの場合はHYPOTHESISチェックをスキップ
-        hypothesis_block = []
-        if not markup_context:
-            hypothesis_block = self._check_hypothesis_slots()
-            if hypothesis_block:
-                missing.extend(hypothesis_block)
-                confidence = "low"
+        hypothesis_block = self._check_hypothesis_slots()
+        if hypothesis_block:
+            missing.extend(hypothesis_block)
+            confidence = "low"
 
         # IMPLEMENT/MODIFY は最低成果条件を満たさないと IMPACT_ANALYSIS に進めない
         can_proceed = confidence == "high" and not consistency_errors and not hypothesis_block
@@ -1247,19 +1242,13 @@ class SessionState:
         if can_proceed:
             # v1.10: EXPLORATION complete, stay in EXPLORATION for Q1 check
             # Do not auto-transition to next phase
-            # self.transition_to_phase(Phase.IMPACT_ANALYSIS, reason="submit_exploration_approved")
             response = {
                 "success": True,
-                "next_phase": Phase.IMPACT_ANALYSIS.name,
                 "evaluated_confidence": confidence,
-                "risk_level": effective_risk_level,
-                "message": "Exploration sufficient. Proceed to impact analysis before implementation.",
-                "next_step": "Call analyze_impact with target files, then submit_impact_analysis with verified_files.",
+                "risk_level": self.risk_level,
+                "message": "Exploration sufficient. Proceed to Q1 check (check_phase_necessity).",
+                "next_step": "Call check_phase_necessity(phase='SEMANTIC') to determine if semantic search is needed.",
             }
-            # v1.1: マークアップコンテキストの場合は明示
-            if markup_context:
-                response["markup_context"] = True
-                response["relaxed_requirements"] = "find_definitions/find_references not required for markup files"
             return response
         else:
             self.transition_to_phase(Phase.SEMANTIC, reason="semantic_gate_required")
@@ -1268,7 +1257,7 @@ class SessionState:
                 "next_phase": Phase.SEMANTIC.name,
                 "evaluated_confidence": confidence,
                 "missing_requirements": missing,
-                "risk_level": effective_risk_level,
+                "risk_level": self.risk_level,
                 "message": "Exploration insufficient. Use semantic_search to gather more context.",
                 "hint": "Use semantic_search, then submit_semantic with hypotheses and semantic_reason.",
             }
