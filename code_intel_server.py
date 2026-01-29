@@ -2036,11 +2036,15 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         if session is None:
             result = {"error": "no_active_session", "message": "No active session."}
         else:
+            # Auto-populate tools_used from session's tool_calls history
+            # More reliable than LLM self-reporting
+            tools_used = list({tc["tool"] for tc in session.tool_calls if "tool" in tc})
             exploration = ExplorationResult(
                 symbols_identified=arguments.get("symbols_identified", []),
                 entry_points=arguments.get("entry_points", []),
                 existing_patterns=arguments.get("existing_patterns", []),
                 files_analyzed=arguments.get("files_analyzed", []),
+                tools_used=tools_used,
                 notes=arguments.get("notes", ""),
             )
             result = session.submit_exploration(exploration)
