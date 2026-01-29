@@ -56,8 +56,8 @@ And have a mechanism to learn from failures.
 | **Two-Layer Context** | Static project rules + dynamic task-specific rules |
 | **Garbage Detection** | Git branch isolates changes for review before commit |
 | **Intervention System** | Retry-based intervention for stuck verification loops (v1.4) |
-| **Quality Review** | Post-implementation quality check with revert-to-READY loop (v1.5) |
-| **Branch Lifecycle** | Stale branch warnings, auto-deletion on failure (v1.6) |
+| **Quality Review** | Post-implementation quality check, re-check required after fixes (v1.5) |
+| **Branch Lifecycle** | Stale branch warnings, auto-deletion on failure, begin_phase_gate separation (v1.6) |
 
 ---
 
@@ -107,7 +107,7 @@ And have a mechanism to learn from failures.
 
 ## Processing Flow
 
-Processing consists of 4 layers (v1.10):
+Processing consists of 4 layers (v1.10).
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -153,18 +153,17 @@ Step 7:   IMPACT_ANALYSIS         Impact range analysis (only if Q3=YES)
 └─────────────────────────────────────────────────────────────────────────────┘
 Step 8:   READY                   Implementation (Edit/Write/Bash allowed)
                                   ★ v1.11: Branch created at transition to READY
-Step 8.5: POST_IMPL_VERIFY        Post-implementation verification (verifier prompts)
-                                  ← skip with --no-verify
+Step 8.5: POST_IMPL_VERIFY        Post-implementation verification (verifier prompts) ← skip with --no-verify
                                   On failure, loop back to Step 8 (max 3 times)
 
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │  Commit & Quality Phase (Server enforced)                                   │
 └─────────────────────────────────────────────────────────────────────────────┘
-Step 9:   PRE_COMMIT              Pre-commit review
+Step 9:   PRE_COMMIT              Pre-commit review                ← skip with --quick
           ├─ review_changes       Garbage detection (garbage_detection.md)
           └─ finalize_changes     Keep/discard decision + commit preparation
 
-Step 9.5: QUALITY_REVIEW          Quality review ← skip with --no-quality
+Step 9.5: QUALITY_REVIEW          Quality review ← skip with --no-quality / --fast / --quick
           ├─ quality_review.md    Checklist review
           └─ submit_quality_review
               ├─ Issues found → Revert to READY (fix → POST_IMPL_VERIFY → PRE_COMMIT → QUALITY_REVIEW)
@@ -177,17 +176,17 @@ Step 10:  merge_to_base           Merge task branch to original branch
                                   Session complete, report results to user
 ```
 
-### 1. Preparation (Skill controlled)
+### 1. Preparation Phase (Skill controlled)
 
 Controlled by skill prompt (code.md). Server not involved.
 
 | Step | Description | Skip |
 |------|-------------|------|
 | Step -1: Flag Check | Parse command options (`--quick`, `--only-explore`, etc.) | - |
-| Step 1: Intent | Classify as IMPLEMENT / MODIFY / INVESTIGATE / QUESTION | - |
-| Step 2: Session Start | Start session, get project_rules (no branch yet) | - |
+| Step 1: Intent Classification | Classify as IMPLEMENT / MODIFY / INVESTIGATE / QUESTION | - |
+| Step 2: Session Start | Start session, get project_rules (no branch yet, moved to READY in v1.11) | - |
 | Step 2.5: **DOCUMENT_RESEARCH** | Sub-agent researches design docs, extracts mandatory_rules | `--no-doc-research` |
-| Step 3: QueryFrame | Decompose request into structured slots with Quote verification | - |
+| Step 3: QueryFrame Setup | Decompose request into structured slots with Quote verification | - |
 
 **DOCUMENT_RESEARCH details:**
 - Uses Claude Code Task tool (Explore agent)
@@ -198,9 +197,9 @@ Controlled by skill prompt (code.md). Server not involved.
 **--only-explore flag (v1.8):**
 - When detected in Step -1, sets `skip_implementation=true` flag
 - Passes `skip_implementation` parameter to Session Start (Step 2)
-- After IMPACT_ANALYSIS (Step 8) completion, skips implementation phases and exits
+- After IMPACT_ANALYSIS (Step 7) completion, skips implementation phases and exits
 
-### 2. Phase Gate Start (v1.6, updated v1.11)
+### 1.5. Phase Gate Start (v1.6, updated v1.11)
 
 After preparation, `begin_phase_gate` starts phase gates (branch creation deferred to READY transition).
 
@@ -212,7 +211,7 @@ After preparation, `begin_phase_gate` starts phase gates (branch creation deferr
 - Branch is created when transitioning to READY phase (not at begin_phase_gate)
 - This allows exploration to complete before committing to implementation
 
-### 3. Phase Gates (Server enforced)
+### 2. Phase Gates (Server enforced)
 
 MCP server enforces phase transitions. LLM cannot skip arbitrarily.
 
@@ -243,10 +242,19 @@ MCP server enforces phase transitions. LLM cannot skip arbitrarily.
 | VERIFICATION | Verify hypotheses | All exploration tools | submit_verification completed |
 | Q3 Check | Determine IMPACT_ANALYSIS necessity | check_phase_necessity(phase="IMPACT_ANALYSIS") | needs_impact_analysis decision |
 | IMPACT_ANALYSIS | Check change impact | analyze_impact | submit_impact_analysis completed |
-| READY | Implementation | Edit, Write (explored files only) | - |
-| POST_IMPL_VERIFY | Run verification | Verifier prompts (Playwright, pytest) | Success (3 failures trigger intervention) |
-| PRE_COMMIT | Review changes | review_changes, finalize_changes | Garbage removed |
+| READY | Implementation | Edit, Write, Bash (explored files only) | - |
+| POST_IMPL_VERIFY | Run verification | Playwright, pytest, etc. | Success (3 failures trigger intervention) |
+| PRE_COMMIT | Garbage detection | review_changes, finalize_changes | Garbage removed |
 | QUALITY_REVIEW | Quality check | submit_quality_review (Edit/Write forbidden) | No issues → complete, Issues → revert to READY |
+
+### 3. Completion
+
+- Merge task branch to base branch via `merge_to_base`
+- Delete Git branch
+
+---
+
+## Phase Details
 
 ### Markup Relaxation
 
@@ -289,7 +297,7 @@ v1.3 introduces a clear separation between static and dynamic context.
 ┌─────────────────────────────────────────────────────────────────┐
 │  Layer 2: mandatory_rules (DOCUMENT_RESEARCH phase)             │
 │  └── Task-specific detailed rules (dynamic, per-task)          │
-│      • Source: docs/**/*.md via Sub-agent research              │
+│      • Source: docs/**/*.md (sub-agent research)                │
 │      • Content: Task-specific constraints with file:line refs   │
 │      • Purpose: "Rules for THIS implementation"                 │
 └─────────────────────────────────────────────────────────────────┘
@@ -356,6 +364,7 @@ doc_research:
 | `submit_semantic` | Complete SEMANTIC phase |
 | `submit_verification` | Complete VERIFICATION phase |
 | `submit_impact_analysis` | Complete IMPACT_ANALYSIS phase |
+| `submit_exploration` | Complete EXPLORATION phase |
 
 ### Implementation Control
 
@@ -376,7 +385,6 @@ doc_research:
 | `finalize_changes` | Keep/discard files and commit |
 | `submit_quality_review` | Report quality review result (v1.5) |
 | `merge_to_base` | Merge task branch to base branch |
-| `cleanup_stale_branches` | Clean up interrupted sessions |
 
 ### Branch Lifecycle (v1.6, v1.11)
 
@@ -384,6 +392,14 @@ doc_research:
 |------|-------------|
 | `begin_phase_gate` | Start phase gates (stale branch check). v1.11: branch creation deferred to READY |
 | `cleanup_stale_branches` | Checkout to base branch, delete all `llm_task_*` branches |
+
+### Intervention System (v1.4)
+
+| Tool | Description |
+|------|-------------|
+| `record_verification_failure` | Record verification failure |
+| `get_intervention_status` | Determine if intervention is needed |
+| `record_intervention_used` | Record which intervention prompt was used |
 
 ### Index & Learning
 
@@ -403,12 +419,12 @@ doc_research:
 | Long | Short | Description |
 |------|-------|-------------|
 | `--gate=LEVEL` | `-g=LEVEL` | Gate level: f(ull), a(uto) [default: auto] (v1.10) |
-| `--no-verify` | - | Skip post-implementation verification (and intervention) |
+| `--no-verify` | - | Skip verification (and intervention) |
 | `--no-quality` | - | Skip quality review (v1.5) |
 | `--only-verify` | `-v` | Run verification only |
 | `--only-explore` | `-e` | Run exploration only (skip implementation) (v1.8) |
-| `--fast` | `-f` | Skip exploration with branch |
-| `--quick` | `-q` | Skip exploration, no branch |
+| `--fast` | `-f` | Fast mode: skip exploration, with branch |
+| `--quick` | `-q` | Minimal mode: skip exploration, no branch |
 | `--doc-research=PROMPTS` | - | Specify research prompts |
 | `--no-doc-research` | - | Skip document research |
 | `--no-intervention` | `-ni` | Skip intervention system (v1.4) |
@@ -441,7 +457,7 @@ Step 2: Session Start
     │  - --only-explore flag → skip_implementation=true (explicit)
     │  - Intent=IMPLEMENT/MODIFY → skip_implementation=false (default)
     └─ Sync ChromaDB (if needed)
-    ※ Branch creation happens in Step 3.5 (v1.6)
+    ※ Branch creation happens at READY phase transition (v1.11)
 
 Step 2.5: DOCUMENT_RESEARCH (v1.3)
     ├─ Spawn sub-agent with research prompt
@@ -451,13 +467,14 @@ Step 2.5: DOCUMENT_RESEARCH (v1.3)
 Step 3: QueryFrame Setup
     └─ Extract structured slots with quote verification
 
-Step 3.5: begin_phase_gate (v1.6)
+Step 3.5: begin_phase_gate (v1.6, v1.11)
     ├─ Check for stale branches
     ├─ User intervention if stale branches exist (delete/merge/continue)
     └─ Determine branch creation:
        - skip_implementation=true → skip_branch=true (no branch)
-       - skip_implementation=false → Create task branch (normal flow)
+       - skip_implementation=false → skip_branch=false (branch created at READY transition)
        ★ v1.8: Exploration-only mode skips branch creation
+       ★ v1.11: Branch creation deferred to READY phase transition (not created at begin_phase_gate)
 
 ┌─────────────────────────────────────────────────────────────────┐
 │ Exploration Phase (Server enforced)                             │
@@ -516,7 +533,6 @@ Step 7: IMPACT_ANALYSIS (only if Q3=YES)
 Step 8: READY
     ├─ check_write_target before each Edit/Write
     └─ Implementation
-    → submit_for_review to PRE_COMMIT
 
 Step 8.5: POST_IMPL_VERIFY
     ├─ Select verifier based on file types
@@ -524,6 +540,7 @@ Step 8.5: POST_IMPL_VERIFY
     ├─ Loop back to Step 8 on failure
     └─ Intervention on 3 consecutive failures (v1.4)
     ← skip with --no-verify
+    → submit_for_review to PRE_COMMIT
 
 ┌─────────────────────────────────────────────────────────────────┐
 │ Commit & Quality Phase (Server enforced)                        │
@@ -532,6 +549,7 @@ Step 9: PRE_COMMIT (garbage detection + commit preparation)
     ├─ review_changes (review with garbage_detection.md)
     └─ finalize_changes (keep/discard decision + commit preparation)
        ★ v1.8: Prepare commit only (execution after QUALITY_REVIEW)
+    ← skip with --quick
 
 Step 9.5: QUALITY_REVIEW (v1.5, order changed in v1.8)
     ├─ quality_review.md checklist
@@ -539,7 +557,7 @@ Step 9.5: QUALITY_REVIEW (v1.5, order changed in v1.8)
     │                → Revert to Step 8 (READY) (discard prepared commit)
     └─ No issues → submit_quality_review(issues_found=false)
                  → ★Commit execution happens here → Step 10
-    ← skip with --no-quality
+    ← skip with --no-quality / --fast / --quick
 
 ┌─────────────────────────────────────────────────────────────────┐
 │ Completion                                                      │
@@ -710,6 +728,7 @@ class Phase(Enum):
     IMPACT_ANALYSIS = "impact_analysis"  # v1.10: Separated
     READY = "ready"
     PRE_COMMIT = "pre_commit"
+    QUALITY_REVIEW = "quality_review"   # v1.5
 
 @dataclass
 class DocResearchConfig:
@@ -729,9 +748,9 @@ class DocResearchConfig:
     ↓
 [set_query_frame] → [QueryFrame with quote verification]
     ↓
-[begin_phase_gate] → [Stale branch check] → [Branch created]
+[begin_phase_gate] → [Stale branch check]
     ↓
-[EXPLORATION] → [find_definitions/references] → [submit_understanding]
+[EXPLORATION] → [find_definitions/references] → [submit_exploration]
     ↓
 [Symbol Validation] → [Embedding similarity check]
     ↓
@@ -775,14 +794,14 @@ For version history and detailed changes:
 | Version | Description | Link |
 |---------|-------------|------|
 | v1.10 | Individual Phase Checks (individual necessity checks before each phase, VERIFICATION/IMPACT separation, gate_level redesign - saves 20-60s) | [v1.10](updates/v1.10_ja.md) |
-| v1.9 | Performance Optimization (sync_index batch, VERIFICATION+IMPACT integration - saves 15-20s) | [v1.9](updates/v1.9.md) |
-| v1.8 | Exploration-Only Mode (--only-explore) | [v1.8](updates/v1.8.md) |
-| v1.7 | Parallel Execution (search_text, Read, Grep - saves 27-35s) | [v1.7](updates/v1.7.md) |
-| v1.6 | Branch Lifecycle (stale warning, begin_phase_gate) | [v1.6](updates/v1.6.md) |
-| v1.5 | Quality Review (revert-to-READY loop) | [v1.5](updates/v1.5.md) |
-| v1.4 | Intervention System | [v1.4](updates/v1.4.md) |
-| v1.3 | Document Research, Markup Cross-Reference | [v1.3](updates/v1.3.md) |
-| v1.2 | Git Branch Isolation | [v1.2](updates/v1.2.md) |
-| v1.1 | Impact Analysis, Context Provider | [v1.1](updates/v1.1.md) |
+| v1.9 | Performance Optimization (sync_index batch, VERIFICATION+IMPACT integration - saves 15-20s) | [v1.9](updates/v1.9_ja.md) |
+| v1.8 | Exploration-Only Mode (--only-explore) | [v1.8](updates/v1.8_ja.md) |
+| v1.7 | Parallel Execution (search_text, Read, Grep - saves 27-35s) | [v1.7](updates/v1.7_ja.md) |
+| v1.6 | Branch Lifecycle (stale warning, begin_phase_gate) | [v1.6](updates/v1.6_ja.md) |
+| v1.5 | Quality Review (revert-to-READY loop) | [v1.5](updates/v1.5_ja.md) |
+| v1.4 | Intervention System | [v1.4](updates/v1.4_ja.md) |
+| v1.3 | Document Research, Markup Cross-Reference | [v1.3](updates/v1.3_ja.md) |
+| v1.2 | Git Branch Isolation | [v1.2](updates/v1.2_ja.md) |
+| v1.1 | Impact Analysis, Context Provider | [v1.1](updates/v1.1_ja.md) |
 
 For documentation rules, see [DOCUMENTATION_RULES.md](DOCUMENTATION_RULES.md).

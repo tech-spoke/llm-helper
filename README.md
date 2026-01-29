@@ -111,7 +111,8 @@ Processing consists of 3 layers:
 │  2. Phase Gates (Server enforced) v1.10: Individual Check Approach         │
 │     EXPLORATION → Q1 Check → SEMANTIC* → Q2 Check → VERIFICATION*          │
 │     → Q3 Check → IMPACT_ANALYSIS*                                          │
-│     → READY → POST_IMPL_VERIFY → PRE_COMMIT → QUALITY_REVIEW              │
+│     → [--only-explore: end here] or [READY → POST_IMPL_VERIFY → PRE_COMMIT]│
+│     → QUALITY_REVIEW                                                       │
 │     ← --quick skips exploration, --no-verify/--no-quality skip each phase  │
 │     ← --gate=full ignores all checks, --gate=auto checks each (default)   │
 └─────────────────────────────────────────────────────────────────────────────┘
@@ -153,13 +154,19 @@ MCP server enforces phase transitions. LLM cannot skip arbitrarily.
 
 #### Phase Matrix
 
-| Option | Explore | Implement | Verify | Intervene | Garbage | Quality | Branch |
-|--------|:-------:|:---------:|:------:|:---------:|:-------:|:-------:|:------:|
-| (default) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `--no-verify` | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | ✅ |
-| `--no-quality` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
-| `--fast` / `-f` | ❌ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
-| `--quick` / `-q` | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Option | Doc Research | Source Explore | Implement | Verify | Intervene | Garbage | Quality | Branch |
+|--------|:-------:|:-------:|:---------:|:------:|:---------:|:-------:|:-------:|:------:|
+| (default) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `--only-explore` / `-e` | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `--no-verify` | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | ✅ |
+| `--no-quality` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
+| `--fast` / `-f` | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
+| `--quick` / `-q` | ✅ | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| `--no-doc-research` | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+
+**Legend**:
+- **Doc Research**: DOCUMENT_RESEARCH (Step 2.5)
+- **Source Explore**: EXPLORATION, SEMANTIC, VERIFICATION, IMPACT_ANALYSIS (Steps 4-7)
 
 ### Tool Permissions by Phase (v1.10: Individual Check Approach)
 
@@ -170,9 +177,10 @@ MCP server enforces phase transitions. LLM cannot skip arbitrarily.
 | SEMANTIC | semantic_search | code-intel |
 | VERIFICATION | code-intel tools | semantic_search |
 | IMPACT_ANALYSIS | analyze_impact, code-intel | semantic_search |
-| READY | Edit, Write (explored files only) | - |
+| READY | Edit, Write, Bash (explored files only) | - |
 | POST_IMPL_VERIFY | Verification tools (Playwright, pytest, etc.) | - |
 | PRE_COMMIT | review_changes, finalize_changes | - |
+| QUALITY_REVIEW | submit_quality_review (Edit/Write forbidden) | - |
 
 ---
 
@@ -206,6 +214,7 @@ MCP server enforces phase transitions. LLM cannot skip arbitrarily.
 | `confirm_symbol_relevance` | Confirm symbol validation results |
 | `submit_semantic` | Complete SEMANTIC |
 | `submit_verification` | Complete VERIFICATION |
+| `submit_exploration` | Complete EXPLORATION |
 | `submit_impact_analysis` | Complete IMPACT_ANALYSIS (v1.1) |
 | `check_write_target` | Check write permission |
 | `add_explored_files` | Add explored files |
@@ -221,14 +230,21 @@ MCP server enforces phase transitions. LLM cannot skip arbitrarily.
 | `finalize_changes` | Keep/discard files and commit |
 | `submit_quality_review` | Submit quality review result (v1.5) |
 | `merge_to_base` | Merge task branch to base branch |
-| `cleanup_stale_sessions` | Clean up interrupted sessions |
 
 ### Branch Lifecycle (v1.6, v1.11)
 
 | Tool | Purpose |
 |------|---------|
 | `begin_phase_gate` | Start phase gates (stale check). v1.11: branch creation deferred to READY |
-| `cleanup_stale_sessions` | Delete stale branches |
+| `cleanup_stale_branches` | Checkout to base branch, delete all `llm_task_*` branches |
+
+### Intervention System (v1.4)
+
+| Tool | Purpose |
+|------|---------|
+| `record_verification_failure` | Record verification failure |
+| `get_intervention_status` | Determine if intervention is needed |
+| `record_intervention_used` | Record which intervention prompt was used |
 
 ### Improvement Cycle
 
@@ -421,59 +437,35 @@ git pull
 cp /path/to/llm-helper/.claude/commands/*.md /path/to/your-project/.claude/commands/
 ```
 
-### Step 3: Add New Directories (v1.3)
+### Step 3: Add Missing Directories
 
-Create new directories and copy templates:
+If directories added in v1.3+ are missing, create them and copy templates:
 
 ```bash
-# Create new directories
-mkdir -p /path/to/your-project/.code-intel/logs
-mkdir -p /path/to/your-project/.code-intel/verifiers
-mkdir -p /path/to/your-project/.code-intel/doc_research
+cd /path/to/your-project
 
-# Copy verifier templates
-cp /path/to/llm-helper/.code-intel/verifiers/*.md /path/to/your-project/.code-intel/verifiers/
+# Create missing directories (skipped if already exist)
+mkdir -p .code-intel/logs
+mkdir -p .code-intel/verifiers
+mkdir -p .code-intel/doc_research
+mkdir -p .code-intel/interventions
+mkdir -p .code-intel/review_prompts
 
-# Copy doc_research prompts
-cp /path/to/llm-helper/.code-intel/doc_research/*.md /path/to/your-project/.code-intel/doc_research/
+# Copy templates (existing files will not be overwritten)
+cp -n /path/to/llm-helper/.code-intel/verifiers/*.md .code-intel/verifiers/
+cp -n /path/to/llm-helper/.code-intel/doc_research/*.md .code-intel/doc_research/
+cp -n /path/to/llm-helper/.code-intel/interventions/*.md .code-intel/interventions/
+cp -n /path/to/llm-helper/.code-intel/review_prompts/*.md .code-intel/review_prompts/
 ```
 
-### Step 4: Update context.yml (v1.3)
-
-Add `doc_research` section to your `.code-intel/context.yml`:
-
-```yaml
-# Document research settings (v1.3)
-doc_research:
-  enabled: true
-  docs_path:
-    - "docs/"
-  default_prompts:
-    - "default.md"
-```
-
-### Step 5: Restart Claude Code
+### Step 4: Restart Claude Code
 
 Restart to reload the MCP server.
-
-### What Changes
-
-| Item | v1.0 | v1.1 | v1.2 | v1.3 | v1.4 | v1.5 | v1.6 |
-|------|------|------|------|------|------|------|------|
-| Phases | 4 | 5 | 6 | 6 | 6 | 7 (QUALITY_REVIEW) | 7 |
-| context.yml | None | Auto-generated | Auto-generated | doc_research added | Same | Same | Same |
-| Design docs summary | None | Auto-provided | Same | Sub-agent research | Same | Same | Same |
-| Garbage isolation | None | None | Git branch | Same | Same | Same | Same |
-| Intervention | None | None | None | None | Retry-based | Same | Same |
-| Quality review | None | None | None | None | None | Retry loop | Same |
-| Branch lifecycle | None | None | None | None | None | None | Stale warning |
-| verifiers/ | None | None | None | Verification prompts | Same | Same | Same |
-| interventions/ | None | None | None | None | Intervention prompts | Same | Same |
-| review_prompts/ | None | None | None | None | None | Quality prompts | Same |
 
 ### No Changes Required
 
 - `.code-intel/config.json` - Compatible, no changes needed
+- `.code-intel/context.yml` - Auto-updated
 - `.code-intel/chroma/` - Existing index continues to work
 - `.mcp.json` - No changes needed
 
@@ -497,11 +489,13 @@ The `context.yml` file will be automatically created on next session start.
 | `--no-verify` | - | Skip verification (and intervention) |
 | `--no-quality` | - | Skip quality review (v1.5) |
 | `--only-verify` | `-v` | Run verification only (skip implementation) |
-| `--fast` | `-f` | Fast mode: skip exploration with branch (garbage + verify) |
-| `--quick` | `-q` | Minimal mode: skip exploration without branch |
-| `--doc-research=PROMPTS` | - | Specify document research prompts (v1.3) |
+| `--only-explore` | `-e` | Run exploration only (skip implementation) (v1.8) |
+| `--fast` | `-f` | Fast mode: skip exploration, with branch |
+| `--quick` | `-q` | Minimal mode: skip exploration, no branch |
+| `--doc-research=PROMPTS` | - | Specify research prompts (v1.3) |
 | `--no-doc-research` | - | Skip document research (v1.3) |
-| `--clean` | `-c` | Cleanup stale sessions |
+| `--no-intervention` | `-ni` | Skip intervention system (v1.4) |
+| `--clean` | `-c` | Checkout to base branch, delete stale `llm_task_*` branches |
 | `--rebuild` | `-r` | Force full re-index |
 
 **gate_level options (v1.10):**
@@ -524,6 +518,9 @@ The `context.yml` file will be automatically created on next session start.
 
 # Verification only (check existing implementation)
 /code -v sample/hello.html
+
+# Exploration only (skip implementation, for investigation)
+/code -e Investigate issues in the codebase
 
 # Fast mode: skip exploration with branch (for known fixes)
 /code -f fix known issue in login validation
@@ -568,16 +565,18 @@ The skill automatically:
 5. DOCUMENT_RESEARCH (v1.3) ← skip with `--no-doc-research`
 6. QueryFrame extraction and verification
 7. EXPLORATION ← skip with `--quick`
-8. Symbol verification (Embedding) ← skip with `--quick`
-9. SEMANTIC if needed ← skip with `--quick`
-10. VERIFICATION (hypothesis verification) ← skip with `--quick`
-11. IMPACT ANALYSIS ← skip with `--quick`
-12. READY (implementation)
-13. POST_IMPLEMENTATION_VERIFICATION ← skip with `--no-verify`
-14. INTERVENTION (v1.4) ← triggered on 3 consecutive verify failures
-15. GARBAGE DETECTION ← skip with `--quick`
-16. QUALITY REVIEW (v1.5) ← skip with `--no-quality` or `--quick`
-17. Finalize & Merge
+8. Q1 Check (v1.10 - SEMANTIC necessity) ← ignored with `--gate=full`
+9. SEMANTIC (only if Q1=YES) ← skip with `--quick`
+10. Q2 Check (v1.10 - VERIFICATION necessity) ← ignored with `--gate=full`
+11. VERIFICATION (only if Q2=YES) ← skip with `--quick`
+12. Q3 Check (v1.10 - IMPACT_ANALYSIS necessity) ← ignored with `--gate=full`
+13. IMPACT ANALYSIS (only if Q3=YES) ← skip with `--quick`
+14. READY (implementation)
+15. POST_IMPLEMENTATION_VERIFICATION ← skip with `--no-verify`
+16. INTERVENTION (v1.4) ← triggered on 3 consecutive verify failures
+17. GARBAGE DETECTION ← skip with `--quick`
+18. QUALITY REVIEW (v1.5) ← skip with `--no-quality` / `--fast` / `--quick`
+19. Finalize & Merge
 
 ### Direct tool invocation
 
@@ -678,6 +677,8 @@ your-project/
 │   ├── logs/               ← DecisionLog, OutcomeLog
 │   ├── verifiers/          ← Verification prompts
 │   ├── doc_research/       ← Document research prompts (v1.3)
+│   ├── interventions/      ← Intervention prompts (v1.4)
+│   ├── review_prompts/     ← Quality review prompts (v1.5)
 │   └── sync_state.json
 ├── .claude/commands/       ← Skills (optional copy)
 └── src/                    ← Your source code
@@ -702,15 +703,15 @@ For version history and detailed changes, see:
 | Version | Description | Link |
 |---------|-------------|------|
 | v1.10 | Individual Phase Checks (individual necessity checks before each phase, VERIFICATION/IMPACT separation, gate_level redesign - saves 20-60s) | [v1.10](docs/updates/v1.10_ja.md) |
-| v1.9 | sync_index batch processing, VERIFICATION+IMPACT_ANALYSIS integration (saves 15-20s) | [v1.9](docs/updates/v1.9.md) |
-| v1.8 | Exploration-Only Mode (Intent-based + --only-explore, no branch creation) | [v1.8](docs/updates/v1.8.md) |
-| v1.7 | Parallel Execution (search_text, Read, Grep - saves 27-35s) | [v1.7](docs/updates/v1.7.md) |
-| v1.6 | Branch Lifecycle (stale warning, begin_phase_gate) | [v1.6](docs/updates/v1.6.md) |
-| v1.5 | Quality Review with retry loop | [v1.5](docs/updates/v1.5.md) |
-| v1.4 | Intervention System | [v1.4](docs/updates/v1.4.md) |
-| v1.3 | Document Research, Markup Cross-Reference | [v1.3](docs/updates/v1.3.md) |
-| v1.2 | Git Branch Isolation | [v1.2](docs/updates/v1.2.md) |
-| v1.1 | Impact Analysis, Context Provider | [v1.1](docs/updates/v1.1.md) |
+| v1.9 | Performance Optimization (sync_index batch, VERIFICATION+IMPACT integration - saves 15-20s) | [v1.9](docs/updates/v1.9_ja.md) |
+| v1.8 | Exploration-Only Mode (Intent-based + --only-explore, no branch creation) | [v1.8](docs/updates/v1.8_ja.md) |
+| v1.7 | Parallel Execution (search_text, Read, Grep - saves 27-35s) | [v1.7](docs/updates/v1.7_ja.md) |
+| v1.6 | Branch Lifecycle (stale warning, begin_phase_gate) | [v1.6](docs/updates/v1.6_ja.md) |
+| v1.5 | Quality Review (revert-to-READY loop) | [v1.5](docs/updates/v1.5_ja.md) |
+| v1.4 | Intervention System | [v1.4](docs/updates/v1.4_ja.md) |
+| v1.3 | Document Research, Markup Cross-Reference | [v1.3](docs/updates/v1.3_ja.md) |
+| v1.2 | Git Branch Isolation | [v1.2](docs/updates/v1.2_ja.md) |
+| v1.1 | Impact Analysis, Context Provider | [v1.1](docs/updates/v1.1_ja.md) |
 
 ---
 

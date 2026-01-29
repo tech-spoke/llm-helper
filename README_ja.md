@@ -177,7 +177,7 @@ MCP サーバーがフェーズ遷移を強制。LLM が勝手にスキップで
 | SEMANTIC | semantic_search | code-intel |
 | VERIFICATION | code-intel ツール | semantic_search |
 | IMPACT_ANALYSIS | analyze_impact, code-intel | semantic_search |
-| READY | Edit, Write（探索済みファイルのみ） | - |
+| READY | Edit, Write, Bash（探索済みファイルのみ） | - |
 | POST_IMPL_VERIFY | 検証ツール (Playwright, pytest 等) | - |
 | PRE_COMMIT | review_changes, finalize_changes | - |
 | QUALITY_REVIEW | submit_quality_review（Edit/Write 禁止） | - |
@@ -214,6 +214,7 @@ MCP サーバーがフェーズ遷移を強制。LLM が勝手にスキップで
 | `confirm_symbol_relevance` | シンボル検証結果を確認 |
 | `submit_semantic` | SEMANTIC 完了 |
 | `submit_verification` | VERIFICATION 完了 |
+| `submit_exploration` | EXPLORATION 完了 |
 | `submit_impact_analysis` | IMPACT_ANALYSIS 完了（v1.1） |
 | `check_write_target` | Write 可否確認 |
 | `add_explored_files` | 探索済みファイル追加 |
@@ -229,14 +230,21 @@ MCP サーバーがフェーズ遷移を強制。LLM が勝手にスキップで
 | `finalize_changes` | ファイルを保持/破棄してコミット |
 | `submit_quality_review` | 品質レビュー結果を報告（v1.5） |
 | `merge_to_base` | タスクブランチを元のブランチにマージ |
-| `cleanup_stale_sessions` | 中断セッションをクリーンアップ |
 
 ### ブランチライフサイクル（v1.6、v1.11）
 
 | ツール | 用途 |
 |--------|------|
 | `begin_phase_gate` | フェーズゲート開始（stale チェック）。v1.11: ブランチ作成はREADYに延期 |
-| `cleanup_stale_sessions` | stale ブランチを削除 |
+| `cleanup_stale_branches` | ベースブランチにチェックアウトし、全 `llm_task_*` ブランチを削除 |
+
+### 介入システム（v1.4）
+
+| ツール | 用途 |
+|--------|------|
+| `record_verification_failure` | 検証失敗を記録 |
+| `get_intervention_status` | 介入の必要性を判定 |
+| `record_intervention_used` | 使用した介入プロンプトを記録 |
 
 ### 改善サイクル
 
@@ -567,7 +575,7 @@ MCP サーバーを再読み込みするために再起動。
 15. POST_IMPLEMENTATION_VERIFICATION ← `--no-verify` でスキップ
 16. INTERVENTION（v1.4） ← 検証3回連続失敗で発動
 17. GARBAGE DETECTION ← `--quick` でスキップ
-18. QUALITY REVIEW（v1.5） ← `--no-quality` または `--quick` でスキップ
+18. QUALITY REVIEW（v1.5） ← `--no-quality` / `--fast` / `--quick` でスキップ
 19. Finalize & Merge
 
 ### 直接ツールを呼び出す
@@ -669,6 +677,8 @@ your-project/
 │   ├── logs/               ← DecisionLog, OutcomeLog
 │   ├── verifiers/          ← 検証プロンプト
 │   ├── doc_research/       ← ドキュメント調査プロンプト（v1.3）
+│   ├── interventions/      ← 介入プロンプト（v1.4）
+│   ├── review_prompts/     ← 品質レビュープロンプト（v1.5）
 │   └── sync_state.json
 ├── .claude/commands/       ← スキル（任意コピー）
 └── src/                    ← あなたのソースコード
