@@ -48,6 +48,23 @@ class Calculator:
         self.result = a ** 0.5
         return self.result
 
+    def floor_divide(self, a, b):
+        """Return the floor division of a by b."""
+        if b == 0:
+            raise ValueError("Cannot divide by zero")
+        self.result = a // b
+        return self.result
+
+    def abs_value(self, a):
+        """Return the absolute value of a."""
+        self.result = abs(a)
+        return self.result
+
+    def negate(self, a):
+        """Return the negation of a."""
+        self.result = -a
+        return self.result
+
 
 def calculate_sum(numbers):
     """Calculate sum of a list of numbers."""
