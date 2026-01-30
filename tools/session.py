@@ -36,14 +36,23 @@ from typing import Literal
 
 
 class Phase(Enum):
-    """Execution phases in order (v1.10: individual phase checks)."""
-    EXPLORATION = auto()                 # Phase 1: code-intel required
-    SEMANTIC = auto()                    # Phase 2: semantic search allowed (if Q1=YES)
-    VERIFICATION = auto()                # Phase 3: verify hypotheses (if Q2=YES, v1.10 separated)
-    IMPACT_ANALYSIS = auto()             # Phase 4: analyze impact (if Q3=YES, v1.10 separated)
-    READY = auto()                       # Phase 5: implementation allowed
-    PRE_COMMIT = auto()                  # Phase 6: garbage detection before commit (v1.2)
-    QUALITY_REVIEW = auto()              # Phase 7: quality check before merge (v1.5)
+    """Execution phases in order (v1.11: unified submit_phase)."""
+    BRANCH_INTERVENTION = auto()         # Step 2: stale branch intervention (v1.11)
+    DOCUMENT_RESEARCH = auto()           # Step 3: design document research (v1.11)
+    QUERY_FRAME = auto()                 # Step 4: NL → structured slot extraction (v1.11)
+    EXPLORATION = auto()                 # Step 5: code-intel exploration
+    Q1 = auto()                          # Step 6: SEMANTIC necessity evaluation (v1.11)
+    SEMANTIC = auto()                    # Step 7: semantic search (if Q1=YES)
+    Q2 = auto()                          # Step 8: VERIFICATION necessity evaluation (v1.11)
+    VERIFICATION = auto()                # Step 9: verify hypotheses (if Q2=YES)
+    Q3 = auto()                          # Step 10: IMPACT_ANALYSIS necessity evaluation (v1.11)
+    IMPACT_ANALYSIS = auto()             # Step 11: impact analysis (if Q3=YES)
+    READY = auto()                       # Steps 12-14: task planning, implementation, completion
+    POST_IMPL_VERIFY = auto()            # Step 15: post-implementation verification (v1.11)
+    VERIFY_INTERVENTION = auto()         # Step 16: intervention for 3x failures (v1.11)
+    PRE_COMMIT = auto()                  # Step 17: garbage detection before commit
+    QUALITY_REVIEW = auto()              # Step 18: quality check before merge
+    MERGE = auto()                       # Step 19: merge to base (v1.11)
 
 
 class SemanticReason(Enum):
@@ -485,6 +494,185 @@ def validate_write_target(
 
 
 # =============================================================================
+# v1.11: Task Model for Task Orchestration (READY phase)
+# =============================================================================
+
+@dataclass
+class TaskModel:
+    """
+    v1.11: Represents a single implementation task within READY phase.
+
+    failure_count is per-task (not session-level).
+    revert_reason records why this task was added during revert.
+    """
+    id: str
+    description: str
+    status: str = "pending"  # pending, completed
+    failure_count: int = 0
+    revert_reason: str | None = None
+
+    def to_dict(self) -> dict:
+        d = {
+            "id": self.id,
+            "description": self.description,
+            "status": self.status,
+        }
+        if self.failure_count > 0:
+            d["failure_count"] = self.failure_count
+        if self.revert_reason:
+            d["revert_reason"] = self.revert_reason
+        return d
+
+
+# =============================================================================
+# v1.11: Expected Payload Definitions
+# =============================================================================
+
+# Phase → step number mapping
+PHASE_STEP_MAP: dict[str, int] = {
+    "BRANCH_INTERVENTION": 2,
+    "DOCUMENT_RESEARCH": 3,
+    "QUERY_FRAME": 4,
+    "EXPLORATION": 5,
+    "Q1": 6,
+    "SEMANTIC": 7,
+    "Q2": 8,
+    "VERIFICATION": 9,
+    "Q3": 10,
+    "IMPACT_ANALYSIS": 11,
+    "READY": 12,  # Planning step (may be 13/14 depending on sub-step)
+    "POST_IMPL_VERIFY": 15,
+    "VERIFY_INTERVENTION": 16,
+    "PRE_COMMIT": 17,
+    "QUALITY_REVIEW": 18,
+    "MERGE": 19,
+}
+
+# Phase → expected payload schema
+EXPECTED_PAYLOADS: dict[str, dict] = {
+    "BRANCH_INTERVENTION": {
+        "choice": "str: 'delete' | 'merge' | 'continue'",
+    },
+    "DOCUMENT_RESEARCH": {
+        "documents_reviewed": "list[str]",
+    },
+    "QUERY_FRAME": {
+        "action_type": "str",
+        "target_symbols": "list[str]",
+        "scope": "str",
+        "constraints": "str",
+    },
+    "EXPLORATION": {
+        "explored_files": "list[str]",
+        "findings": "list[str]",
+    },
+    "Q1": {
+        "needs_more_information": "bool",
+        "reason": "str",
+    },
+    "SEMANTIC": {
+        "search_results": "list[str]",
+    },
+    "Q2": {
+        "has_unverified_hypotheses": "bool",
+        "reason": "str",
+    },
+    "VERIFICATION": {
+        "hypotheses_verified": "list[{hypothesis, result, evidence}]",
+    },
+    "Q3": {
+        "needs_impact_analysis": "bool",
+        "reason": "str",
+    },
+    "IMPACT_ANALYSIS": {
+        "impact_summary": "dict",
+    },
+    "READY_PLAN": {
+        "tasks": "list[{id, description, status, failure_count?, revert_reason?}]",
+    },
+    "READY_IMPL": {
+        "task_id": "str",
+        "summary": "str",
+    },
+    "READY_COMPLETE": {},
+    "POST_IMPL_VERIFY": {
+        "passed": "bool",
+        "failed_tasks": "list[str] (if passed=false)",
+        "details": "str",
+    },
+    "VERIFY_INTERVENTION": {
+        "prompt_used": "str",
+        "action_taken": "str",
+    },
+    "PRE_COMMIT": {
+        "reviewed_files": "list[str]",
+        "commit_message": "str",
+    },
+    "QUALITY_REVIEW": {
+        "quality_score": "str",
+        "issues": "list[str]",
+    },
+    "MERGE": {},
+}
+
+# Phase → default instruction
+PHASE_INSTRUCTIONS: dict[str, str] = {
+    "BRANCH_INTERVENTION": "Stale ブランチが検出されました。ユーザーに選択肢を提示し、選択結果を submit_phase で送信してください。",
+    "DOCUMENT_RESEARCH": "設計文書を調査してください。完了後 submit_phase で送信してください。",
+    "QUERY_FRAME": "ユーザーの指示から構造化スロットを抽出し submit_phase で送信してください。",
+    "EXPLORATION": "code-intel ツールでコードベースを探索してください。完了後 submit_phase で送信してください。",
+    "Q1": "SEMANTIC フェーズが必要か評価してください。submit_phase で結果を送信してください。",
+    "SEMANTIC": "semantic_search で追加情報を収集してください。完了後 submit_phase で送信してください。",
+    "Q2": "VERIFICATION フェーズが必要か評価してください。submit_phase で結果を送信してください。",
+    "VERIFICATION": "仮説検証を実施してください。完了後 submit_phase で送信してください。",
+    "Q3": "IMPACT_ANALYSIS フェーズが必要か評価してください。submit_phase で結果を送信してください。",
+    "IMPACT_ANALYSIS": "影響分析を実施してください。完了後 submit_phase で送信してください。",
+    "READY_PLAN": "探索結果に基づきタスクを分割し、タスクリストを submit_phase で送信してください。",
+    "READY_IMPL": "次のタスクを実装し、完了を submit_phase で報告してください。",
+    "READY_COMPLETE": "全タスクが完了しました。submit_phase を空データで呼んでください。",
+    "POST_IMPL_VERIFY": "実装結果を検証してください。検証結果を submit_phase で送信してください。",
+    "VERIFY_INTERVENTION": "介入プロンプトを読み、指示に従ってください。実行結果を submit_phase で送信してください。",
+    "PRE_COMMIT": "変更をレビューし、コミットメッセージとともに submit_phase で送信してください。",
+    "QUALITY_REVIEW": "品質チェックを実施してください。結果を submit_phase で送信してください。",
+    "MERGE": "submit_phase を空データで呼んでマージを実行してください。",
+}
+
+
+def get_phase_response(phase_name: str, step: int | None = None, extra: dict | None = None) -> dict:
+    """
+    v1.11: Generate self-contained response for a phase.
+
+    Every response includes instruction + expected_payload so the LLM
+    always knows what to do next, even after context compaction.
+    """
+    if step is None:
+        step = PHASE_STEP_MAP.get(phase_name, 0)
+
+    # Determine the expected payload key
+    payload_key = phase_name
+    if phase_name == "READY":
+        # READY has sub-steps; caller should use READY_PLAN, READY_IMPL, or READY_COMPLETE
+        payload_key = extra.get("ready_substep", "READY_PLAN") if extra else "READY_PLAN"
+
+    instruction_key = payload_key
+
+    response = {
+        "phase": phase_name,
+        "step": step,
+        "instruction": PHASE_INSTRUCTIONS.get(instruction_key, "submit_phase で次のフェーズに進んでください。"),
+        "expected_payload": EXPECTED_PAYLOADS.get(payload_key, {}),
+        "call": "submit_phase",
+    }
+
+    if extra:
+        for k, v in extra.items():
+            if k != "ready_substep":
+                response[k] = v
+
+    return response
+
+
+# =============================================================================
 # Data Classes
 # =============================================================================
 
@@ -809,6 +997,18 @@ class SessionState:
 
     # v1.10: Phase Necessity Assessments
     phase_assessments: dict[str, dict] = field(default_factory=dict)  # Record of Q1/Q2/Q3 check results
+
+    # v1.11: Task Orchestration (READY sub-steps)
+    tasks: list[TaskModel] = field(default_factory=list)
+    ready_substep: str = "plan"  # plan, implement, complete
+
+    # v1.11: Session flags (parsed from command options by LLM)
+    no_verify: bool = False       # --no-verify
+    no_quality: bool = False      # --no-quality (alias for quality_review_enabled=False)
+    fast_mode: bool = False       # --fast
+    quick_mode: bool = False      # --quick
+    no_doc: bool = False          # --no-doc
+    no_intervention: bool = False # --no-intervention / -ni
 
     # v1.7: Ctags Performance Optimization
     definitions_cache: dict[tuple[str, str, str | None, bool], dict] = field(default_factory=dict)
@@ -1703,22 +1903,37 @@ class SessionState:
         }
 
     def get_status(self) -> dict:
-        """Get current session status."""
+        """
+        Get current session status (v1.11: includes expected_payload for compaction resilience).
+
+        The response is self-contained: LLM can recover from compaction by reading this.
+        """
+        phase_name = self.phase.name
+        step = PHASE_STEP_MAP.get(phase_name, 0)
+
+        # Determine the correct instruction/expected_payload key
+        ready_substep = None
+        if phase_name == "READY":
+            ready_substep = self._get_ready_substep_key()
+            step = {"plan": 12, "implement": 13, "complete": 14}.get(self.ready_substep, 12)
+
+        # Build completed steps list
+        completed_steps = self._get_completed_steps()
+
         status = {
             "session_id": self.session_id,
             "intent": self.intent,
-            "query": self.query,
-            "current_phase": self.phase.name,
-            "allowed_tools": self.get_allowed_tools(),
-            "exploration": self.exploration.to_dict() if self.exploration else None,
-            "semantic": self.semantic.to_dict() if self.semantic else None,
-            "verification": self.verification.to_dict() if self.verification else None,
-            "tool_calls_count": len(self.tool_calls),
-            # v1.8: Performance tracking data
-            "tool_calls": self.tool_calls,  # Includes started_at, completed_at, duration_seconds
-            "phase_history": self.phase_history,  # Includes started_at, ended_at, duration_seconds
-            # v1.8: Exploration-only mode flag
-            "skip_implementation": self.skip_implementation,
+            "phase": phase_name,
+            "step": step,
+            "completed_steps": completed_steps,
+            "instruction": PHASE_INSTRUCTIONS.get(
+                ready_substep or phase_name,
+                "submit_phase で次のフェーズに進んでください。"
+            ),
+            "expected_payload": EXPECTED_PAYLOADS.get(
+                ready_substep or phase_name, {}
+            ),
+            "task_progress": self._get_task_progress() if self.tasks else None,
         }
 
         # v1.2: Add task branch info if enabled
@@ -1728,11 +1943,229 @@ class SessionState:
                 "branch": self.task_branch_name,
             }
 
-        # v1.2: Add PRE_COMMIT info if available
-        if self.pre_commit_review:
-            status["pre_commit_review"] = self.pre_commit_review.to_dict()
-
         return status
+
+    def _get_ready_substep_key(self) -> str:
+        """Get the expected payload key for READY sub-step."""
+        if self.ready_substep == "plan" or not self.tasks:
+            return "READY_PLAN"
+        elif self.ready_substep == "implement":
+            return "READY_IMPL"
+        else:
+            return "READY_COMPLETE"
+
+    def _get_completed_steps(self) -> list[int]:
+        """Get list of completed step numbers from phase history."""
+        completed = []
+        seen_phases = set()
+        for entry in self.phase_history:
+            phase_name = entry.get("phase") or entry.get("from")
+            if phase_name and phase_name not in seen_phases:
+                seen_phases.add(phase_name)
+                step = PHASE_STEP_MAP.get(phase_name)
+                if step:
+                    completed.append(step)
+        return sorted(completed)
+
+    def _get_task_progress(self) -> dict | None:
+        """Get task progress summary."""
+        if not self.tasks:
+            return None
+        total = len(self.tasks)
+        completed = sum(1 for t in self.tasks if t.status == "completed")
+        pending = sum(1 for t in self.tasks if t.status == "pending")
+        next_task = None
+        for t in self.tasks:
+            if t.status == "pending":
+                next_task = t.to_dict()
+                break
+        return {
+            "total": total,
+            "completed": completed,
+            "pending": pending,
+            "next_task": next_task,
+            "tasks": [t.to_dict() for t in self.tasks],
+        }
+
+    # =========================================================================
+    # v1.11: Task Orchestration Methods (READY phase sub-steps)
+    # =========================================================================
+
+    def register_tasks(self, tasks_data: list[dict]) -> dict:
+        """
+        v1.11 Step 12: Register task list (idempotent).
+
+        Accepts full task list. Replaces any existing tasks.
+        Works for both initial registration and revert re-planning.
+        """
+        if self.phase != Phase.READY:
+            return {
+                "error": "phase_mismatch",
+                "current_phase": self.phase.name,
+                "message": "Task registration is only allowed in READY phase.",
+            }
+
+        if not tasks_data:
+            return {
+                "error": "empty_tasks",
+                "message": "At least one task is required.",
+            }
+
+        # Check for duplicate IDs
+        ids = [t.get("id") for t in tasks_data]
+        if len(ids) != len(set(ids)):
+            return {
+                "error": "duplicate_task_ids",
+                "message": "Task IDs must be unique.",
+            }
+
+        # Check that at least one task is pending
+        has_pending = any(t.get("status", "pending") == "pending" for t in tasks_data)
+        if not has_pending:
+            return {
+                "error": "no_pending_tasks",
+                "message": "At least one task must have status 'pending'.",
+            }
+
+        # Build task list
+        self.tasks = []
+        for t in tasks_data:
+            self.tasks.append(TaskModel(
+                id=t["id"],
+                description=t.get("description", ""),
+                status=t.get("status", "pending"),
+                failure_count=t.get("failure_count", 0),
+                revert_reason=t.get("revert_reason"),
+            ))
+
+        self.ready_substep = "implement"
+
+        # Find next pending task
+        next_task = None
+        for t in self.tasks:
+            if t.status == "pending":
+                next_task = t
+                break
+
+        return {
+            "success": True,
+            "tasks_registered": len(self.tasks),
+            "pending": sum(1 for t in self.tasks if t.status == "pending"),
+            "completed": sum(1 for t in self.tasks if t.status == "completed"),
+            "next_task": next_task.to_dict() if next_task else None,
+        }
+
+    def complete_task(self, task_id: str, summary: str) -> dict:
+        """
+        v1.11 Step 13: Report task completion.
+
+        Validates order (must complete in registered order for pending tasks).
+        """
+        if self.phase != Phase.READY:
+            return {
+                "error": "phase_mismatch",
+                "current_phase": self.phase.name,
+                "message": "Task completion only in READY phase.",
+            }
+
+        if not self.tasks:
+            return {
+                "error": "no_tasks",
+                "message": "No tasks registered. Call submit_phase with tasks first.",
+            }
+
+        # Find the task
+        target = None
+        for t in self.tasks:
+            if t.id == task_id:
+                target = t
+                break
+
+        if target is None:
+            return {
+                "error": "unknown_task",
+                "message": f"Task '{task_id}' not found.",
+                "registered_tasks": [t.id for t in self.tasks],
+            }
+
+        if target.status == "completed":
+            return {
+                "error": "already_completed",
+                "message": f"Task '{task_id}' is already completed.",
+            }
+
+        # Enforce order: must be the first pending task
+        first_pending = None
+        for t in self.tasks:
+            if t.status == "pending":
+                first_pending = t
+                break
+
+        if first_pending and first_pending.id != task_id:
+            return {
+                "error": "wrong_order",
+                "message": f"Must complete '{first_pending.id}' before '{task_id}'.",
+                "expected_task": first_pending.to_dict(),
+            }
+
+        # Mark as completed
+        target.status = "completed"
+
+        # Check if all complete
+        all_done = all(t.status == "completed" for t in self.tasks)
+
+        if all_done:
+            self.ready_substep = "complete"
+            return {
+                "all_complete": True,
+                **get_phase_response("READY", step=14, extra={"ready_substep": "READY_COMPLETE"}),
+            }
+
+        # Find next task
+        next_task = None
+        for t in self.tasks:
+            if t.status == "pending":
+                next_task = t
+                break
+
+        progress = self._get_task_progress()
+
+        return {
+            "success": True,
+            "progress": progress,
+            "next_task": next_task.to_dict() if next_task else None,
+            **get_phase_response("READY", step=13, extra={"ready_substep": "READY_IMPL"}),
+        }
+
+    def check_all_tasks_complete(self) -> dict:
+        """
+        v1.11 Step 14: Check if all tasks are complete before proceeding.
+
+        Returns error if tasks are pending or not registered.
+        """
+        if self.phase != Phase.READY:
+            return {
+                "error": "phase_mismatch",
+                "current_phase": self.phase.name,
+            }
+
+        # For IMPLEMENT/MODIFY: tasks must be registered and completed
+        if self.intent in ("IMPLEMENT", "MODIFY"):
+            if not self.tasks:
+                return {
+                    "error": "no_tasks_registered",
+                    "message": "No tasks registered. Submit task plan first.",
+                }
+
+            pending = [t for t in self.tasks if t.status == "pending"]
+            if pending:
+                return {
+                    "error": "incomplete_tasks",
+                    "message": f"{len(pending)} task(s) still pending.",
+                    "pending_tasks": [t.to_dict() for t in pending],
+                }
+
+        return {"success": True, "all_complete": True}
 
     # =========================================================================
     # v1.4: Intervention System Methods

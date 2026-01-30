@@ -23,6 +23,7 @@ v1.1 Additions:
 
 import asyncio
 import json
+from datetime import datetime
 from pathlib import Path
 
 from mcp.server import Server
@@ -40,6 +41,8 @@ from tools.session import (
     Hypothesis,
     IntentReclassificationRequired,
     InvalidSemanticReason, WriteTargetBlocked,
+    TaskModel, get_phase_response,
+    PHASE_STEP_MAP, EXPECTED_PAYLOADS, PHASE_INSTRUCTIONS,
 )
 from tools.outcome_log import (
     OutcomeLog, OutcomeAnalysis, record_outcome,
@@ -672,10 +675,9 @@ async def list_tools() -> list[Tool]:
         # Session management tools for phase-gated execution
         Tool(
             name="start_session",
-            description="Start a new code implementation session with phase-gated execution. "
-                        "v1.6: Preparation phase only. Branch creation moved to begin_phase_gate. "
-                        "After calling this, call begin_phase_gate to start phase gates. "
-                        "v1.10: gate_level='full' forces all phases, 'auto' checks necessity before each.",
+            description="Start a new code implementation session. "
+                        "v1.11: After calling this, follow server instruction + expected_payload. "
+                        "All phases advance via submit_phase. Use get_session_status to recover.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -690,24 +692,27 @@ async def list_tools() -> list[Tool]:
                     },
                     "repo_path": {
                         "type": "string",
-                        "description": "Project root path for agreements and learned_pairs (default: '.')",
+                        "description": "Project root path (default: '.')",
                         "default": ".",
                     },
                     "gate_level": {
                         "type": "string",
                         "enum": ["full", "auto"],
-                        "description": "v1.10: Gate level for phase checks. 'full' forces all phases, 'auto' checks necessity before each phase.",
+                        "description": "Gate level for phase checks. 'full' forces all phases, 'auto' checks necessity.",
                         "default": "auto",
                     },
-                    "skip_quality": {
-                        "type": "boolean",
-                        "description": "v1.5: Skip QUALITY_REVIEW phase (--no-quality flag)",
-                        "default": False,
-                    },
-                    "skip_implementation": {
-                        "type": "boolean",
-                        "description": "v1.8: Skip implementation phase (--only-explore flag). Exploration will run but implementation will be skipped.",
-                        "default": False,
+                    "flags": {
+                        "type": "object",
+                        "description": "v1.11: Session flags parsed from command options.",
+                        "properties": {
+                            "no_verify": {"type": "boolean", "default": False, "description": "--no-verify"},
+                            "no_quality": {"type": "boolean", "default": False, "description": "--no-quality"},
+                            "fast": {"type": "boolean", "default": False, "description": "--fast"},
+                            "quick": {"type": "boolean", "default": False, "description": "--quick"},
+                            "no_doc": {"type": "boolean", "default": False, "description": "--no-doc"},
+                            "no_intervention": {"type": "boolean", "default": False, "description": "--no-intervention / -ni"},
+                            "only_explore": {"type": "boolean", "default": False, "description": "--only-explore"},
+                        },
                     },
                 },
                 "required": ["intent", "query"],
@@ -795,17 +800,35 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="get_session_status",
-            description="Get the current session status including phase and allowed tools.",
+            description="Get the current session status including phase, instruction, and expected_payload. "
+                        "Use this to recover after context compaction.",
             inputSchema={
                 "type": "object",
                 "properties": {},
+            },
+        ),
+        # v1.11: Unified submit_phase tool (replaces all submit_* tools)
+        Tool(
+            name="submit_phase",
+            description="v1.11: Unified phase submission. The ONLY tool for advancing through phases. "
+                        "Server determines current phase from session state and validates payload accordingly. "
+                        "Response always includes instruction + expected_payload for next step.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "data": {
+                        "type": "object",
+                        "description": "Phase-specific payload. Format varies by current phase - see expected_payload in previous response.",
+                    },
+                },
+                "required": ["data"],
             },
         ),
         # v1.10 note: submit_understanding removed (replaced by check_phase_necessity)
         # submit_exploration validates exploration quality; check_phase_necessity handles phase transitions
         Tool(
             name="submit_exploration",
-            description="Submit exploration results for quality validation. "
+            description="[DEPRECATED: use submit_phase] Submit exploration results for quality validation. "
                         "Server evaluates confidence (symbols, entry_points, consistency, NL-symbol mapping). "
                         "If sufficient: proceed to Q1 check (check_phase_necessity). "
                         "If insufficient: auto-transitions to SEMANTIC for more context gathering.",
@@ -1571,6 +1594,776 @@ def _get_next_instruction(phase: str, phase_required: bool, next_phase: str) -> 
     return "Proceed to next step."
 
 
+# =============================================================================
+# v1.11: submit_phase dispatch
+# =============================================================================
+
+async def _handle_submit_phase(session: SessionState, data: dict) -> dict:
+    """
+    v1.11: Unified phase submission handler.
+
+    Dispatches based on session.phase. Returns self-contained response
+    with instruction + expected_payload for next step.
+    """
+    phase = session.phase
+
+    # --- Step 2: BRANCH_INTERVENTION ---
+    if phase == Phase.BRANCH_INTERVENTION:
+        return await _submit_branch_intervention(session, data)
+
+    # --- Step 3: DOCUMENT_RESEARCH ---
+    elif phase == Phase.DOCUMENT_RESEARCH:
+        return _submit_document_research(session, data)
+
+    # --- Step 4: QUERY_FRAME ---
+    elif phase == Phase.QUERY_FRAME:
+        return _submit_query_frame(session, data)
+
+    # --- Step 5: EXPLORATION ---
+    elif phase == Phase.EXPLORATION:
+        return _submit_exploration_v11(session, data)
+
+    # --- Step 6: Q1 ---
+    elif phase == Phase.Q1:
+        return await _submit_q1(session, data)
+
+    # --- Step 7: SEMANTIC ---
+    elif phase == Phase.SEMANTIC:
+        return _submit_semantic_v11(session, data)
+
+    # --- Step 8: Q2 ---
+    elif phase == Phase.Q2:
+        return await _submit_q2(session, data)
+
+    # --- Step 9: VERIFICATION ---
+    elif phase == Phase.VERIFICATION:
+        return _submit_verification_v11(session, data)
+
+    # --- Step 10: Q3 ---
+    elif phase == Phase.Q3:
+        return await _submit_q3(session, data)
+
+    # --- Step 11: IMPACT_ANALYSIS ---
+    elif phase == Phase.IMPACT_ANALYSIS:
+        return _submit_impact_analysis_v11(session, data)
+
+    # --- Steps 12-14: READY (plan/implement/complete) ---
+    elif phase == Phase.READY:
+        return _submit_ready(session, data)
+
+    # --- Step 15: POST_IMPL_VERIFY ---
+    elif phase == Phase.POST_IMPL_VERIFY:
+        return _submit_post_impl_verify(session, data)
+
+    # --- Step 16: VERIFY_INTERVENTION ---
+    elif phase == Phase.VERIFY_INTERVENTION:
+        return _submit_verify_intervention(session, data)
+
+    # --- Step 17: PRE_COMMIT ---
+    elif phase == Phase.PRE_COMMIT:
+        return await _submit_pre_commit(session, data)
+
+    # --- Step 18: QUALITY_REVIEW ---
+    elif phase == Phase.QUALITY_REVIEW:
+        return await _submit_quality_review_v11(session, data)
+
+    # --- Step 19: MERGE ---
+    elif phase == Phase.MERGE:
+        return await _submit_merge(session, data)
+
+    else:
+        return {
+            "error": "unknown_phase",
+            "current_phase": phase.name,
+            "message": f"No handler for phase {phase.name}.",
+        }
+
+
+async def _submit_branch_intervention(session: SessionState, data: dict) -> dict:
+    """Step 2: Handle stale branch intervention choice."""
+    choice = data.get("choice")
+    if choice not in ("delete", "merge", "continue"):
+        return {
+            "error": "payload_mismatch",
+            "current_phase": "BRANCH_INTERVENTION",
+            "step": 2,
+            "message": "choice must be 'delete', 'merge', or 'continue'.",
+            **get_phase_response("BRANCH_INTERVENTION"),
+        }
+
+    repo_path = session.repo_path or "."
+
+    if choice == "delete":
+        cleanup_result = await BranchManager.cleanup_stale_sessions(repo_path, action="delete")
+    elif choice == "merge":
+        cleanup_result = await BranchManager.cleanup_stale_sessions(repo_path, action="merge")
+    else:
+        cleanup_result = {"action": "continue"}
+
+    # Determine next phase
+    next_phase = Phase.DOCUMENT_RESEARCH
+    if session.no_doc:
+        next_phase = Phase.QUERY_FRAME
+
+    session.transition_to_phase(next_phase, reason=f"branch_intervention_{choice}")
+
+    return {
+        "success": True,
+        "choice": choice,
+        "cleanup_result": cleanup_result if choice != "continue" else None,
+        **get_phase_response(next_phase.name),
+    }
+
+
+def _submit_document_research(session: SessionState, data: dict) -> dict:
+    """Step 3: Handle document research results."""
+    documents_reviewed = data.get("documents_reviewed", [])
+
+    session.phase_history.append({
+        "phase": "DOCUMENT_RESEARCH",
+        "documents_reviewed": documents_reviewed,
+        "timestamp": datetime.now().isoformat(),
+    })
+
+    session.transition_to_phase(Phase.QUERY_FRAME, reason="document_research_complete")
+
+    return {
+        "success": True,
+        "documents_reviewed": len(documents_reviewed),
+        **get_phase_response("QUERY_FRAME"),
+    }
+
+
+def _submit_query_frame(session: SessionState, data: dict) -> dict:
+    """Step 4: Handle query frame extraction."""
+    from tools.query_frame import QueryFrame, QueryDecomposer, validate_slot, SlotSource, generate_investigation_guidance
+
+    raw_query = session.query
+    frame = QueryFrame(raw_query=raw_query)
+
+    # Extract slots from data
+    slot_names = ["target_feature", "trigger_condition", "observed_issue", "desired_action"]
+    for slot_name in slot_names:
+        slot_data = data.get(slot_name)
+        if slot_data is not None:
+            if isinstance(slot_data, dict):
+                value, validated_quote = validate_slot(slot_name, slot_data, raw_query)
+                if value is not None:
+                    setattr(frame, slot_name, value)
+                    frame.slot_quotes[slot_name] = validated_quote or ""
+                    frame.slot_source[slot_name] = SlotSource.FACT
+            elif isinstance(slot_data, str):
+                setattr(frame, slot_name, slot_data)
+
+    session.query_frame = frame
+
+    # Also accept action_type, target_symbols, scope, constraints (v1.11 new format)
+    if "action_type" in data:
+        frame.desired_action = data.get("action_type")
+
+    # Determine next phase
+    if session.fast_mode or session.quick_mode:
+        # Skip exploration
+        next_phase = Phase.READY
+        session.transition_to_phase(next_phase, reason="query_frame_complete_skip_exploration")
+        response = get_phase_response("READY", extra={"ready_substep": "READY_PLAN"})
+    else:
+        next_phase = Phase.EXPLORATION
+        session.transition_to_phase(next_phase, reason="query_frame_complete")
+        response = get_phase_response("EXPLORATION")
+
+    return {
+        "success": True,
+        "query_frame": {
+            "target_feature": frame.target_feature,
+            "trigger_condition": frame.trigger_condition,
+            "observed_issue": frame.observed_issue,
+            "desired_action": frame.desired_action,
+        },
+        **response,
+    }
+
+
+def _submit_exploration_v11(session: SessionState, data: dict) -> dict:
+    """Step 5: Handle exploration results via submit_phase."""
+    explored_files = data.get("explored_files", [])
+    findings = data.get("findings", [])
+
+    # Also support legacy field names for compatibility
+    symbols_identified = data.get("symbols_identified", [])
+    entry_points = data.get("entry_points", [])
+    existing_patterns = data.get("existing_patterns", [])
+    files_analyzed = data.get("files_analyzed", explored_files)
+
+    # Auto-populate tools_used from session history
+    tools_used = list({tc["tool"] for tc in session.tool_calls if "tool" in tc})
+
+    exploration = ExplorationResult(
+        symbols_identified=symbols_identified,
+        entry_points=entry_points,
+        existing_patterns=existing_patterns,
+        files_analyzed=files_analyzed,
+        tools_used=tools_used,
+        notes="; ".join(findings) if findings else "",
+    )
+
+    session.exploration = exploration
+
+    session.phase_history.append({
+        "phase": "EXPLORATION",
+        "explored_files": explored_files,
+        "findings": findings,
+        "timestamp": datetime.now().isoformat(),
+    })
+
+    # Transition to Q1
+    session.transition_to_phase(Phase.Q1, reason="exploration_complete")
+
+    return {
+        "success": True,
+        "explored_files_count": len(files_analyzed),
+        **get_phase_response("Q1"),
+    }
+
+
+async def _submit_q1(session: SessionState, data: dict) -> dict:
+    """Step 6: Q1 - SEMANTIC necessity evaluation."""
+    needs_more = data.get("needs_more_information", False)
+    reason = data.get("reason", "")
+
+    session.phase_assessments["Q1"] = {
+        "needs_more_information": needs_more,
+        "reason": reason,
+    }
+
+    # gate_level="full" forces execution
+    if session.gate_level == "full":
+        needs_more = True
+
+    if needs_more:
+        session.transition_to_phase(Phase.SEMANTIC, reason="q1_needs_semantic")
+        return {
+            "success": True,
+            "decision": "SEMANTIC required",
+            **get_phase_response("SEMANTIC"),
+        }
+    else:
+        # Skip SEMANTIC → Q2
+        session.transition_to_phase(Phase.Q2, reason="q1_skip_semantic")
+        return {
+            "success": True,
+            "decision": "SEMANTIC skipped",
+            **get_phase_response("Q2"),
+        }
+
+
+def _submit_semantic_v11(session: SessionState, data: dict) -> dict:
+    """Step 7: Handle semantic search results."""
+    search_results = data.get("search_results", [])
+
+    session.phase_history.append({
+        "phase": "SEMANTIC",
+        "search_results_count": len(search_results),
+        "timestamp": datetime.now().isoformat(),
+    })
+
+    # Transition to Q2
+    session.transition_to_phase(Phase.Q2, reason="semantic_complete")
+
+    return {
+        "success": True,
+        "search_results_count": len(search_results),
+        **get_phase_response("Q2"),
+    }
+
+
+async def _submit_q2(session: SessionState, data: dict) -> dict:
+    """Step 8: Q2 - VERIFICATION necessity evaluation."""
+    has_unverified = data.get("has_unverified_hypotheses", False)
+    reason = data.get("reason", "")
+
+    session.phase_assessments["Q2"] = {
+        "has_unverified_hypotheses": has_unverified,
+        "reason": reason,
+    }
+
+    if session.gate_level == "full":
+        has_unverified = True
+
+    if has_unverified:
+        session.transition_to_phase(Phase.VERIFICATION, reason="q2_needs_verification")
+        return {
+            "success": True,
+            "decision": "VERIFICATION required",
+            **get_phase_response("VERIFICATION"),
+        }
+    else:
+        session.transition_to_phase(Phase.Q3, reason="q2_skip_verification")
+        return {
+            "success": True,
+            "decision": "VERIFICATION skipped",
+            **get_phase_response("Q3"),
+        }
+
+
+def _submit_verification_v11(session: SessionState, data: dict) -> dict:
+    """Step 9: Handle verification results."""
+    hypotheses_verified = data.get("hypotheses_verified", [])
+
+    session.phase_history.append({
+        "phase": "VERIFICATION",
+        "verified_count": len(hypotheses_verified),
+        "timestamp": datetime.now().isoformat(),
+    })
+
+    # Transition to Q3
+    session.transition_to_phase(Phase.Q3, reason="verification_complete")
+
+    return {
+        "success": True,
+        "verified_count": len(hypotheses_verified),
+        **get_phase_response("Q3"),
+    }
+
+
+async def _submit_q3(session: SessionState, data: dict) -> dict:
+    """Step 10: Q3 - IMPACT_ANALYSIS necessity evaluation."""
+    needs_impact = data.get("needs_impact_analysis", False)
+    reason = data.get("reason", "")
+
+    session.phase_assessments["Q3"] = {
+        "needs_impact_analysis": needs_impact,
+        "reason": reason,
+    }
+
+    if session.gate_level == "full":
+        needs_impact = True
+
+    if needs_impact:
+        session.transition_to_phase(Phase.IMPACT_ANALYSIS, reason="q3_needs_impact")
+        return {
+            "success": True,
+            "decision": "IMPACT_ANALYSIS required",
+            **get_phase_response("IMPACT_ANALYSIS"),
+        }
+    else:
+        # Skip IMPACT_ANALYSIS
+        # For INVESTIGATE/QUESTION → SESSION_COMPLETE
+        if session.intent in ("INVESTIGATE", "QUESTION") or session.skip_implementation:
+            return {
+                "success": True,
+                "decision": "SESSION_COMPLETE (investigation only)",
+                "session_complete": True,
+                "message": "探索完了。セッションを終了します。",
+            }
+
+        # For IMPLEMENT/MODIFY → READY
+        session.transition_to_phase(Phase.READY, reason="q3_skip_impact_to_ready")
+
+        # Create branch for READY
+        branch_result = await _create_branch_for_ready(session)
+
+        response = get_phase_response("READY", extra={"ready_substep": "READY_PLAN"})
+        if branch_result.get("branch"):
+            response["branch"] = branch_result["branch"]
+
+        return {
+            "success": True,
+            "decision": "IMPACT_ANALYSIS skipped → READY",
+            **response,
+        }
+
+
+def _submit_impact_analysis_v11(session: SessionState, data: dict) -> dict:
+    """Step 11: Handle impact analysis results."""
+    impact_summary = data.get("impact_summary", {})
+
+    session.phase_history.append({
+        "phase": "IMPACT_ANALYSIS",
+        "impact_summary": impact_summary,
+        "timestamp": datetime.now().isoformat(),
+    })
+
+    # For INVESTIGATE/QUESTION → SESSION_COMPLETE
+    if session.intent in ("INVESTIGATE", "QUESTION") or session.skip_implementation:
+        return {
+            "success": True,
+            "session_complete": True,
+            "message": "探索完了。セッションを終了します。",
+        }
+
+    # For IMPLEMENT/MODIFY → READY
+    session.transition_to_phase(Phase.READY, reason="impact_analysis_complete")
+
+    return {
+        "success": True,
+        **get_phase_response("READY", extra={"ready_substep": "READY_PLAN"}),
+    }
+
+
+def _submit_ready(session: SessionState, data: dict) -> dict:
+    """Steps 12-14: READY phase dispatches to sub-steps."""
+
+    # --- Step 12: Task Plan (has "tasks" key) ---
+    if "tasks" in data:
+        result = session.register_tasks(data["tasks"])
+        if "error" in result:
+            return {
+                **result,
+                **get_phase_response("READY", step=12, extra={"ready_substep": "READY_PLAN"}),
+            }
+
+        # Read task_planning.md if exists
+        task_planning_path = Path(session.repo_path or ".") / ".code-intel" / "task_planning.md"
+        planning_guide = None
+        if task_planning_path.exists():
+            try:
+                planning_guide = task_planning_path.read_text(encoding="utf-8")[:2000]
+            except Exception:
+                pass
+
+        response = {
+            **result,
+            **get_phase_response("READY", step=13, extra={"ready_substep": "READY_IMPL"}),
+        }
+        if planning_guide:
+            response["planning_guide"] = planning_guide
+        return response
+
+    # --- Step 13: Task Completion (has "task_id" key) ---
+    if "task_id" in data:
+        task_id = data["task_id"]
+        summary = data.get("summary", "")
+        return session.complete_task(task_id, summary)
+
+    # --- Step 14: Implementation Complete (empty data or explicit) ---
+    check = session.check_all_tasks_complete()
+    if "error" in check:
+        return {
+            **check,
+            **get_phase_response("READY", step=14, extra={"ready_substep": "READY_COMPLETE"}),
+        }
+
+    # All tasks complete → determine next phase
+    if session.no_verify and session.quick_mode:
+        return {
+            "success": True,
+            "session_complete": True,
+            "message": "全タスク完了。セッション終了（--no-verify + --quick）。",
+        }
+    elif session.no_verify:
+        session.transition_to_phase(Phase.PRE_COMMIT, reason="ready_complete_no_verify")
+        return {
+            "success": True,
+            **get_phase_response("PRE_COMMIT"),
+        }
+    else:
+        session.transition_to_phase(Phase.POST_IMPL_VERIFY, reason="ready_complete")
+        return {
+            "success": True,
+            **get_phase_response("POST_IMPL_VERIFY"),
+        }
+
+
+def _submit_post_impl_verify(session: SessionState, data: dict) -> dict:
+    """Step 15: POST_IMPL_VERIFY."""
+    passed = data.get("passed", False)
+    details = data.get("details", "")
+    failed_tasks = data.get("failed_tasks", [])
+
+    if passed:
+        if session.quick_mode:
+            return {
+                "success": True,
+                "session_complete": True,
+                "message": "検証通過。セッション終了（--quick）。",
+            }
+        session.transition_to_phase(Phase.PRE_COMMIT, reason="post_impl_verify_passed")
+        return {
+            "success": True,
+            "verified": True,
+            **get_phase_response("PRE_COMMIT"),
+        }
+    else:
+        # Increment failure_count for failed tasks
+        for task_id in failed_tasks:
+            for t in session.tasks:
+                if t.id == task_id:
+                    t.failure_count += 1
+                    break
+
+        # Check if any task has failure_count >= 3
+        high_failure = any(t.failure_count >= 3 for t in session.tasks)
+
+        if high_failure:
+            # Check if intervention is allowed
+            if session.no_intervention or session.quick_mode:
+                # Skip intervention → revert to READY
+                session.transition_to_phase(Phase.READY, reason="post_impl_verify_failed_skip_intervention")
+                session.ready_substep = "plan"
+                return {
+                    "success": True,
+                    "revert_to": "READY",
+                    "reason": "Verification failed (intervention skipped).",
+                    "existing_tasks": [t.to_dict() for t in session.tasks],
+                    **get_phase_response("READY", step=12, extra={"ready_substep": "READY_PLAN"}),
+                }
+            else:
+                # → VERIFY_INTERVENTION
+                session.transition_to_phase(Phase.VERIFY_INTERVENTION, reason="post_impl_verify_3_failures")
+                return {
+                    "success": True,
+                    **get_phase_response("VERIFY_INTERVENTION"),
+                    "failure_details": details,
+                    "failed_tasks": failed_tasks,
+                    "high_failure_tasks": [t.to_dict() for t in session.tasks if t.failure_count >= 3],
+                }
+        else:
+            # Revert to READY for retry
+            session.transition_to_phase(Phase.READY, reason="post_impl_verify_failed")
+            session.ready_substep = "plan"
+            return {
+                "success": True,
+                "revert_to": "READY",
+                "reason": f"Verification failed: {details}",
+                "existing_tasks": [t.to_dict() for t in session.tasks],
+                **get_phase_response("READY", step=12, extra={"ready_substep": "READY_PLAN"}),
+            }
+
+
+def _submit_verify_intervention(session: SessionState, data: dict) -> dict:
+    """Step 16: VERIFY_INTERVENTION."""
+    prompt_used = data.get("prompt_used", "")
+    action_taken = data.get("action_taken", "")
+
+    session.intervention_count += 1
+
+    # Reset failure counts for all tasks
+    for t in session.tasks:
+        t.failure_count = 0
+
+    session.phase_history.append({
+        "phase": "VERIFY_INTERVENTION",
+        "prompt_used": prompt_used,
+        "action_taken": action_taken,
+        "intervention_count": session.intervention_count,
+        "timestamp": datetime.now().isoformat(),
+    })
+
+    # Check if user escalation is needed
+    if session.intervention_count >= 2:
+        return {
+            "success": True,
+            "user_escalation": True,
+            "intervention_count": session.intervention_count,
+            "instruction": "ユーザーに相談してください。AskUserQuestion で判断を委ねてください。",
+            "expected_payload": {},
+            "call": "submit_phase",
+            "message": f"介入を {session.intervention_count} 回実行しました。ユーザーに相談してください。",
+        }
+
+    # Revert to READY
+    session.transition_to_phase(Phase.READY, reason="verify_intervention_complete")
+    session.ready_substep = "plan"
+
+    return {
+        "success": True,
+        "intervention_count": session.intervention_count,
+        "failure_counts_reset": True,
+        "existing_tasks": [t.to_dict() for t in session.tasks],
+        **get_phase_response("READY", step=12, extra={"ready_substep": "READY_PLAN"}),
+    }
+
+
+async def _submit_pre_commit(session: SessionState, data: dict) -> dict:
+    """Step 17: PRE_COMMIT."""
+    reviewed_files = data.get("reviewed_files", [])
+    commit_message = data.get("commit_message", "")
+
+    if not commit_message:
+        return {
+            "error": "missing_commit_message",
+            "message": "commit_message is required.",
+            **get_phase_response("PRE_COMMIT"),
+        }
+
+    # Get branch manager
+    repo_path = session.repo_path or "."
+    branch_manager = _get_or_recreate_branch_manager(session, repo_path)
+    if branch_manager is None:
+        return {
+            "error": "branch_manager_not_found",
+            "message": "Branch manager not found.",
+        }
+
+    # Submit review to session
+    review_result = session.submit_pre_commit_review(
+        reviewed_files=[{"path": f, "decision": "keep"} for f in reviewed_files] if isinstance(reviewed_files, list) and reviewed_files and isinstance(reviewed_files[0], str) else reviewed_files,
+        review_notes=commit_message,
+    )
+
+    if not review_result.get("success"):
+        return review_result
+
+    # Determine whether to execute commit now
+    execute_commit_now = not session.quality_review_enabled
+
+    finalize_result = await branch_manager.finalize(
+        keep_files=review_result.get("kept_files"),
+        discard_files=review_result.get("discarded_files"),
+        commit_message=commit_message,
+        execute_commit=execute_commit_now,
+    )
+
+    if not finalize_result.success:
+        return {
+            "error": "finalize_failed",
+            "message": finalize_result.error,
+        }
+
+    # Store preparation state
+    if finalize_result.prepared:
+        session.commit_prepared = True
+        session.prepared_commit_message = commit_message
+        session.prepared_kept_files = finalize_result.kept_files
+        session.prepared_discarded_files = finalize_result.discarded_files
+
+    # Determine next phase
+    if session.quality_review_enabled:
+        # Check if quality_review.md exists
+        quality_review_path = Path(repo_path) / ".code-intel" / "review_prompts" / "quality_review.md"
+        if quality_review_path.exists():
+            session.transition_to_phase(Phase.QUALITY_REVIEW, reason="pre_commit_to_quality")
+            return {
+                "success": True,
+                "commit_hash": None if finalize_result.prepared else finalize_result.commit_hash,
+                "prepared": finalize_result.prepared,
+                **get_phase_response("QUALITY_REVIEW"),
+            }
+        # else: skip quality review
+
+    # No quality review → MERGE
+    session.transition_to_phase(Phase.MERGE, reason="pre_commit_to_merge")
+    return {
+        "success": True,
+        "commit_hash": finalize_result.commit_hash,
+        **get_phase_response("MERGE"),
+    }
+
+
+async def _submit_quality_review_v11(session: SessionState, data: dict) -> dict:
+    """Step 18: QUALITY_REVIEW."""
+    quality_score = data.get("quality_score", "")
+    issues = data.get("issues", [])
+
+    has_issues = bool(issues)
+
+    if has_issues:
+        session.quality_revert_count += 1
+
+        # Check forced completion
+        if session.quality_revert_count >= session.quality_review_max_revert:
+            session.quality_review_completed = True
+            session.transition_to_phase(Phase.MERGE, reason="quality_forced_completion")
+            return {
+                "success": True,
+                "forced_completion": True,
+                "warning": "品質問題が未解決のまま完了",
+                "quality_revert_count": session.quality_revert_count,
+                **get_phase_response("MERGE"),
+            }
+
+        # Clear commit preparation
+        session.commit_prepared = False
+        session.prepared_commit_message = None
+        session.prepared_kept_files = []
+        session.prepared_discarded_files = []
+
+        # Revert to READY
+        session.transition_to_phase(Phase.READY, reason="quality_review_issues")
+        session.ready_substep = "plan"
+
+        return {
+            "success": True,
+            "issues_found": True,
+            "issues": issues,
+            "quality_revert_count": session.quality_revert_count,
+            "existing_tasks": [t.to_dict() for t in session.tasks],
+            **get_phase_response("READY", step=12, extra={"ready_substep": "READY_PLAN"}),
+        }
+    else:
+        # Execute prepared commit if exists
+        commit_hash = None
+        if session.commit_prepared:
+            repo_path = session.repo_path or "."
+            branch_manager = _get_or_recreate_branch_manager(session, repo_path)
+            if branch_manager:
+                commit_result = await branch_manager.execute_prepared_commit(
+                    commit_message=session.prepared_commit_message or "Quality review passed"
+                )
+                if commit_result.success:
+                    commit_hash = commit_result.commit_hash
+                    session.commit_prepared = False
+
+        session.quality_review_completed = True
+        session.transition_to_phase(Phase.MERGE, reason="quality_review_passed")
+
+        return {
+            "success": True,
+            "issues_found": False,
+            "commit_hash": commit_hash,
+            **get_phase_response("MERGE"),
+        }
+
+
+async def _submit_merge(session: SessionState, data: dict) -> dict:
+    """Step 19: MERGE."""
+    if not session.task_branch_enabled:
+        return {
+            "success": True,
+            "session_complete": True,
+            "message": "No task branch. Session complete.",
+        }
+
+    # Check quality review
+    if session.quality_review_enabled and not session.quality_review_completed:
+        return {
+            "error": "quality_review_required",
+            "message": "QUALITY_REVIEW not completed.",
+            **get_phase_response("QUALITY_REVIEW"),
+        }
+
+    repo_path = session.repo_path or "."
+    branch_manager = _get_or_recreate_branch_manager(session, repo_path)
+    if branch_manager is None:
+        return {
+            "error": "branch_manager_not_found",
+            "message": "Branch manager not found.",
+        }
+
+    merge_result = await branch_manager.merge_to_base()
+
+    if merge_result["success"]:
+        # Cleanup
+        if session.session_id in _branch_managers:
+            del _branch_managers[session.session_id]
+
+        return {
+            "success": True,
+            "session_complete": True,
+            "merged": True,
+            "from_branch": merge_result.get("from_branch"),
+            "to_branch": merge_result.get("to_branch"),
+            "message": f"Merged {merge_result.get('from_branch')} → {merge_result.get('to_branch')}. Session complete.",
+        }
+    else:
+        return {
+            "success": False,
+            "error": merge_result.get("error"),
+            "message": "Merge failed.",
+        }
+
+
 def check_phase_access(tool_name: str) -> dict | None:
     """
     v3.2: Check if tool is allowed in current session phase.
@@ -1613,13 +2406,19 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         intent = arguments["intent"]
         query = arguments["query"]
         repo_path = arguments.get("repo_path", ".")
-        gate_level = arguments.get("gate_level", "auto")  # v1.10: default changed from "high" to "auto"
-        skip_quality = arguments.get("skip_quality", False)
-        skip_implementation = arguments.get("skip_implementation", False)
-        print(f"[DEBUG start_session] skip_implementation argument = {skip_implementation}, type = {type(skip_implementation)}")
+        gate_level = arguments.get("gate_level", "auto")
 
-        # v1.6: enable_overlay/enable_branch parameter removed (branch creation moved to begin_phase_gate)
-        # These parameters are no longer used
+        # v1.11: Parse flags
+        flags = arguments.get("flags", {})
+        if isinstance(flags, str):
+            try:
+                flags = json.loads(flags)
+            except json.JSONDecodeError:
+                flags = {}
+
+        # Legacy compatibility
+        skip_quality = arguments.get("skip_quality", flags.get("no_quality", False))
+        skip_implementation = arguments.get("skip_implementation", flags.get("only_explore", False))
 
         session = session_manager.create_session(
             intent=intent,
@@ -1634,36 +2433,52 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         # v1.8: Set skip_implementation flag
         session.skip_implementation = skip_implementation
 
+        # v1.11: Set session flags
+        session.no_verify = flags.get("no_verify", False)
+        session.no_quality = skip_quality
+        session.fast_mode = flags.get("fast", False)
+        session.quick_mode = flags.get("quick", False)
+        session.no_doc = flags.get("no_doc", False)
+        session.no_intervention = flags.get("no_intervention", False)
+
+        # v1.11: Determine initial phase based on flags
+        # start_session → check for stale branches → DOCUMENT_RESEARCH or QUERY_FRAME
+        # For now, set initial phase to BRANCH_INTERVENTION (server will check stale branches)
+        # or skip to DOCUMENT_RESEARCH/QUERY_FRAME if --fast/--quick
+        if session.quick_mode:
+            # --quick: skip everything, go to READY
+            session.transition_to_phase(Phase.READY, reason="quick_mode")
+        elif session.fast_mode:
+            # --fast: skip exploration, go to READY
+            session.transition_to_phase(Phase.READY, reason="fast_mode")
+        else:
+            # Normal: start at BRANCH_INTERVENTION (stale check will be done)
+            session.transition_to_phase(Phase.BRANCH_INTERVENTION, reason="start_session")
+
         # Get extraction prompt for QueryFrame
         extraction_prompt = QueryDecomposer.get_extraction_prompt(query)
 
-        # v1.6: Phase is now None (unset) until begin_phase_gate is called
-        # v1.10: gate_level="none" removed (use "full" or "auto" instead)
-        if gate_level not in ("full", "auto"):
-            phase_message = f"Session started with invalid gate_level={gate_level}. Valid values: 'full' or 'auto'."
-            next_step_message = "Update gate_level to 'full' (execute all phases) or 'auto' (check before each)."
-        else:
-            phase_message = f"Session started. v1.6: Call begin_phase_gate to start phase gates."
-            next_step_message = "Extract slots from query using the prompt, call set_query_frame, then call begin_phase_gate."
+        # v1.11: Self-contained response
+        first_phase = session.phase.name
+        first_response = get_phase_response(first_phase)
 
         result = {
             "success": True,
             "session_id": session.session_id,
             "intent": session.intent,
-            "current_phase": session.phase.name,
-            "allowed_tools": session.get_allowed_tools(),
-            "repo_path": session.repo_path,
             "gate_level": gate_level,
-            "message": phase_message,
-            # v3.6: QueryFrame extraction
-            "query_frame": {
-                "status": "pending",
-                "extraction_prompt": extraction_prompt,
-                "next_step": next_step_message,
+            "flags": {
+                "no_verify": session.no_verify,
+                "no_quality": session.no_quality,
+                "fast": session.fast_mode,
+                "quick": session.quick_mode,
+                "no_doc": session.no_doc,
+                "no_intervention": session.no_intervention,
             },
-            # v1.6: Next step indicator
-            # v1.10: gate_level is now "full" or "auto" only
-            "next_step": "Call begin_phase_gate to start phase gates" if gate_level in ("full", "auto") else None,
+            # v1.11: Self-contained phase response
+            **first_response,
+            # v3.6: QueryFrame extraction prompt (for Step 4)
+            "query_frame_extraction_prompt": extraction_prompt,
         }
 
         # v1.1: Essential context provision (design docs + project rules)
@@ -2028,8 +2843,31 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             result = session.get_status()
         return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
+    # =========================================================================
+    # v1.11: Unified submit_phase handler
+    # =========================================================================
+    elif name == "submit_phase":
+        session = session_manager.get_active_session()
+        if session is None:
+            result = {"error": "no_active_session", "message": "No active session. Use start_session first."}
+            return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+
+        data = arguments.get("data", {})
+        # Handle string-serialized data (MCP client workaround)
+        if isinstance(data, str):
+            try:
+                data = json.loads(data)
+            except json.JSONDecodeError as e:
+                result = {"error": "invalid_data", "message": f"Failed to parse data JSON: {e}"}
+                return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+
+        result = await _handle_submit_phase(session, data)
+        return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+
     # v1.10 note: submit_understanding handler removed (replaced by check_phase_necessity)
     # submit_exploration validates quality; check_phase_necessity handles phase transitions
+    # v1.11 note: The following handlers are DEPRECATED (use submit_phase instead)
+    # They are kept temporarily for backward compatibility during migration.
 
     elif name == "submit_exploration":
         session = session_manager.get_active_session()
