@@ -1617,7 +1617,7 @@ async def _handle_submit_phase(session: SessionState, data: dict) -> dict:
 
     # --- Step 4: QUERY_FRAME ---
     elif phase == Phase.QUERY_FRAME:
-        return _submit_query_frame(session, data)
+        return await _submit_query_frame(session, data)
 
     # --- Step 5: EXPLORATION ---
     elif phase == Phase.EXPLORATION:
@@ -1734,7 +1734,7 @@ def _submit_document_research(session: SessionState, data: dict) -> dict:
     }
 
 
-def _submit_query_frame(session: SessionState, data: dict) -> dict:
+async def _submit_query_frame(session: SessionState, data: dict) -> dict:
     """Step 4: Handle query frame extraction."""
     from tools.query_frame import QueryFrame, QueryDecomposer, validate_slot, SlotSource, generate_investigation_guidance
 
@@ -1763,10 +1763,15 @@ def _submit_query_frame(session: SessionState, data: dict) -> dict:
 
     # Determine next phase
     if session.fast_mode or session.quick_mode:
-        # Skip exploration
+        # Skip exploration → READY
         next_phase = Phase.READY
         session.transition_to_phase(next_phase, reason="query_frame_complete_skip_exploration")
         response = get_phase_response("READY", extra={"ready_substep": "READY_PLAN"})
+        # --fast: create branch for READY (--quick: no branch)
+        if session.fast_mode:
+            branch_result = await _create_branch_for_ready(session)
+            if branch_result.get("branch"):
+                response["branch"] = branch_result["branch"]
     else:
         next_phase = Phase.EXPLORATION
         session.transition_to_phase(next_phase, reason="query_frame_complete")
@@ -2229,7 +2234,9 @@ async def _submit_pre_commit(session: SessionState, data: dict) -> dict:
         session.prepared_discarded_files = finalize_result.discarded_files
 
     # Determine next phase
-    if session.quality_review_enabled:
+    # --fast and --quick skip QUALITY_REVIEW per phase matrix
+    skip_quality = session.fast_mode or session.quick_mode or not session.quality_review_enabled
+    if not skip_quality:
         # Check if quality_review.md exists
         quality_review_path = Path(repo_path) / ".code-intel" / "review_prompts" / "quality_review.md"
         if quality_review_path.exists():
@@ -2242,6 +2249,8 @@ async def _submit_pre_commit(session: SessionState, data: dict) -> dict:
             }
         # else: skip quality review
 
+    # Skipped quality review → mark as completed so MERGE doesn't block
+    session.quality_review_completed = True
     # No quality review → MERGE
     session.transition_to_phase(Phase.MERGE, reason="pre_commit_to_merge")
     return {
@@ -2445,15 +2454,19 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         # start_session → check for stale branches → DOCUMENT_RESEARCH or QUERY_FRAME
         # For now, set initial phase to BRANCH_INTERVENTION (server will check stale branches)
         # or skip to DOCUMENT_RESEARCH/QUERY_FRAME if --fast/--quick
-        if session.quick_mode:
-            # --quick: skip everything, go to READY
-            session.transition_to_phase(Phase.READY, reason="quick_mode")
-        elif session.fast_mode:
-            # --fast: skip exploration, go to READY
-            session.transition_to_phase(Phase.READY, reason="fast_mode")
+        # v1.11: All modes check stale branches first (Step 2), then proceed:
+        #   stale found → BRANCH_INTERVENTION
+        #   no stale + --no-doc → QUERY_FRAME
+        #   no stale → DOCUMENT_RESEARCH
+        # Exploration skip (--fast/--quick) is handled in QUERY_FRAME → READY
+        stale_info = await BranchManager.list_stale_branches(repo_path)
+        stale_branches = stale_info.get("stale_branches", [])
+        if stale_branches:
+            session.transition_to_phase(Phase.BRANCH_INTERVENTION, reason="start_session_stale_found")
+        elif session.no_doc:
+            session.transition_to_phase(Phase.QUERY_FRAME, reason="start_session_skip_doc")
         else:
-            # Normal: start at BRANCH_INTERVENTION (stale check will be done)
-            session.transition_to_phase(Phase.BRANCH_INTERVENTION, reason="start_session")
+            session.transition_to_phase(Phase.DOCUMENT_RESEARCH, reason="start_session_no_stale")
 
         # Get extraction prompt for QueryFrame
         extraction_prompt = QueryDecomposer.get_extraction_prompt(query)
@@ -2480,6 +2493,10 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             # v3.6: QueryFrame extraction prompt (for Step 4)
             "query_frame_extraction_prompt": extraction_prompt,
         }
+
+        # v1.11: Include stale branch info for BRANCH_INTERVENTION
+        if stale_branches:
+            result["stale_branches"] = stale_branches
 
         # v1.1: Essential context provision (design docs + project rules)
         # v1.3: Also includes doc_research configuration
