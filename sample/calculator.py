@@ -41,6 +41,13 @@ class Calculator:
         self.result = a % b
         return self.result
 
+    def sqrt(self, a):
+        """Return the square root of a."""
+        if a < 0:
+            raise ValueError("Cannot take square root of negative number")
+        self.result = a ** 0.5
+        return self.result
+
 
 def calculate_sum(numbers):
     """Calculate sum of a list of numbers."""
