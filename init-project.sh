@@ -284,6 +284,14 @@ if [ -d "$SCRIPT_DIR/.code-intel/interventions" ]; then
     done
 fi
 
+# Copy task_planning.md (v1.11)
+if [ -f "$SCRIPT_DIR/.code-intel/task_planning.md" ]; then
+    if [ ! -f "$PROJECT_PATH/.code-intel/task_planning.md" ]; then
+        cp "$SCRIPT_DIR/.code-intel/task_planning.md" "$PROJECT_PATH/.code-intel/"
+        echo "  ✓ .code-intel/task_planning.md"
+    fi
+fi
+
 # Copy .claude directory (project rules, guides, and skills)
 if [ -d "$SCRIPT_DIR/.claude" ]; then
     mkdir -p "$PROJECT_PATH/.claude/commands"
@@ -391,6 +399,7 @@ echo "      ├── verifiers/           (verification prompts)"
 echo "      ├── doc_research/        (document research prompts)"
 echo "      ├── review_prompts/      (garbage detection, quality review)"
 echo "      ├── interventions/       (intervention prompts)"
+echo "      ├── task_planning.md     (task decomposition guide, v1.11)"
 echo "      └── sync_state.json      (incremental sync state)"
 echo ""
 echo "=== Next Steps ==="
@@ -432,6 +441,8 @@ echo "• Parallel execution for search_text, Read, Grep (v1.7 - saves 27-35s)"
 echo "• Optimized phase transitions with skip_implementation (v1.8)"
 echo "• Phase necessity checks Q1/Q2/Q3 (v1.10)"
 echo "• Deferred branch creation to READY phase (v1.11)"
+echo "• Unified submit_phase API with compaction resilience (v1.11)"
+echo "• Server-enforced task orchestration (v1.11)"
 echo ""
 echo "Use '/code' skill for guided implementation workflow."
 echo "Use 'sync_index' tool to manually trigger re-indexing."
