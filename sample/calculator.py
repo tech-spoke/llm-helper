@@ -65,6 +65,14 @@ class Calculator:
         self.result = -a
         return self.result
 
+    def is_positive(self, a):
+        """Return True if a is positive."""
+        return a > 0
+
+    def is_even(self, a):
+        """Return True if a is even."""
+        return a % 2 == 0
+
 
 def calculate_sum(numbers):
     """Calculate sum of a list of numbers."""
