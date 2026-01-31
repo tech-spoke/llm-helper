@@ -1,6 +1,6 @@
-# Code Intelligence MCP Server - Design Document v1.10
+# Code Intelligence MCP Server - Design Document v1.11
 
-> This document describes the complete system specification as of v1.10.
+> This document describes the complete system specification as of v1.11.
 > For version history, see [CHANGELOG](#changelog).
 
 ---
@@ -10,20 +10,24 @@
 1. [Overview](#overview)
 2. [Design Philosophy](#design-philosophy)
 3. [Architecture](#architecture)
-4. [Phase Gates](#phase-gates)
-5. [Two-Layer Context](#two-layer-context)
-6. [Tools Reference](#tools-reference)
-7. [/code Skill Flow](#code-skill-flow)
-8. [Setup Guide](#setup-guide)
-9. [Configuration](#configuration)
-10. [Internal Reference](#internal-reference)
-11. [CHANGELOG](#changelog)
+4. [Complete Flow (19 Steps)](#complete-flow-19-steps)
+5. [Phase Matrix](#phase-matrix)
+6. [submit_phase API](#submit_phase-api)
+7. [Task Orchestration](#task-orchestration)
+8. [Safety Valves (Loop Prevention)](#safety-valves-loop-prevention)
+9. [Compaction Resilience Design](#compaction-resilience-design)
+10. [Two-Layer Context](#two-layer-context)
+11. [Tools Reference](#tools-reference)
+12. [Setup Guide](#setup-guide)
+13. [Configuration](#configuration)
+14. [Internal Reference](#internal-reference)
+15. [CHANGELOG](#changelog)
 
 ---
 
 ## Overview
 
-Code Intelligence MCP Server provides guardrails for LLMs to accurately understand codebases and safely implement changes. It bridges the gap between Cursor-like IDE behavior and Claude Code's default approach.
+Code Intelligence MCP Server provides guardrails for LLMs to accurately understand codebases and safely implement changes.
 
 | Caller | Default Behavior |
 |--------|------------------|
@@ -31,6 +35,15 @@ Code Intelligence MCP Server provides guardrails for LLMs to accurately understa
 | **Claude Code** | Tends to modify only specific locations |
 
 This server makes Claude Code behave more like Cursor by enforcing structured exploration before implementation.
+
+### Key Changes in v1.11
+
+| Change | Description |
+|--------|-------------|
+| **Unified submit_phase** | 17 submit_* tools → single `submit_phase` |
+| **Self-describing responses** | Every response includes `instruction` + `expected_payload` |
+| **Task orchestration** | Server-enforced task management (LLM cannot skip) |
+| **Compaction resilience** | 4-layer resilience design (tool, response, recovery, defense) |
 
 ---
 
@@ -45,19 +58,17 @@ And have a mechanism to learn from failures.
 
 | Principle | Implementation |
 |-----------|----------------|
-| **Phase Enforcement** | Tool restrictions by phase (no shortcuts) |
-| **Server Evaluation** | Server calculates confidence (not LLM self-report) |
-| **Quote Verification** | Validates LLM-extracted quotes against original query |
-| **Embedding Verification** | Objective NL→Symbol relevance via vector similarity |
-| **Write Restriction** | Only explored files can be modified |
-| **Parallel Execution Guard** | Blocks other /code calls during active session (1 project = 1 session) |
-| **Improvement Cycle** | Learn from failures via DecisionLog + OutcomeLog |
-| **Project Isolation** | Independent learning data per project |
-| **Two-Layer Context** | Static project rules + dynamic task-specific rules |
-| **Garbage Detection** | Git branch isolates changes for review before commit |
-| **Intervention System** | Retry-based intervention for stuck verification loops (v1.4) |
-| **Quality Review** | Post-implementation quality check, re-check required after fixes (v1.5) |
-| **Branch Lifecycle** | Stale branch warnings, auto-deletion on failure, begin_phase_gate separation (v1.6) |
+| **Phase enforcement** | Tool restrictions per phase (no shortcuts) |
+| **Server evaluation** | Server calculates confidence (not LLM self-report) |
+| **Quote verification** | Validates LLM-extracted quotes against original query |
+| **Embedding verification** | Objective NL→Symbol relevance via vector similarity |
+| **Write restriction** | Only explored files can be modified |
+| **Parallel execution guard** | Blocks other /code calls during active session (1 project = 1 session) |
+| **Improvement cycle** | Learn from failures via DecisionLog + OutcomeLog |
+| **Two-layer context** | Static project rules + dynamic task-specific rules |
+| **Unified submit_phase** | Single tool for all phase exits (compaction resilience) |
+| **Server-enforced task management** | Server verifies task completion (prevents LLM skipping) |
+| **Safety valves** | Server-side counters prevent infinite loops |
 
 ---
 
@@ -105,232 +116,305 @@ And have a mechanism to learn from failures.
 
 ---
 
-## Processing Flow
+## Complete Flow (19 Steps)
 
-Processing consists of 4 layers (v1.10).
+LLM-side preprocessing (no server calls):
+- Flag Check: Parse command options
+- Intent Classification: IMPLEMENT / MODIFY / INVESTIGATE / QUESTION
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│  Preparation Phase (Skill controlled - code.md)                             │
-└─────────────────────────────────────────────────────────────────────────────┘
-Step -1:  Flag Check              Parse command options
-Step 1:   Intent Classification   Classify as IMPLEMENT/MODIFY/INVESTIGATE/QUESTION
-Step 2:   Session Start           Start session, get project_rules (no branch yet)
-Step 2.5: DOCUMENT_RESEARCH       Document research (sub-agent) ← skip with --no-doc-research
-Step 3:   QueryFrame Setup        Decompose request into structured slots
-Step 3.5: begin_phase_gate        Start phase gates (no branch yet), stale warning
+All step exits use `submit_phase` (Step 1 only uses `start_session`).
 
-┌─────────────────────────────────────────────────────────────────────────────┐
-│  Exploration Phase (Server enforced)                                        │
-└─────────────────────────────────────────────────────────────────────────────┘
-Step 4:   EXPLORATION             Source investigation (find_definitions, find_references, search_text)
+### Session Start
 
-          ★ v1.10: Individual phase check approach
-          ↓
-Step 4.5: Q1 Check                Is additional information collection needed?
-          ├─ YES → Execute SEMANTIC
-          └─ NO → Skip SEMANTIC
-          ↓
-Step 5:   SEMANTIC                Semantic search (only if Q1=YES)
-          ↓
-Step 5.5: Q2 Check                Are there hypotheses that need verification?
-          ├─ YES → Execute VERIFICATION
-          └─ NO → Skip VERIFICATION
-          ↓
-Step 6:   VERIFICATION            Hypothesis verification (only if Q2=YES)
-          ↓
-Step 6.5: Q3 Check                Is impact range confirmation needed?
-          ├─ YES → Execute IMPACT_ANALYSIS
-          └─ NO → Skip IMPACT_ANALYSIS (+ create branch → READY)
-          ↓
-Step 7:   IMPACT_ANALYSIS         Impact range analysis (only if Q3=YES)
-          ↓
-          [If --only-explore: End here, report findings to user]
-          [Normal flow: create branch → READY]
+| Step | Phase | LLM Action | Notes |
+|------|-------|------------|-------|
+| 1 | — | Determine intent (implement/investigate) → initialize with `start_session` | |
+| 2 | BRANCH_INTERVENTION | Present choices to user | Only when stale branches detected |
+| 3 | DOCUMENT_RESEARCH | Research design docs via sub-agent | |
+| 4 | QUERY_FRAME | NL → structured slot extraction | |
 
-┌─────────────────────────────────────────────────────────────────────────────┐
-│  Implementation & Verification Phase (Server enforced)                      │
-└─────────────────────────────────────────────────────────────────────────────┘
-Step 8:   READY                   Implementation (Edit/Write/Bash allowed)
-                                  ★ v1.11: Branch created at transition to READY
-Step 8.5: POST_IMPL_VERIFY        Post-implementation verification (verifier prompts) ← skip with --no-verify
-                                  On failure, loop back to Step 8 (max 3 times)
+### Exploration Phase
 
-┌─────────────────────────────────────────────────────────────────────────────┐
-│  Commit & Quality Phase (Server enforced)                                   │
-└─────────────────────────────────────────────────────────────────────────────┘
-Step 9:   PRE_COMMIT              Pre-commit review                ← skip with --quick
-          ├─ review_changes       Garbage detection (garbage_detection.md)
-          └─ finalize_changes     Keep/discard decision + commit preparation
+| Step | Phase | LLM Action | Notes |
+|------|-------|------------|-------|
+| 5 | EXPLORATION | Explore with code-intel tools | |
+| 6 | Q1 | Assess SEMANTIC necessity | Server may skip Step 7 |
+| 7 | SEMANTIC | Gather additional info via semantic_search | Skipped when Q1=false |
+| 8 | Q2 | Assess VERIFICATION necessity | Server may skip Step 9 |
+| 9 | VERIFICATION | Verify hypotheses | Skipped when Q2=false |
+| 10 | Q3 | Assess IMPACT_ANALYSIS necessity | Server may skip Step 11 |
+| 11 | IMPACT_ANALYSIS | Impact analysis | Skipped when Q3=false / Investigation: SESSION_COMPLETE |
 
-Step 9.5: QUALITY_REVIEW          Quality review ← skip with --no-quality / --fast / --quick
-          ├─ quality_review.md    Checklist review
-          └─ submit_quality_review
-              ├─ Issues found → Revert to READY (fix → POST_IMPL_VERIFY → PRE_COMMIT → QUALITY_REVIEW)
-              └─ No issues → ★Commit execution here → Next
+### Implementation Phase
 
-┌─────────────────────────────────────────────────────────────────────────────┐
-│  Completion                                                                 │
-└─────────────────────────────────────────────────────────────────────────────┘
-Step 10:  merge_to_base           Merge task branch to original branch
-                                  Session complete, report results to user
-```
-
-### 1. Preparation Phase (Skill controlled)
-
-Controlled by skill prompt (code.md). Server not involved.
-
-| Step | Description | Skip |
-|------|-------------|------|
-| Step -1: Flag Check | Parse command options (`--quick`, `--only-explore`, etc.) | - |
-| Step 1: Intent Classification | Classify as IMPLEMENT / MODIFY / INVESTIGATE / QUESTION | - |
-| Step 2: Session Start | Start session, get project_rules (no branch yet, moved to READY in v1.11) | - |
-| Step 2.5: **DOCUMENT_RESEARCH** | Sub-agent researches design docs, extracts mandatory_rules | `--no-doc-research` |
-| Step 3: QueryFrame Setup | Decompose request into structured slots with Quote verification | - |
-
-**DOCUMENT_RESEARCH details:**
-- Uses Claude Code Task tool (Explore agent)
-- Researches documents in `docs/` directory
-- Extracts task-specific rules, constraints, and dependencies
-- Referenced as `mandatory_rules` in subsequent phases
-
-**--only-explore flag (v1.8):**
-- When detected in Step -1, sets `skip_implementation=true` flag
-- Passes `skip_implementation` parameter to Session Start (Step 2)
-- After IMPACT_ANALYSIS (Step 7) completion, skips implementation phases and exits
-
-### 1.5. Phase Gate Start (v1.6, updated v1.11)
-
-After preparation, `begin_phase_gate` starts phase gates (branch creation deferred to READY transition).
-
-**Stale Branch Detection:**
-- If `llm_task_*` branches exist while not on a task branch, user intervention is required
-- Three options: Delete, Merge, or Continue as-is
-
-**Branch Creation (v1.11):**
-- Branch is created when transitioning to READY phase (not at begin_phase_gate)
-- This allows exploration to complete before committing to implementation
-
-### 2. Phase Gates (Server enforced)
-
-MCP server enforces phase transitions. LLM cannot skip arbitrarily.
-
-#### Phase Matrix
-
-| Option | Doc Research | Source Explore | Implement | Verify | Intervene | Garbage | Quality | Branch |
-|--------|:-------:|:-------:|:---------:|:------:|:---------:|:-------:|:-------:|:------:|
-| (default) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `--only-explore` / `-e` | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `--no-verify` | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | ✅ |
-| `--no-quality` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
-| `--fast` / `-f` | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
-| `--quick` / `-q` | ✅ | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
-| `--no-doc-research` | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-
-**Legend**:
-- **Doc Research**: DOCUMENT_RESEARCH (Step 2.5)
-- **Source Explore**: EXPLORATION, SEMANTIC, VERIFICATION, IMPACT_ANALYSIS (Steps 4-7)
-
-#### Phase Details (v1.10: Individual Check Approach)
-
-| Phase | Purpose | Allowed Tools | Transition Condition |
-|-------|---------|---------------|---------------------|
-| EXPLORATION | Understand codebase | query, find_definitions, find_references, search_text, analyze_structure | EXPLORATION completed |
-| Q1 Check | Determine SEMANTIC necessity | check_phase_necessity(phase="SEMANTIC") | needs_more_information decision |
-| SEMANTIC | Fill information gaps | semantic_search | submit_semantic completed |
-| Q2 Check | Determine VERIFICATION necessity | check_phase_necessity(phase="VERIFICATION") | has_unverified_hypotheses decision |
-| VERIFICATION | Verify hypotheses | All exploration tools | submit_verification completed |
-| Q3 Check | Determine IMPACT_ANALYSIS necessity | check_phase_necessity(phase="IMPACT_ANALYSIS") | needs_impact_analysis decision |
-| IMPACT_ANALYSIS | Check change impact | analyze_impact | submit_impact_analysis completed |
-| READY | Implementation | Edit, Write, Bash (explored files only) | - |
-| POST_IMPL_VERIFY | Run verification | Playwright, pytest, etc. | Success (3 failures trigger intervention) |
-| PRE_COMMIT | Garbage detection | review_changes, finalize_changes | Garbage removed |
-| QUALITY_REVIEW | Quality check | submit_quality_review (Edit/Write forbidden) | No issues → complete, Issues → revert to READY |
-
-### 3. Completion
-
-- Merge task branch to base branch via `merge_to_base`
-- Delete Git branch
+| Step | Phase | LLM Action | Notes |
+|------|-------|------------|-------|
+| 12 | READY | Task decomposition & planning | Branch created |
+| 13 | READY | Implement via Edit/Write | Repeats per task (×N) |
+| 14 | READY | Confirm all tasks complete | Blocks if incomplete |
+| 15 | POST_IMPL_VERIFY | Execute verifier prompts | On failure: revert to Step 12 |
+| 16 | VERIFY_INTERVENTION | Read & execute intervention prompt | Only when task failure_count ≥ 3 |
+| 17 | PRE_COMMIT | Review via review_changes | |
+| 18 | QUALITY_REVIEW | Quality check | quality_revert_count ≥ 3 → forced_completion |
+| 19 | MERGE | — | SESSION_COMPLETE |
 
 ---
 
-## Phase Details
+## Phase Matrix
 
-### Markup Relaxation
+The server determines the next phase in each `submit_phase` response. The LLM does not need to know about flags.
 
-When targeting only pure markup files (HTML, CSS, etc.), EXPLORATION phase requirements are relaxed.
+| Step | Phase | Implement | Investigate | --no-verify | --no-quality | --fast | --quick | --no-doc | -ni | Notes |
+|------|-------|:---------:|:-----------:|:-----------:|:------------:|:------:|:-------:|:--------:|:---:|-------|
+| 1 | start_session | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | |
+| 2 | BRANCH_INTERVENTION | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | Only when stale detected |
+| 3 | DOCUMENT_RESEARCH | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | |
+| 4 | QUERY_FRAME | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | |
+| 5 | EXPLORATION | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | |
+| 6 | Q1 | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | |
+| 7 | SEMANTIC | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | Skipped when Q1=false |
+| 8 | Q2 | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | |
+| 9 | VERIFICATION | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | Skipped when Q2=false |
+| 10 | Q3 | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | |
+| 11 | IMPACT_ANALYSIS | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | Skipped when Q3=false |
+| 12 | READY (planning) | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | Branch created |
+| 13 | READY (implementation) | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ×N |
+| 14 | READY (completion) | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | Blocks if incomplete |
+| 15 | POST_IMPL_VERIFY | ✅ | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | On failure → revert to Step 12 |
+| 16 | VERIFY_INTERVENTION | ✅ | ❌ | ❌ | ✅ | ✅ | ❌ | ✅ | ❌ | Only when task failure_count ≥ 3 |
+| 17 | PRE_COMMIT | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | |
+| 18 | QUALITY_REVIEW | ✅ | ❌ | ✅ | ❌ | ❌ | ❌ | ✅ | ✅ | |
+| 19 | MERGE | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | |
 
-**What relaxation means:**
-- Code exploration can be mostly skipped (text search only is OK)
-- Symbol definition and reference analysis not required
-- Faster progression to implementation phase
+**Legend**:
+- **Implement**: IMPLEMENT / MODIFY intent (default)
+- **Investigate**: INVESTIGATE / QUESTION intent (equivalent to `--only-explore`, SESSION_COMPLETE after exploration)
+- **-ni**: `--no-intervention` (skips Step 16 VERIFY_INTERVENTION)
+- Flag columns modify the Implement intent. For Investigate intent, Steps 12 onward do not exist.
 
-| Extensions | Relaxation |
-|------------|------------|
-| `.html`, `.htm`, `.css`, `.scss`, `.sass`, `.less`, `.md` | ✅ Applied |
-| `.blade.php`, `.vue`, `.jsx`, `.tsx`, `.svelte` | ❌ Not applied (contains logic) |
+### Command Options
 
-**v1.3 Addition - Cross-Reference Detection:**
+| Long | Short | Description |
+|------|-------|-------------|
+| `--gate=LEVEL` | `-g=LEVEL` | Gate level: f(ull), a(uto) [default: auto] |
+| `--no-verify` | — | Skip POST_IMPL_VERIFY (Step 15) |
+| `--no-quality` | — | Skip QUALITY_REVIEW (Step 18) |
+| `--only-verify` | `-v` | Run verification only |
+| `--only-explore` | `-e` | Run exploration only (SESSION_COMPLETE after Step 11) |
+| `--fast` | `-f` | Skip exploration (Steps 5-11), with branch |
+| `--quick` | `-q` | Skip exploration (Steps 5-11), no branch, also skips PRE_COMMIT/QUALITY_REVIEW/MERGE |
+| `--no-doc-research` | — | Skip DOCUMENT_RESEARCH (Step 3) |
+| `--no-intervention` | `-ni` | Skip VERIFY_INTERVENTION (Step 16) |
+| `--clean` | `-c` | Delete stale branches + reset SessionState |
+| `--rebuild` | `-r` | Force full index rebuild |
 
-Even in relaxed mode, IMPACT_ANALYSIS detects related files:
-- Modifying CSS → Detects HTML files using that class/ID
-- Modifying HTML → Detects CSS files with style definitions
-- Modifying HTML → Detects JS files with DOM operations
+---
 
-These are reported as `should_verify` (recommended to check).
+## submit_phase API
+
+### Overview
+
+```
+start_session → submit_phase (×N) → SESSION_COMPLETE
+                ↑                    ↑
+                get_session_status   (recovery at any point)
+```
+
+- The only phase transition tool the LLM calls is `submit_phase`
+- Server identifies the current phase from `SessionState.phase` and validates the payload
+- Server determines the next phase and returns a response
+
+### Response Format (Self-Describing)
+
+Common response structure across all phases:
+
+```json
+{
+  "phase": "EXPLORATION",
+  "step": 5,
+  "instruction": "Explore the codebase using code-intel tools",
+  "expected_payload": {
+    "explored_files": "list[str]",
+    "findings": "list[str]"
+  },
+  "call": "submit_phase"
+}
+```
+
+The LLM follows the `instruction` in the response, performs the work, and calls `submit_phase` with the `expected_payload` format.
+
+### Per-Phase Payloads
+
+| Step | Phase | LLM → Server (`data`) | Server Decision |
+|------|-------|----------------------|-----------------|
+| 2 | BRANCH_INTERVENTION | `{choice: "delete" \| "merge" \| "continue"}` | Execute action → next phase |
+| 3 | DOCUMENT_RESEARCH | `{documents_reviewed: [...]}` | → next phase |
+| 4 | QUERY_FRAME | `{action_type, target_symbols, scope, constraints}` | → next phase |
+| 5 | EXPLORATION | `{explored_files: [...], findings: [...]}` | → next phase |
+| 6 | Q1 | `{needs_more_information: bool, reason}` | true→SEMANTIC / false→Q2 |
+| 7 | SEMANTIC | `{search_results: [...]}` | → next phase |
+| 8 | Q2 | `{has_unverified_hypotheses: bool, reason}` | true→VERIFICATION / false→Q3 |
+| 9 | VERIFICATION | `{hypotheses_verified: [...]}` | → next phase |
+| 10 | Q3 | `{needs_impact_analysis: bool, reason}` | true→IMPACT / false(implement)→READY / false(investigate)→SESSION_COMPLETE |
+| 11 | IMPACT_ANALYSIS | `{impact_summary: {...}}` | Implement→READY / Investigate→SESSION_COMPLETE |
+| 12 | READY (planning) | `{tasks: [{id, description, status, ...}]}` | Register tasks (idempotent) |
+| 13 | READY (implementation) | `{task_id, summary}` | Order check, ×N |
+| 14 | READY (completion) | `{}` | All-tasks-complete check → next phase |
+| 15 | POST_IMPL_VERIFY | `{passed: bool, failed_tasks?, details}` | pass→17 / fail→12 |
+| 16 | VERIFY_INTERVENTION | `{prompt_used, action_taken}` | Reset failure_count → 12 |
+| 17 | PRE_COMMIT | `{reviewed_files: [...], commit_message}` | Commit → next phase |
+| 18 | QUALITY_REVIEW | `{quality_score, issues: [...]}` | No issues→MERGE / Issues→12 |
+| 19 | MERGE | `{}` | Merge → SESSION_COMPLETE |
+
+**Note**: When `gate_level="full"`, the server ignores Q1/Q2/Q3 assessments and forces all phases to execute.
+
+---
+
+## Task Orchestration
+
+The READY phase internally has 3 sub-steps (planning → implementation → completion).
+All are submitted via `submit_phase`, and the server distinguishes them by internal state.
+
+### Step 12: Task Planning
+
+Task model: `{id, description, status, failure_count?, revert_reason?}`
+
+```python
+# Initial submission
+submit_phase(data={
+  "tasks": [
+    {"id": "task_1", "description": "Extract CSS component utilities", "status": "pending"},
+    {"id": "task_2", "description": "Tokenize @theme values", "status": "pending"}
+  ]
+})
+
+# After revert (complete list with completed + fix tasks)
+submit_phase(data={
+  "tasks": [
+    {"id": "task_1", "description": "...", "status": "completed"},
+    {"id": "task_2", "description": "...", "status": "completed"},
+    {"id": "fix_1", "description": "Fix test failure", "status": "pending",
+     "failure_count": 1, "revert_reason": "Test X failed"}
+  ]
+})
+```
+
+**Idempotent design**: Step 12 always receives the complete task list. Resending the same payload produces the same result.
+
+### Step 13: Task Completion Report (×N)
+
+```python
+submit_phase(data={"task_id": "task_1", "summary": "Conversion complete"})
+```
+
+Report completions in registration order. The server tracks progress and returns the next task.
+
+### Step 14: Implementation Complete
+
+```python
+submit_phase(data={})
+```
+
+The server verifies all tasks are complete. Blocks if any remain incomplete.
+
+### Revert Behavior
+
+When reverted to Step 12 from POST_IMPL_VERIFY / VERIFY_INTERVENTION / QUALITY_REVIEW:
+
+1. Server: includes revert reason + existing task list in `instruction`
+2. LLM: submits complete list of existing tasks (completed) + fix tasks (pending) via `submit_phase`
+3. LLM: implements only pending tasks (Step 13 ×N)
+4. → Re-advances to Step 15 POST_IMPL_VERIFY
+
+---
+
+## Safety Valves (Loop Prevention)
+
+The LLM cannot recognize loops after compaction, so all loop limits are enforced server-side.
+
+### Server-Managed Counters
+
+```python
+class SessionState:
+    intervention_count: int = 0      # Number of VERIFY_INTERVENTION executions
+    quality_revert_count: int = 0    # Number of reverts from QUALITY_REVIEW
+    # failure_count is per-task (Task.failure_count)
+```
+
+### Loop Paths and Limits
+
+| Loop Path | Trigger | Limit | Action on Exceeded |
+|-----------|---------|-------|--------------------|
+| POST_IMPL_VERIFY → Step 12 | Verification failure | Task failure_count ≥ 3 | → VERIFY_INTERVENTION |
+| VERIFY_INTERVENTION → Step 12 | After intervention | intervention_count ≥ 2 | → user_escalation (AskUserQuestion) |
+| QUALITY_REVIEW → Step 12 | Quality issues found | quality_revert_count ≥ 3 | → forced_completion (MERGE with warning) |
+
+---
+
+## Compaction Resilience Design
+
+### Premise
+
+```
+LLM conversation  ← Subject to compaction (conversation history gets summarized)
+   ↕ MCP Protocol
+MCP Server         ← Not subject to compaction (SessionState held in memory)
+```
+
+### 4-Layer Resilience
+
+| Layer | Measure | Effect |
+|-------|---------|--------|
+| Tool design | Single `submit_phase` | Never forgets "what to call" |
+| Response design | Includes `expected_payload` | Never forgets "what to return" |
+| Recovery | `get_session_status` | Full state recovery mechanism |
+| Defense | Payload mismatch detection | Prevents silent failures |
+
+### Recovery via get_session_status
+
+When the LLM loses state after compaction:
+
+```json
+{
+  "session_id": "...",
+  "phase": "VERIFICATION",
+  "step": 9,
+  "completed_steps": [1, 2, 3, 4, 5, 6, 7, 8],
+  "instruction": "Verify hypotheses and call submit_phase",
+  "expected_payload": {
+    "hypotheses_verified": "list[{hypothesis, result, evidence}]"
+  }
+}
+```
+
+### Payload Mismatch Detection
+
+When the LLM sends a payload unrelated to the current phase, the server returns re-instructions for the current phase.
 
 ---
 
 ## Two-Layer Context
 
-v1.3 introduces a clear separation between static and dynamic context.
-
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│  Layer 1: project_rules (Session Start)                         │
-│  └── Always-needed baseline rules (lightweight, cached)         │
-│      • Source: CLAUDE.md                                        │
-│      • Content: DO/DON'T list                                   │
-│      • Purpose: Project-wide "common sense"                     │
+│  Layer 1: project_rules (at session start)                       │
+│  └── Always-needed baseline rules (lightweight, cached)          │
+│      Source: CLAUDE.md / Content: DO/DON'T list                  │
 └─────────────────────────────────────────────────────────────────┘
                               ↓
 ┌─────────────────────────────────────────────────────────────────┐
-│  Layer 2: mandatory_rules (DOCUMENT_RESEARCH phase)             │
-│  └── Task-specific detailed rules (dynamic, per-task)          │
-│      • Source: docs/**/*.md (sub-agent research)                │
-│      • Content: Task-specific constraints with file:line refs   │
-│      • Purpose: "Rules for THIS implementation"                 │
+│  Layer 2: mandatory_rules (DOCUMENT_RESEARCH phase)              │
+│  └── Task-specific detailed rules (dynamic, per-task)           │
+│      Source: docs/**/*.md (sub-agent research)                   │
 └─────────────────────────────────────────────────────────────────┘
 ```
-
-### Comparison
 
 | Aspect | project_rules | mandatory_rules |
 |--------|---------------|-----------------|
 | Source | CLAUDE.md | docs/**/*.md |
-| Timing | Session Start | DOCUMENT_RESEARCH phase |
+| Timing | Session start | DOCUMENT_RESEARCH (Step 3) |
 | Content | Generic DO/DON'T | Task-specific constraints |
-| Generation | Pre-cached summary | Sub-agent live research |
-| Skippable | No | Yes (`--no-doc-research`) |
-
-### DOCUMENT_RESEARCH Phase
-
-Uses Claude Code's Task tool with Explore agent to research design documents:
-
-1. Sub-agent spawned with research prompt
-2. Reads relevant documents from `docs/`
-3. Extracts rules, dependencies, warnings
-4. Returns `mandatory_rules` with source citations
-
-**Configuration** (`.code-intel/context.yml`):
-```yaml
-doc_research:
-  enabled: true
-  docs_path:
-    - "docs/"
-  default_prompts:
-    - "default.md"
-```
+| Skippable | No | Yes (`--no-doc`) |
 
 ---
 
@@ -340,66 +424,37 @@ doc_research:
 
 | Tool | Description |
 |------|-------------|
-| `start_session` | Start session with intent and query |
-| `get_session_status` | Get current phase and status |
-| `set_query_frame` | Set structured query slots |
+| `start_session` | Start session with intent, query, and flags |
+| `submit_phase` | **Single exit point for all phases** — server determines next phase |
+| `get_session_status` | Get current phase + instruction + expected_payload (for recovery) |
 
 ### Code Exploration
 
 | Tool | Description |
 |------|-------------|
-| `query` | General natural language query |
+| `search_text` | Text pattern search (parallel-capable) |
 | `find_definitions` | Symbol definition search (ctags) |
 | `find_references` | Reference search (ripgrep) |
-| `search_text` | Text pattern search |
 | `analyze_structure` | Code structure analysis (tree-sitter) |
 | `get_symbols` | Get symbol list for a file |
-| `semantic_search` | Vector search in Forest/Map |
-
-### Phase Control (v1.10)
-
-| Tool | Description |
-|------|-------------|
-| `check_phase_necessity` | Check phase necessity before each phase (Q1/Q2/Q3) |
-| `submit_semantic` | Complete SEMANTIC phase |
-| `submit_verification` | Complete VERIFICATION phase |
-| `submit_impact_analysis` | Complete IMPACT_ANALYSIS phase |
-| `submit_exploration` | Complete EXPLORATION phase |
+| `search_files` | File name pattern search |
+| `semantic_search` | Vector search in Forest/Map (SEMANTIC phase) |
+| `query` | General natural language query |
 
 ### Implementation Control
 
 | Tool | Description |
 |------|-------------|
-| `analyze_impact` | Analyze change impact before implementation |
 | `check_write_target` | Verify file can be modified |
 | `add_explored_files` | Add files to explored list |
 | `revert_to_exploration` | Return to EXPLORATION phase |
-| `validate_symbol_relevance` | Verify symbol relevance via embedding |
+| `review_changes` | Show all file changes in PRE_COMMIT |
 
-### Garbage Detection & Quality Review (v1.2, v1.5)
-
-| Tool | Description |
-|------|-------------|
-| `submit_for_review` | Transition to PRE_COMMIT phase |
-| `review_changes` | Show all file changes |
-| `finalize_changes` | Keep/discard files and commit |
-| `submit_quality_review` | Report quality review result (v1.5) |
-| `merge_to_base` | Merge task branch to base branch |
-
-### Branch Lifecycle (v1.6, v1.11)
+### Branch Management
 
 | Tool | Description |
 |------|-------------|
-| `begin_phase_gate` | Start phase gates (stale branch check). v1.11: branch creation deferred to READY |
-| `cleanup_stale_branches` | Checkout to base branch, delete all `llm_task_*` branches |
-
-### Intervention System (v1.4)
-
-| Tool | Description |
-|------|-------------|
-| `record_verification_failure` | Record verification failure |
-| `get_intervention_status` | Determine if intervention is needed |
-| `record_intervention_used` | Record which intervention prompt was used |
+| `cleanup_stale_branches` | Delete all `llm_task_*` branches |
 
 ### Index & Learning
 
@@ -409,178 +464,6 @@ doc_research:
 | `update_context` | Update context.yml summaries |
 | `record_outcome` | Record success/failure |
 | `get_outcome_stats` | Get learning statistics |
-
----
-
-## /code Skill Flow
-
-### Command Options
-
-| Long | Short | Description |
-|------|-------|-------------|
-| `--gate=LEVEL` | `-g=LEVEL` | Gate level: f(ull), a(uto) [default: auto] (v1.10) |
-| `--no-verify` | - | Skip verification (and intervention) |
-| `--no-quality` | - | Skip quality review (v1.5) |
-| `--only-verify` | `-v` | Run verification only |
-| `--only-explore` | `-e` | Run exploration only (skip implementation) (v1.8) |
-| `--fast` | `-f` | Fast mode: skip exploration, with branch |
-| `--quick` | `-q` | Minimal mode: skip exploration, no branch |
-| `--doc-research=PROMPTS` | - | Specify research prompts |
-| `--no-doc-research` | - | Skip document research |
-| `--no-intervention` | `-ni` | Skip intervention system (v1.4) |
-| `--clean` | `-c` | Checkout to base branch, delete stale `llm_task_*` branches |
-| `--rebuild` | `-r` | Force full re-index |
-
-**gate_level options (v1.10):**
-- `--gate=full` or `-g=f`: Ignore all checks and execute all phases
-- `--gate=auto` or `-g=a`: Check before each phase (default)
-
-### Execution Flow
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│ Preparation Phase (Skill controlled - code.md)                  │
-└─────────────────────────────────────────────────────────────────┘
-Step -1: Flag Check
-    └─ Parse command options (--quick, --only-explore, --no-verify, etc.)
-       When --only-explore / -e detected → set skip_implementation=true flag
-
-Step 1: Intent Classification
-    └─ Classify as IMPLEMENT / MODIFY / INVESTIGATE / QUESTION
-       ★ v1.8: Intent=INVESTIGATE or QUESTION → Automatic exploration-only mode
-          (skip_implementation=true, skip_branch=true)
-
-Step 2: Session Start
-    ├─ Load project_rules from context.yml
-    ├─ Set skip_implementation flag:
-    │  - Intent=INVESTIGATE/QUESTION → skip_implementation=true (auto)
-    │  - --only-explore flag → skip_implementation=true (explicit)
-    │  - Intent=IMPLEMENT/MODIFY → skip_implementation=false (default)
-    └─ Sync ChromaDB (if needed)
-    ※ Branch creation happens at READY phase transition (v1.11)
-
-Step 2.5: DOCUMENT_RESEARCH (v1.3)
-    ├─ Spawn sub-agent with research prompt
-    └─ Extract mandatory_rules from docs/
-    ← skip with --no-doc-research
-
-Step 3: QueryFrame Setup
-    └─ Extract structured slots with quote verification
-
-Step 3.5: begin_phase_gate (v1.6, v1.11)
-    ├─ Check for stale branches
-    ├─ User intervention if stale branches exist (delete/merge/continue)
-    └─ Determine branch creation:
-       - skip_implementation=true → skip_branch=true (no branch)
-       - skip_implementation=false → skip_branch=false (branch created at READY transition)
-       ★ v1.8: Exploration-only mode skips branch creation
-       ★ v1.11: Branch creation deferred to READY phase transition (not created at begin_phase_gate)
-
-┌─────────────────────────────────────────────────────────────────┐
-│ Exploration Phase (Server enforced)                             │
-└─────────────────────────────────────────────────────────────────┘
-Step 4: EXPLORATION
-    ├─ Use find_definitions, find_references, search_text, etc.
-    └─ Acknowledge mandatory_rules
-
-★ v1.10: Individual phase check approach
-
-Step 4.5: Q1 Check - Determine SEMANTIC necessity
-    ├─ check_phase_necessity(phase="SEMANTIC", assessment={...})
-    │  Question: Is additional information collection needed?
-    │  - needs_more_information: true/false
-    │  - needs_more_information_reason: "..."
-    ├─ gate_level="full" → Force execute
-    ├─ gate_level="auto" + needs_more_information=true → Execute SEMANTIC
-    └─ gate_level="auto" + needs_more_information=false → Skip SEMANTIC
-
-Step 5: SEMANTIC (only if Q1=YES)
-    └─ semantic_search → submit_semantic
-
-Step 5.5: Q2 Check - Determine VERIFICATION necessity
-    ├─ check_phase_necessity(phase="VERIFICATION", assessment={...})
-    │  Question: Are there hypotheses that need verification?
-    │  - has_unverified_hypotheses: true/false
-    │  - has_unverified_hypotheses_reason: "..."
-    ├─ gate_level="full" → Force execute
-    ├─ gate_level="auto" + has_unverified_hypotheses=true → Execute VERIFICATION
-    └─ gate_level="auto" + has_unverified_hypotheses=false → Skip VERIFICATION
-
-Step 6: VERIFICATION (only if Q2=YES)
-    └─ Verify hypotheses with code → submit_verification
-
-Step 6.5: Q3 Check - Determine IMPACT_ANALYSIS necessity
-    ├─ check_phase_necessity(phase="IMPACT_ANALYSIS", assessment={...})
-    │  Question: Is change impact range confirmation needed?
-    │  - needs_impact_analysis: true/false
-    │  - needs_impact_analysis_reason: "..."
-    ├─ gate_level="full" → Force execute
-    ├─ gate_level="auto" + needs_impact_analysis=true → Execute IMPACT_ANALYSIS
-    └─ gate_level="auto" + needs_impact_analysis=false → Skip IMPACT_ANALYSIS
-
-Step 7: IMPACT_ANALYSIS (only if Q3=YES)
-    ├─ analyze_impact for target files
-    └─ submit_impact_analysis
-
-    ★ v1.8: If skip_implementation=true (Intent=INVESTIGATE/QUESTION or --only-explore):
-       - submit_impact_analysis returns exploration_complete=true
-       - Report findings to user and complete (skip Step 8 onwards)
-       - No branch created, no implementation phases
-
-┌─────────────────────────────────────────────────────────────────┐
-│ Implementation & Verification Phase (Server enforced)           │
-└─────────────────────────────────────────────────────────────────┘
-Step 8: READY
-    ├─ check_write_target before each Edit/Write
-    └─ Implementation
-
-Step 8.5: POST_IMPL_VERIFY
-    ├─ Select verifier based on file types
-    ├─ Run verifier prompts (.code-intel/verifiers/)
-    ├─ Loop back to Step 8 on failure
-    └─ Intervention on 3 consecutive failures (v1.4)
-    ← skip with --no-verify
-    → submit_for_review to PRE_COMMIT
-
-┌─────────────────────────────────────────────────────────────────┐
-│ Commit & Quality Phase (Server enforced)                        │
-└─────────────────────────────────────────────────────────────────┘
-Step 9: PRE_COMMIT (garbage detection + commit preparation)
-    ├─ review_changes (review with garbage_detection.md)
-    └─ finalize_changes (keep/discard decision + commit preparation)
-       ★ v1.8: Prepare commit only (execution after QUALITY_REVIEW)
-    ← skip with --quick
-
-Step 9.5: QUALITY_REVIEW (v1.5, order changed in v1.8)
-    ├─ quality_review.md checklist
-    ├─ Issues found → submit_quality_review(issues_found=true)
-    │                → Revert to Step 8 (READY) (discard prepared commit)
-    └─ No issues → submit_quality_review(issues_found=false)
-                 → ★Commit execution happens here → Step 10
-    ← skip with --no-quality / --fast / --quick
-
-┌─────────────────────────────────────────────────────────────────┐
-│ Completion                                                      │
-└─────────────────────────────────────────────────────────────────┘
-Step 10: merge_to_base
-    └─ Merge task branch to original branch
-       Session complete, report results to user
-```
-
-### Verifier System
-
-Post-implementation verification uses verifier prompts stored in `.code-intel/verifiers/`:
-
-| Verifier | File Types | Method |
-|----------|-----------|--------|
-| `backend.md` | `.py`, `.js`, `.ts`, `.php` (non-UI) | pytest, npm test |
-| `html_css.md` | `.html`, `.css`, `.vue`, `.jsx`, `.tsx` (UI) | Playwright |
-| `generic.md` | Config, docs, other | Manual check |
-
-**Selection logic:**
-- Modified files determine verifier selection
-- Mixed file types → primary category or multiple verifiers
-- Verification failure → loop back to READY (max 3 attempts)
 
 ---
 
@@ -613,12 +496,21 @@ cd llm-helper
 Creates:
 ```
 your-project/
+├── .claude/
+│   ├── CLAUDE.md              (project rules template)
+│   ├── PARALLEL_GUIDE.md      (parallel execution guide)
+│   └── commands/              (skills: code.md, exp.md, etc.)
 └── .code-intel/
-    ├── config.json
-    ├── context.yml
-    ├── chroma/
-    ├── agreements/
-    └── logs/
+    ├── config.json            (indexing configuration)
+    ├── context.yml            (context & doc_research settings)
+    ├── task_planning.md       (task decomposition guide, v1.11)
+    ├── agreements/            (NL→Symbol pairs)
+    ├── chroma/                (ChromaDB)
+    ├── logs/                  (DecisionLog, OutcomeLog)
+    ├── verifiers/             (verification prompts)
+    ├── doc_research/          (document research prompts)
+    ├── review_prompts/        (garbage detection, quality review)
+    └── interventions/         (intervention prompts)
 ```
 
 ### Step 3: Configure .mcp.json
@@ -636,13 +528,14 @@ your-project/
 }
 ```
 
-### Step 4: Copy Skills (optional)
+### Step 4: Restart Claude Code
+
+`init-project.sh` automatically copies skill files to `.claude/commands/`, so manual copying is not required.
+To update skills only for an existing project:
 
 ```bash
-cp /path/to/llm-helper/.claude/commands/*.md /path/to/your-project/.claude/commands/
+cp /path/to/llm-helper/.claude/commands/code.md /path/to/your-project/.claude/commands/
 ```
-
-### Step 5: Restart Claude Code
 
 ---
 
@@ -666,7 +559,6 @@ cp /path/to/llm-helper/.claude/commands/*.md /path/to/your-project/.claude/comma
 ### context.yml
 
 ```yaml
-# Layer 1: Project rules (always applied)
 project_rules:
   source: "CLAUDE.md"
   summary: |
@@ -674,9 +566,7 @@ project_rules:
     - Use Service layer for business logic
     DON'T:
     - Write complex logic in Controllers
-  content_hash: "abc123..."
 
-# Layer 2: Document research settings
 doc_research:
   enabled: true
   docs_path:
@@ -684,14 +574,11 @@ doc_research:
   default_prompts:
     - "default.md"
 
-# Impact analysis document search
 document_search:
   include_patterns:
     - "**/*.md"
   exclude_patterns:
     - "node_modules/**"
-
-last_synced: "2025-01-18T10:00:00"
 ```
 
 ---
@@ -702,106 +589,78 @@ last_synced: "2025-01-18T10:00:00"
 
 | Module | File | Responsibility |
 |--------|------|----------------|
-| SessionState | `tools/session.py` | Session state, phase transitions |
+| SessionState | `tools/session.py` | Session state, phase transitions, task management |
 | QueryFrame | `tools/query_frame.py` | NL → structured query |
 | ChromaDB Manager | `tools/chromadb_manager.py` | Forest/Map management |
 | ImpactAnalyzer | `tools/impact_analyzer.py` | Change impact analysis |
-| ContextProvider | `tools/context_provider.py` | Project rules & doc research |
+| ContextProvider | `tools/context_provider.py` | Project rules & document research |
 | BranchManager | `tools/branch_manager.py` | Git branch isolation |
 
 ### Key Data Structures
 
 ```python
+class Phase(Enum):
+    BRANCH_INTERVENTION = auto()   # Step 2
+    DOCUMENT_RESEARCH = auto()     # Step 3
+    QUERY_FRAME = auto()           # Step 4
+    EXPLORATION = auto()           # Step 5
+    Q1 = auto()                    # Step 6
+    SEMANTIC = auto()              # Step 7
+    Q2 = auto()                    # Step 8
+    VERIFICATION = auto()          # Step 9
+    Q3 = auto()                    # Step 10
+    IMPACT_ANALYSIS = auto()       # Step 11
+    READY = auto()                 # Steps 12-14
+    POST_IMPL_VERIFY = auto()      # Step 15
+    VERIFY_INTERVENTION = auto()   # Step 16
+    PRE_COMMIT = auto()            # Step 17
+    QUALITY_REVIEW = auto()        # Step 18
+    MERGE = auto()                 # Step 19
+
 class SessionState:
     session_id: str
-    intent: str           # IMPLEMENT/MODIFY/INVESTIGATE/QUESTION
-    phase: Phase          # Current phase
+    intent: str                    # IMPLEMENT/MODIFY/INVESTIGATE/QUESTION
+    phase: Phase                   # Current phase
     query_frame: QueryFrame
-    task_branch_enabled: bool
-    gate_level: str       # full/auto (v1.10)
-    phase_assessments: dict  # Record of each checkpoint (v1.10)
-
-class Phase(Enum):
-    EXPLORATION = "exploration"
-    SEMANTIC = "semantic"
-    VERIFICATION = "verification"        # v1.10: Separated
-    IMPACT_ANALYSIS = "impact_analysis"  # v1.10: Separated
-    READY = "ready"
-    PRE_COMMIT = "pre_commit"
-    QUALITY_REVIEW = "quality_review"   # v1.5
+    gate_level: str                # full/auto
+    # v1.11: flags
+    fast_mode: bool
+    quick_mode: bool
+    no_doc: bool
+    no_verify: bool
+    no_quality: bool
+    no_intervention: bool
+    # v1.11: task management
+    tasks: list[TaskModel]
+    # v1.11: safety valve counters
+    intervention_count: int
+    quality_revert_count: int
 
 @dataclass
-class DocResearchConfig:
-    enabled: bool = True
-    docs_path: list[str]
-    default_prompts: list[str]
-```
-
-### Data Flow
-
-```
-[User Request]
-    ↓
-[/code skill] → [start_session] → [SessionState]
-    ↓                                   ↓
-[DOCUMENT_RESEARCH] ← [Task tool + Explore agent]
-    ↓
-[set_query_frame] → [QueryFrame with quote verification]
-    ↓
-[begin_phase_gate] → [Stale branch check]
-    ↓
-[EXPLORATION] → [find_definitions/references] → [submit_exploration]
-    ↓
-[Symbol Validation] → [Embedding similarity check]
-    ↓
-[SEMANTIC/VERIFICATION] → (if needed)
-    ↓
-[IMPACT_ANALYSIS] → [analyze_impact] → [submit_impact_analysis]
-    ↓
-[READY] → [check_write_target] → [Edit/Write]
-    ↓
-[POST_IMPL_VERIFY] → [verifiers/*.md] → (3 failures → intervention)
-    ↓
-[PRE_COMMIT] → [review_changes] → [finalize_changes]
-    ↓
-[QUALITY_REVIEW] → [quality_review.md] → (revert on issues)
-    ↓
-[merge_to_base] (to original branch)
-```
-
-### Improvement Cycle
-
-```python
-# Automatic failure detection at /code start
-record_outcome(
-    session_id="...",
-    outcome="failure",
-    phase_at_outcome="READY",
-    analysis={"root_cause": "...", "user_feedback": "..."}
-)
-
-# Failure pattern analysis
-get_improvement_insights(limit=100)
-# Returns: tool_failure_correlation, risk_level_correlation, etc.
+class TaskModel:
+    id: str
+    description: str
+    status: str                    # pending/completed
+    failure_count: int = 0
+    revert_reason: str = ""
 ```
 
 ---
 
 ## CHANGELOG
 
-For version history and detailed changes:
-
 | Version | Description | Link |
 |---------|-------------|------|
-| v1.10 | Individual Phase Checks (individual necessity checks before each phase, VERIFICATION/IMPACT separation, gate_level redesign - saves 20-60s) | [v1.10](updates/v1.10_ja.md) |
-| v1.9 | Performance Optimization (sync_index batch, VERIFICATION+IMPACT integration - saves 15-20s) | [v1.9](updates/v1.9_ja.md) |
+| v1.11 | Unified submit_phase & task orchestration (17 tools → 1, compaction resilience, server-enforced task management) | [v1.11](updates/v1.11_ja.md) |
+| v1.10 | Individual Phase Checks (per-phase necessity checks, VERIFICATION/IMPACT separation, gate_level redesign) | [v1.10](updates/v1.10_ja.md) |
+| v1.9 | Performance Optimization (sync_index batch processing - saves 15-20s) | [v1.9](updates/v1.9_ja.md) |
 | v1.8 | Exploration-Only Mode (--only-explore) | [v1.8](updates/v1.8_ja.md) |
 | v1.7 | Parallel Execution (search_text, Read, Grep - saves 27-35s) | [v1.7](updates/v1.7_ja.md) |
 | v1.6 | Branch Lifecycle (stale warning, begin_phase_gate) | [v1.6](updates/v1.6_ja.md) |
-| v1.5 | Quality Review (revert-to-READY loop) | [v1.5](updates/v1.5_ja.md) |
+| v1.5 | Quality Review | [v1.5](updates/v1.5_ja.md) |
 | v1.4 | Intervention System | [v1.4](updates/v1.4_ja.md) |
 | v1.3 | Document Research, Markup Cross-Reference | [v1.3](updates/v1.3_ja.md) |
 | v1.2 | Git Branch Isolation | [v1.2](updates/v1.2_ja.md) |
 | v1.1 | Impact Analysis, Context Provider | [v1.1](updates/v1.1_ja.md) |
 
-For documentation rules, see [DOCUMENTATION_RULES.md](DOCUMENTATION_RULES.md).
+For documentation management rules, see [DOCUMENTATION_RULES.md](DOCUMENTATION_RULES.md).

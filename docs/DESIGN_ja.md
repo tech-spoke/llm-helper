@@ -496,12 +496,21 @@ cd llm-helper
 作成されるもの:
 ```
 your-project/
+├── .claude/
+│   ├── CLAUDE.md              (プロジェクトルールテンプレート)
+│   ├── PARALLEL_GUIDE.md      (並列実行ガイド)
+│   └── commands/              (スキル: code.md, exp.md 等)
 └── .code-intel/
-    ├── config.json
-    ├── context.yml
-    ├── chroma/
-    ├── agreements/
-    └── logs/
+    ├── config.json            (インデックス設定)
+    ├── context.yml            (コンテキスト & doc_research 設定)
+    ├── task_planning.md       (タスク分割ガイド, v1.11)
+    ├── agreements/            (NL→Symbol ペア)
+    ├── chroma/                (ChromaDB)
+    ├── logs/                  (DecisionLog, OutcomeLog)
+    ├── verifiers/             (検証プロンプト)
+    ├── doc_research/          (ドキュメント調査プロンプト)
+    ├── review_prompts/        (ゴミ検出, 品質レビュー)
+    └── interventions/         (介入プロンプト)
 ```
 
 ### Step 3: .mcp.json 設定
@@ -519,13 +528,14 @@ your-project/
 }
 ```
 
-### Step 4: スキルをコピー
+### Step 4: Claude Code を再起動
+
+`init-project.sh` が `.claude/commands/` へスキルファイルを自動コピーするため、手動コピーは不要。
+既存プロジェクトでスキルのみ更新する場合:
 
 ```bash
 cp /path/to/llm-helper/.claude/commands/code.md /path/to/your-project/.claude/commands/
 ```
-
-### Step 5: Claude Code を再起動
 
 ---
 
@@ -618,6 +628,7 @@ class SessionState:
     quick_mode: bool
     no_doc: bool
     no_verify: bool
+    no_quality: bool
     no_intervention: bool
     # v1.11: タスク管理
     tasks: list[TaskModel]

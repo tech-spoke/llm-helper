@@ -1,6 +1,6 @@
 # Code Intelligence MCP Server
 
-> **Current Version: v1.10**
+> **Current Version: v1.11**
 
 Cursor IDE のようなコードインテリジェンス機能をオープンソースツールで実現する MCP サーバー。
 
@@ -45,6 +45,10 @@ LLM に判断をさせない。守らせるのではなく、守らないと進�
 | 並列実行最適化（v1.7） | search_text 複数パターン対応、Read/Grep 並列実行で27-35秒削減 |
 | 探索のみモード（v1.8） | Intent自動判定（INVESTIGATE/QUESTION）+ --only-explore フラグ、ブランチ作成なし |
 | 個別フェーズチェック（v1.10） | 各フェーズ前の必要性チェック、VERIFICATION/IMPACT分離、gate_level再編で20-60秒削減 |
+| submit_phase 統一（v1.11） | 17個のsubmit_*ツール→1個に統一、コンパクト耐性の基盤 |
+| タスクオーケストレーション（v1.11） | サーバー強制のタスク管理、LLM がスキップ不可 |
+| コンパクト耐性設計（v1.11） | 4層の耐性（ツール・レスポンス・リカバリ・防御） |
+| 安全弁（v1.11） | サーバー側カウンターで無限ループ防止 |
 
 ---
 
@@ -90,168 +94,144 @@ LLM に判断をさせない。守らせるのではなく、守らないと進�
 
 ---
 
-## 処理フロー
+## 処理フロー（19 Steps）
 
-処理は3つのレイヤーで構成されます:
+v1.11 では全フェーズの出口を `submit_phase` に統一。LLM 側前処理（Flag Check, Intent Classification）の後、全ステップが `start_session` → `submit_phase` (×N) → SESSION_COMPLETE で完結。
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│  1. 準備フェーズ（Skill 制御）                                              │
-│     Flag Check → Failure Check → Intent → Session Start                    │
-│     → DOCUMENT_RESEARCH → QueryFrame                                       │
-│     ← --no-doc-research でスキップ可                                       │
+│  セッション開始                                                             │
+│  Step 1: start_session（Intent 判定 → 初期化）                             │
+│  Step 2: BRANCH_INTERVENTION（stale 検出時のみ）                           │
+│  Step 3: DOCUMENT_RESEARCH ← --no-doc でスキップ                          │
+│  Step 4: QUERY_FRAME                                                       │
 └─────────────────────────────────────────────────────────────────────────────┘
                                     ↓
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│  1.5. フェーズゲート開始（v1.6）                                            │
-│     begin_phase_gate → [Stale ブランチ?] → [ユーザー介入] → 継続           │
+│  探索フェーズ ← --fast/--quick でスキップ                                  │
+│  Step 5:  EXPLORATION                                                      │
+│  Step 6:  Q1（SEMANTIC 必要性評価）                                        │
+│  Step 7:  SEMANTIC（Q1=true 時のみ）                                       │
+│  Step 8:  Q2（VERIFICATION 必要性評価）                                    │
+│  Step 9:  VERIFICATION（Q2=true 時のみ）                                   │
+│  Step 10: Q3（IMPACT_ANALYSIS 必要性評価）                                 │
+│  Step 11: IMPACT_ANALYSIS（Q3=true 時のみ / 調査: SESSION_COMPLETE）       │
 └─────────────────────────────────────────────────────────────────────────────┘
                                     ↓
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│  2. フェーズゲート（Server 強制）v1.10: 個別チェック方式                    │
-│     EXPLORATION → Q1チェック → SEMANTIC* → Q2チェック → VERIFICATION*       │
-│     → Q3チェック → IMPACT_ANALYSIS*                                        │
-│     → [--only-explore で終了] or [READY → POST_IMPL_VERIFY → PRE_COMMIT]  │
-│     → QUALITY_REVIEW                                                       │
-│     ← --quick で探索スキップ、--no-verify/--no-quality で各フェーズスキップ │
-│     ← --gate=full で全チェック無視、--gate=auto で都度チェック（デフォルト） │
-└─────────────────────────────────────────────────────────────────────────────┘
-                                    ↓
-┌─────────────────────────────────────────────────────────────────────────────┐
-│  3. 完了                                                                    │
-│     Finalize & Merge                                                       │
+│  実装フェーズ                                                               │
+│  Step 12: READY（タスク計画 + ブランチ作成）                               │
+│  Step 13: READY（実装 ×N）                                                 │
+│  Step 14: READY（全タスク完了確認）                                        │
+│  Step 15: POST_IMPL_VERIFY ← --no-verify でスキップ / fail→Step 12       │
+│  Step 16: VERIFY_INTERVENTION（failure_count ≥ 3 時のみ）                  │
+│  Step 17: PRE_COMMIT                                                       │
+│  Step 18: QUALITY_REVIEW ← --no-quality でスキップ                        │
+│  Step 19: MERGE → SESSION_COMPLETE                                         │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 1. 準備フェーズ（Skill 制御）
+### セッション開始（Steps 1-4）
 
-Skill プロンプト（code.md）が制御。サーバーは関与しない。
+| Step | Phase | 内容 | スキップ |
+|------|-------|------|---------|
+| 1 | — | Intent 判定 → `start_session` で初期化 | - |
+| 2 | BRANCH_INTERVENTION | stale ブランチ検出時にユーザーへ選択肢提示 | stale 検出時のみ |
+| 3 | DOCUMENT_RESEARCH | サブエージェントで設計ドキュメントを調査 | `--no-doc` |
+| 4 | QUERY_FRAME | NL → 構造化スロット抽出 | - |
 
-| ステップ | 内容 | スキップ |
-|---------|------|---------|
-| Flag Check | コマンドオプション（`--quick` 等）をパース | - |
-| Failure Check | 前回セッションが失敗したか自動検出、OutcomeLog に記録 | - |
-| Intent | IMPLEMENT / MODIFY / INVESTIGATE / QUESTION を判定 | - |
-| Session Start | セッション開始、project_rules 取得（ブランチ作成は v1.6 で分離） | - |
-| **DOCUMENT_RESEARCH** | サブエージェントで設計ドキュメントを調査、mandatory_rules 抽出 | `--no-doc-research` |
-| QueryFrame | ユーザー要求を構造化スロットに分解、Quote 検証 | - |
+### 探索フェーズ（Steps 5-11）
 
-### 1.5. フェーズゲート開始（v1.6、v1.11）
+| Step | Phase | 内容 | スキップ |
+|------|-------|------|---------|
+| 5 | EXPLORATION | code-intel ツールで探索 | `--fast`/`--quick` |
+| 6 | Q1 | SEMANTIC 必要性を評価 | サーバー判定で 7 をスキップ可 |
+| 7 | SEMANTIC | semantic_search で追加情報収集 | Q1=false 時スキップ |
+| 8 | Q2 | VERIFICATION 必要性を評価 | サーバー判定で 9 をスキップ可 |
+| 9 | VERIFICATION | 仮説検証 | Q2=false 時スキップ |
+| 10 | Q3 | IMPACT_ANALYSIS 必要性を評価 | サーバー判定で 11 をスキップ可 |
+| 11 | IMPACT_ANALYSIS | 影響分析 | Q3=false 時スキップ / 調査: SESSION_COMPLETE |
 
-準備フェーズの後、`begin_phase_gate` がフェーズゲートを開始（ブランチ作成はREADY遷移時に延期）。
+### 実装フェーズ（Steps 12-19）
 
-**Stale ブランチ検出:**
-- タスクブランチ上にいない状態で `llm_task_*` ブランチが存在する場合、ユーザー介入が必要
-- 3つの選択肢: 削除、マージ、そのまま継続
+| Step | Phase | 内容 | 備考 |
+|------|-------|------|------|
+| 12 | READY | タスク分解・計画 | ブランチ作成 |
+| 13 | READY | Edit/Write で実装 | タスク数分繰り返し (×N) |
+| 14 | READY | 全タスク完了を確認 | 未完了時ブロック |
+| 15 | POST_IMPL_VERIFY | verifier プロンプト実行 | fail 時 Step 12 差戻し |
+| 16 | VERIFY_INTERVENTION | 介入プロンプト読み取り・実行 | failure_count ≥ 3 時のみ |
+| 17 | PRE_COMMIT | review_changes でレビュー | |
+| 18 | QUALITY_REVIEW | 品質チェック | quality_revert_count ≥ 3 → 強制完了 |
+| 19 | MERGE | マージ → SESSION_COMPLETE | |
 
-**ブランチ作成（v1.11）:**
-- ブランチはREADYフェーズ遷移時に作成（begin_phase_gateでは作成しない）
-- 探索が完了してから実装にコミットできる
+### フェーズマトリクス
 
-### 2. フェーズゲート（Server 強制）
+サーバーが各 submit_phase レスポンスで次フェーズを決定。LLM はフラグを知る必要がない。
 
-MCP サーバーがフェーズ遷移を強制。LLM が勝手にスキップできない。
-
-#### フェーズマトリックス
-
-| オプション | DOC調査 | ソース探索 | 実装 | 検証 | 介入 | ゴミ取 | 品質 | ブランチ |
+| オプション | DOC調査 | 探索 | 実装 | 検証 | 介入 | ゴミ取 | 品質 | ブランチ |
 |-----------|:----:|:----:|:----:|:----:|:------:|:----:|:-------:|:-------:|
 | (デフォルト) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `--only-explore` / `-e` | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| 調査 intent | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | `--no-verify` | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | ✅ |
 | `--no-quality` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
 | `--fast` / `-f` | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
 | `--quick` / `-q` | ✅ | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
-| `--no-doc-research` | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `--no-doc` | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 
 **凡例**:
-- **DOC調査**: DOCUMENT_RESEARCH (Step 2.5)
-- **ソース探索**: EXPLORATION, SEMANTIC, VERIFICATION, IMPACT_ANALYSIS (Steps 4-7)
-
-### フェーズ別ツール許可（v1.10: 個別チェック方式）
-
-| フェーズ | 許可 | 禁止 |
-|----------|------|------|
-| EXPLORATION | code-intel ツール (query, find_definitions, find_references, search_text) | semantic_search |
-| Q1/Q2/Q3チェック | check_phase_necessity | - |
-| SEMANTIC | semantic_search | code-intel |
-| VERIFICATION | code-intel ツール | semantic_search |
-| IMPACT_ANALYSIS | analyze_impact, code-intel | semantic_search |
-| READY | Edit, Write, Bash（探索済みファイルのみ） | - |
-| POST_IMPL_VERIFY | 検証ツール (Playwright, pytest 等) | - |
-| PRE_COMMIT | review_changes, finalize_changes | - |
-| QUALITY_REVIEW | submit_quality_review（Edit/Write 禁止） | - |
+- **DOC調査**: DOCUMENT_RESEARCH (Step 3)
+- **探索**: EXPLORATION〜IMPACT_ANALYSIS (Steps 5-11)
+- **調査 intent**: INVESTIGATE / QUESTION（`--only-explore` と同等）
 
 ---
 
 ## ツール一覧
 
-### コードインテリジェンス
-
-| ツール | 用途 |
-|--------|------|
-| `query` | 自然言語でのインテリジェントクエリ |
-| `find_definitions` | シンボル定義検索 (ctags) |
-| `find_references` | シンボル参照検索 (ripgrep) |
-| `search_text` | テキスト検索 (ripgrep)、複数パターン並列検索対応（v1.7） |
-| `search_files` | ファイルパターン検索 (glob) |
-| `analyze_structure` | コード構造解析 (tree-sitter) |
-| `get_symbols` | シンボル一覧取得 |
-| `get_function_at_line` | 指定行の関数を取得 |
-| `sync_index` | ソースコードを ChromaDB にインデックス |
-| `semantic_search` | 地図/森の統合ベクトル検索 |
-| `analyze_impact` | 変更の影響範囲分析（v1.1） |
-
 ### セッション管理
 
 | ツール | 用途 |
 |--------|------|
-| `start_session` | セッション開始 |
-| `set_query_frame` | QueryFrame 設定（Quote 検証） |
-| `get_session_status` | 現在のフェーズ・状態を確認 |
-| `check_phase_necessity` | 各フェーズ前の必要性チェック（Q1/Q2/Q3）（v1.10） |
-| `validate_symbol_relevance` | Embedding 検証 |
-| `confirm_symbol_relevance` | シンボル検証結果を確認 |
-| `submit_semantic` | SEMANTIC 完了 |
-| `submit_verification` | VERIFICATION 完了 |
-| `submit_exploration` | EXPLORATION 完了 |
-| `submit_impact_analysis` | IMPACT_ANALYSIS 完了（v1.1） |
-| `check_write_target` | Write 可否確認 |
-| `add_explored_files` | 探索済みファイル追加 |
-| `revert_to_exploration` | EXPLORATION に戻る |
-| `update_context` | コンテキスト要約を更新（v1.1） |
+| `start_session` | intent, query, flags でセッション開始 |
+| `submit_phase` | **全フェーズの唯一の出口** — サーバーが次フェーズを決定（v1.11） |
+| `get_session_status` | 現在のフェーズ + instruction + expected_payload を取得（リカバリ用） |
 
-### ゴミ検出 & 品質レビュー（v1.2, v1.5）
+### コード探索
 
 | ツール | 用途 |
 |--------|------|
-| `submit_for_review` | PRE_COMMIT フェーズに遷移 |
-| `review_changes` | 全ファイル変更を表示 |
-| `finalize_changes` | ファイルを保持/破棄してコミット |
-| `submit_quality_review` | 品質レビュー結果を報告（v1.5） |
-| `merge_to_base` | タスクブランチを元のブランチにマージ |
+| `search_text` | テキストパターン検索（並列対応） |
+| `find_definitions` | シンボル定義検索 (ctags) |
+| `find_references` | 参照検索 (ripgrep) |
+| `analyze_structure` | コード構造分析 (tree-sitter) |
+| `get_symbols` | ファイルのシンボル一覧取得 |
+| `search_files` | ファイル名パターン検索 |
+| `semantic_search` | Forest/Map のベクトル検索（SEMANTIC フェーズ） |
+| `query` | 汎用自然言語クエリ |
 
-### ブランチライフサイクル（v1.6、v1.11）
-
-| ツール | 用途 |
-|--------|------|
-| `begin_phase_gate` | フェーズゲート開始（stale チェック）。v1.11: ブランチ作成はREADYに延期 |
-| `cleanup_stale_branches` | ベースブランチにチェックアウトし、全 `llm_task_*` ブランチを削除 |
-
-### 介入システム（v1.4）
+### 実装制御
 
 | ツール | 用途 |
 |--------|------|
-| `record_verification_failure` | 検証失敗を記録 |
-| `get_intervention_status` | 介入の必要性を判定 |
-| `record_intervention_used` | 使用した介入プロンプトを記録 |
+| `check_write_target` | ファイル修正可能か検証 |
+| `add_explored_files` | 探索済みリストにファイル追加 |
+| `revert_to_exploration` | EXPLORATION フェーズに戻る |
+| `review_changes` | PRE_COMMIT で全ファイル変更を表示 |
 
-### 改善サイクル
+### ブランチ管理
 
 | ツール | 用途 |
 |--------|------|
-| `record_outcome` | 結果記録（自動/手動） |
-| `get_outcome_stats` | 統計取得 |
+| `cleanup_stale_branches` | 全 `llm_task_*` ブランチを削除 |
+
+### インデックス & 学習
+
+| ツール | 用途 |
+|--------|------|
+| `sync_index` | ChromaDB インデックスを同期 |
+| `update_context` | context.yml の要約を更新 |
+| `record_outcome` | 成功/失敗を記録 |
+| `get_outcome_stats` | 学習統計を取得 |
 
 ---
 
@@ -292,6 +272,7 @@ your-project/
 └── .code-intel/
     ├── config.json        ← 設定
     ├── context.yml        ← プロジェクトルール・ドキュメント調査設定（自動生成）
+    ├── task_planning.md   ← タスク分割ガイド（v1.11）
     ├── chroma/            ← ChromaDB データ（自動生成）
     ├── agreements/        ← 成功パターン保存
     ├── logs/              ← DecisionLog, OutcomeLog
@@ -555,28 +536,29 @@ MCP サーバーを再読み込みするために再起動。
 - 全ての `llm_task_*` ブランチを削除
 - セッション中断（Ctrl+C、クラッシュ等）後に使用してクリーンな状態から再開
 
-#### 通常の実行フロー
+#### 通常の実行フロー（19 Steps）
 
-スキルが自動的に：
-1. フラグチェック
-2. 失敗チェック（前回失敗を自動検出・記録）
-3. Intent 判定
-4. セッション開始（自動同期、必須コンテキスト）
-5. DOCUMENT_RESEARCH（v1.3） ← `--no-doc-research` でスキップ
-6. QueryFrame 抽出・検証
-7. EXPLORATION（find_definitions, find_references 等） ← `--quick` でスキップ
-8. Q1チェック（v1.10 - SEMANTIC必要性判断） ← `--gate=full` で無視
-9. SEMANTIC（Q1=YES の場合のみ） ← `--quick` でスキップ
-10. Q2チェック（v1.10 - VERIFICATION必要性判断） ← `--gate=full` で無視
-11. VERIFICATION（Q2=YES の場合のみ） ← `--quick` でスキップ
-12. Q3チェック（v1.10 - IMPACT_ANALYSIS必要性判断） ← `--gate=full` で無視
-13. IMPACT ANALYSIS（Q3=YES の場合のみ） ← `--quick` でスキップ
-14. READY（実装）
-15. POST_IMPLEMENTATION_VERIFICATION ← `--no-verify` でスキップ
-16. INTERVENTION（v1.4） ← 検証3回連続失敗で発動
-17. GARBAGE DETECTION ← `--quick` でスキップ
-18. QUALITY REVIEW（v1.5） ← `--no-quality` / `--fast` / `--quick` でスキップ
-19. Finalize & Merge
+v1.11 では全フェーズの出口が `submit_phase` に統一。スキルが自動的に：
+
+1. **start_session**: Intent 判定 → セッション初期化
+2. **BRANCH_INTERVENTION**: stale ブランチ検出時にユーザー介入
+3. **DOCUMENT_RESEARCH**: 設計ドキュメント調査 ← `--no-doc` でスキップ
+4. **QUERY_FRAME**: NL → 構造化スロット抽出
+5. **EXPLORATION**: code-intel ツールで探索 ← `--fast`/`--quick` でスキップ
+6. **Q1**: SEMANTIC 必要性評価 ← `--gate=full` で無視
+7. **SEMANTIC**: 追加情報収集（Q1=true 時のみ）
+8. **Q2**: VERIFICATION 必要性評価 ← `--gate=full` で無視
+9. **VERIFICATION**: 仮説検証（Q2=true 時のみ）
+10. **Q3**: IMPACT_ANALYSIS 必要性評価 ← `--gate=full` で無視
+11. **IMPACT_ANALYSIS**: 影響分析（Q3=true 時のみ）
+12. **READY（計画）**: タスク分解 + ブランチ作成
+13. **READY（実装）**: Edit/Write で実装（×N）
+14. **READY（完了）**: 全タスク完了確認
+15. **POST_IMPL_VERIFY**: 検証 ← `--no-verify` でスキップ / fail→Step 12
+16. **VERIFY_INTERVENTION**: 介入（failure_count ≥ 3 時のみ）
+17. **PRE_COMMIT**: レビュー
+18. **QUALITY_REVIEW**: 品質チェック ← `--no-quality` / `--fast` / `--quick` でスキップ
+19. **MERGE**: マージ → SESSION_COMPLETE
 
 ### 直接ツールを呼び出す
 
@@ -671,14 +653,15 @@ your-project/
 ├── .mcp.json               ← MCP 設定（手動設定）
 ├── .code-intel/            ← Code Intel データ（自動生成）
 │   ├── config.json
-│   ├── context.yml         ← 必須コンテキスト設定（v1.1）
+│   ├── context.yml         ← コンテキスト設定
+│   ├── task_planning.md    ← タスク分割ガイド（v1.11）
 │   ├── chroma/             ← ChromaDB データ
 │   ├── agreements/         ← 成功ペア
 │   ├── logs/               ← DecisionLog, OutcomeLog
 │   ├── verifiers/          ← 検証プロンプト
-│   ├── doc_research/       ← ドキュメント調査プロンプト（v1.3）
-│   ├── interventions/      ← 介入プロンプト（v1.4）
-│   ├── review_prompts/     ← 品質レビュープロンプト（v1.5）
+│   ├── doc_research/       ← ドキュメント調査プロンプト
+│   ├── interventions/      ← 介入プロンプト
+│   ├── review_prompts/     ← 品質レビュープロンプト
 │   └── sync_state.json
 ├── .claude/commands/       ← スキル（任意コピー）
 └── src/                    ← あなたのソースコード
@@ -702,6 +685,7 @@ your-project/
 
 | Version | Description | Link |
 |---------|-------------|------|
+| v1.11 | submit_phase 統一 & タスクオーケストレーション（17個のツール→1個、コンパクト耐性、サーバー強制タスク管理） | [v1.11](docs/updates/v1.11_ja.md) |
 | v1.10 | Individual Phase Checks（各フェーズ前の個別チェック、VERIFICATION/IMPACT分離、gate_level再編 - 20-60秒削減） | [v1.10](docs/updates/v1.10_ja.md) |
 | v1.9 | sync_index バッチ処理、VERIFICATION+IMPACT_ANALYSIS統合（15-20秒削減） | [v1.9](docs/updates/v1.9_ja.md) |
 | v1.8 | Exploration-Only Mode（Intent自動判定 + --only-explore、ブランチ作成なし） | [v1.8](docs/updates/v1.8_ja.md) |
