@@ -1,4 +1,9 @@
-# Python
+# =============================================================
+# .gitignore — C分類（どちらのリポジトリにも追跡しない）
+# 参照: docs/updates/v1.14_ja.md「ファイル分類 > C」
+# =============================================================
+
+# Python 環境
 __pycache__/
 *.py[cod]
 *$py.class
@@ -9,44 +14,53 @@ env/
 .venv/
 .env
 
+# OS
+.DS_Store
+Thumbs.db
+*:Zone.Identifier
+
 # IDE
 .vscode/
 .idea/
 *.swp
 *.swo
 
-# Logs
+# ログ
 logs/
 *.log
 
-# OS
-.DS_Store
-Thumbs.db
-
-# Project specific
-*.jsonl
-.mcp.json
-*:Zone.Identifier
-
-# Database
+# データベース
 vectors.db
 *.db
 
-# Models (downloaded/generated)
+# モデル（大容量・ダウンロードで再現可能）
 models/
 
-# Code Intel MCP Server v1.0
-.code-intel/
+# 実行時生成物: .code-intel/**
+**/.code-intel/*
+!templates/code-intel/
+!templates/code-intel/**
+!templates/skills/
+!templates/skills/**
 config.json
+!templates/code-intel/config.json
 
-# Old documentation (archived)
+# LLM コマンド生成物（init-project.sh が生成）
+.claude/commands/
+
+# LLM ローカル設定（環境依存）
+.claude/settings.local.json
+
+# Codex ローカル
+.codex/
+
+# Playwright
+.playwright-mcp/
+
+# プロジェクト固有の生成物
+*.jsonl
+.mcp.json
+
+# ローカル専用ドキュメント（追跡防止）
 docs/old/
-
-# Qiita articles (private, not part of repo)
 docs/qiita/
-
-# Archived/unused command files
-.claude/commands/bak/
-
-# OverlayFS session directories
-.overlay/

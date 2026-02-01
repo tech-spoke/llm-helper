@@ -1,0 +1,24 @@
+{
+  "version": "3.9",
+  "embedding_model": "multilingual-e5-small",
+  "source_dirs": ["tools"],
+  "exclude_patterns": [
+    "**/node_modules/**",
+    "**/__pycache__/**",
+    "**/venv/**",
+    "**/vendor/**",
+    "**/.git/**",
+    "**/.code-intel/**"
+  ],
+  "chunk_strategy": "ast",
+  "chunk_max_tokens": 512,
+  "sync_ttl_hours": 1,
+  "sync_on_start": true,
+  "max_chunks": 10000,
+  "search_weights": {
+    "vector": 0.4,
+    "keyword": 0.2,
+    "definition": 0.3,
+    "reference": 0.1
+  }
+}

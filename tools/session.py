@@ -13,11 +13,17 @@ v1.1: Context-Aware Guardrails
 - trigger_condition 欠損時のリスク緩和
 """
 
+import json
+import os
+import subprocess
+import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum, auto
 from pathlib import Path
 from typing import Literal
+
+import yaml
 
 
 # =============================================================================
@@ -552,93 +558,208 @@ PHASE_STEP_MAP: dict[str, int] = {
 EXPECTED_PAYLOADS: dict[str, dict] = {
     "BRANCH_INTERVENTION": {
         "choice": "str: 'delete' | 'merge' | 'continue'",
+        "tools_used": "list[str]",
+        "summary": "str",
     },
     "DOCUMENT_RESEARCH": {
         "documents_reviewed": "list[str]",
+        "tools_used": "list[str]",
+        "summary": "str",
     },
     "QUERY_FRAME": {
         "action_type": "str",
         "target_symbols": "list[str]",
         "scope": "str",
         "constraints": "str",
+        "tools_used": "list[str]",
+        "summary": "str",
     },
     "EXPLORATION": {
         "explored_files": "list[str]",
         "findings": "list[str]",
+        "tools_used": "list[str]",
+        "summary": "str",
     },
     "Q1": {
         "needs_more_information": "bool",
         "reason": "str",
+        "tools_used": "list[str]",
+        "summary": "str",
     },
     "SEMANTIC": {
+        "search_query": "str",
         "search_results": "list[str]",
+        "tools_used": "list[str]",
+        "summary": "str",
     },
     "Q2": {
         "has_unverified_hypotheses": "bool",
         "reason": "str",
+        "tools_used": "list[str]",
+        "summary": "str",
     },
     "VERIFICATION": {
         "hypotheses_verified": "list[{hypothesis, result, evidence}]",
+        "tools_used": "list[str]",
+        "summary": "str",
     },
     "Q3": {
         "needs_impact_analysis": "bool",
         "reason": "str",
+        "tools_used": "list[str]",
+        "summary": "str",
     },
     "IMPACT_ANALYSIS": {
         "impact_summary": "dict",
+        "tools_used": "list[str]",
+        "summary": "str",
     },
     "READY_PLAN": {
         "tasks": "list[{id, description, status, failure_count?, revert_reason?}]",
+        "tools_used": "list[str]",
+        "summary": "str",
     },
     "READY_IMPL": {
         "task_id": "str",
         "summary": "str",
+        "tools_used": "list[str]",
     },
-    "READY_COMPLETE": {},
+    "READY_COMPLETE": {
+        "summary": "str",
+    },
     "POST_IMPL_VERIFY": {
+        "verifier_used": "str",
         "passed": "bool",
         "failed_tasks": "list[str] (if passed=false)",
         "details": "str",
+        "tools_used": "list[str]",
+        "summary": "str",
     },
     "VERIFY_INTERVENTION": {
         "prompt_used": "str",
         "action_taken": "str",
+        "tools_used": "list[str]",
+        "summary": "str",
     },
     "PRE_COMMIT": {
+        "review_prompt_used": "str",
         "reviewed_files": "list[str]",
         "commit_message": "str",
+        "tools_used": "list[str]",
+        "summary": "str",
     },
     "QUALITY_REVIEW": {
+        "quality_prompt_used": "str",
         "quality_score": "str",
         "issues": "list[str]",
+        "tools_used": "list[str]",
+        "summary": "str",
     },
-    "MERGE": {},
+    "MERGE": {
+        "summary": "str",
+    },
 }
 
 # Phase → default instruction
 PHASE_INSTRUCTIONS: dict[str, str] = {
-    "BRANCH_INTERVENTION": "Stale ブランチが検出されました。ユーザーに選択肢を提示し、選択結果を submit_phase で送信してください。",
+    "BRANCH_INTERVENTION": "Stale ブランチが検出されました。delete/merge/continue の意味を説明して選択肢を提示し、選択結果を submit_phase で送信してください。",
     "DOCUMENT_RESEARCH": "設計文書を調査してください。完了後 submit_phase で送信してください。",
     "QUERY_FRAME": "ユーザーの指示から構造化スロットを抽出し submit_phase で送信してください。",
-    "EXPLORATION": "code-intel ツールでコードベースを探索してください。完了後 submit_phase で送信してください。",
+    "EXPLORATION": "code-intel ツールを最低2種類使って探索し、結果を submit_phase で送信してください。",
     "Q1": "SEMANTIC フェーズが必要か評価してください。submit_phase で結果を送信してください。",
     "SEMANTIC": "semantic_search で追加情報を収集してください。完了後 submit_phase で送信してください。",
     "Q2": "VERIFICATION フェーズが必要か評価してください。submit_phase で結果を送信してください。",
     "VERIFICATION": "仮説検証を実施してください。完了後 submit_phase で送信してください。",
     "Q3": "IMPACT_ANALYSIS フェーズが必要か評価してください。submit_phase で結果を送信してください。",
-    "IMPACT_ANALYSIS": "影響分析を実施してください。完了後 submit_phase で送信してください。",
+    "IMPACT_ANALYSIS": "analyze_impact を実行して影響分析を実施し、完了後 submit_phase で送信してください。",
     "READY_PLAN": "探索結果に基づきタスクを分割し、タスクリストを submit_phase で送信してください。",
-    "READY_IMPL": "次のタスクを実装し、完了を submit_phase で報告してください。",
-    "READY_COMPLETE": "全タスクが完了しました。submit_phase を空データで呼んでください。",
+    "READY_IMPL": "変更対象ファイルは事前に check_write_target を実行し、次のタスクを実装して submit_phase で報告してください。",
+    "READY_COMPLETE": "全タスクが完了しました。summary を添えて submit_phase で送信してください。",
     "POST_IMPL_VERIFY": "実装結果を検証してください。検証結果を submit_phase で送信してください。",
     "VERIFY_INTERVENTION": "介入プロンプトを読み、指示に従ってください。実行結果を submit_phase で送信してください。",
-    "PRE_COMMIT": "変更をレビューし、コミットメッセージとともに submit_phase で送信してください。",
+    "PRE_COMMIT": "review_changes で差分を取得してレビューし、コミットメッセージとともに submit_phase で送信してください。",
     "QUALITY_REVIEW": "品質チェックを実施してください。結果を submit_phase で送信してください。",
-    "MERGE": "submit_phase を空データで呼んでマージを実行してください。",
+    "MERGE": "summary を添えて submit_phase で送信し、マージを実行してください。",
 }
 
+_PHASE_CONTRACT_CACHE: dict[str, dict] = {}
+_PHASE_CONTRACT_MTIME: dict[str, float] = {}
 
-def get_phase_response(phase_name: str, step: int | None = None, extra: dict | None = None) -> dict:
+
+def _normalize_phase_contract(data: dict) -> dict[str, dict]:
+    if not isinstance(data, dict):
+        return {}
+    phases = data.get("phases")
+    if isinstance(phases, dict):
+        data = phases
+    normalized: dict[str, dict] = {}
+    for key, value in data.items():
+        if isinstance(value, dict):
+            normalized[str(key)] = value
+    return normalized
+
+
+def _load_phase_contract(repo_path: str | None) -> dict[str, dict]:
+    if not repo_path:
+        return {}
+    contract_path = Path(repo_path) / ".code-intel" / "phase_contract.yml"
+    if not contract_path.exists():
+        return {}
+
+    cache_key = str(contract_path)
+    try:
+        mtime = contract_path.stat().st_mtime
+    except OSError:
+        return {}
+
+    cached = _PHASE_CONTRACT_CACHE.get(cache_key)
+    cached_mtime = _PHASE_CONTRACT_MTIME.get(cache_key)
+    if cached is not None and cached_mtime == mtime:
+        return cached
+
+    try:
+        raw = contract_path.read_text(encoding="utf-8")
+        data = yaml.safe_load(raw)
+    except Exception:
+        return {}
+
+    normalized = _normalize_phase_contract(data if data else {})
+    _PHASE_CONTRACT_CACHE[cache_key] = normalized
+    _PHASE_CONTRACT_MTIME[cache_key] = mtime
+    return normalized
+
+
+def _apply_phase_contract_overrides(
+    response: dict,
+    payload_key: str,
+    phase_name: str,
+    repo_path: str | None,
+) -> dict:
+    contract = _load_phase_contract(repo_path)
+    if not contract:
+        return response
+
+    overrides = contract.get(payload_key) or contract.get(phase_name)
+    if not isinstance(overrides, dict):
+        return response
+
+    instruction = overrides.get("instruction")
+    if isinstance(instruction, str) and instruction.strip():
+        response["instruction"] = instruction
+
+    expected_payload = overrides.get("expected_payload")
+    if isinstance(expected_payload, dict) and expected_payload:
+        response["expected_payload"] = expected_payload
+
+    return response
+
+
+def get_phase_response(
+    phase_name: str,
+    step: int | None = None,
+    extra: dict | None = None,
+    repo_path: str | None = None,
+) -> dict:
     """
     v1.11: Generate self-contained response for a phase.
 
@@ -669,7 +790,7 @@ def get_phase_response(phase_name: str, step: int | None = None, extra: dict | N
             if k != "ready_substep":
                 response[k] = v
 
-    return response
+    return _apply_phase_contract_overrides(response, payload_key, phase_name, repo_path)
 
 
 # =============================================================================
@@ -962,6 +1083,7 @@ class SessionState:
     # v1.2: Task branch management (renamed from overlay in v1.2.1)
     task_branch_name: str | None = None  # Git branch name (llm_task_{session_id}_from_{base})
     task_branch_enabled: bool = False  # Whether task branch is active
+    branch_policy: str | None = None  # v1.13: branch handling policy (e.g., "continue")
 
     # v1.10: Gate level for phase necessity checks (simplified to 2 levels)
     _gate_level: str = field(default="auto", init=False)  # full, auto
@@ -1002,6 +1124,9 @@ class SessionState:
     tasks: list[TaskModel] = field(default_factory=list)
     ready_substep: str = "plan"  # plan, implement, complete
 
+    # v1.13: Summary-only payload persistence
+    phase_payloads: dict[str, dict] = field(default_factory=dict)
+
     # v1.11: Session flags (parsed from command options by LLM)
     no_verify: bool = False       # --no-verify
     no_quality: bool = False      # --no-quality (alias for quality_review_enabled=False)
@@ -1030,8 +1155,8 @@ class SessionState:
         Raises:
             ValueError: If value is not "full" or "auto"
         """
-        if value not in ("full", "auto"):
-            raise ValueError(f"gate_level must be 'full' or 'auto', got '{value}'")
+        if value not in ("full", "auto", "none"):
+            raise ValueError(f"gate_level must be 'full', 'auto', or 'none', got '{value}'")
         self._gate_level = value
 
     def record_tool_call_start(self, tool: str, params: dict) -> None:
@@ -1920,19 +2045,21 @@ class SessionState:
         # Build completed steps list
         completed_steps = self._get_completed_steps()
 
+        phase_response = get_phase_response(
+            phase_name,
+            step=step,
+            extra={"ready_substep": ready_substep} if ready_substep else None,
+            repo_path=self.repo_path,
+        )
+
         status = {
             "session_id": self.session_id,
             "intent": self.intent,
             "phase": phase_name,
             "step": step,
             "completed_steps": completed_steps,
-            "instruction": PHASE_INSTRUCTIONS.get(
-                ready_substep or phase_name,
-                "submit_phase で次のフェーズに進んでください。"
-            ),
-            "expected_payload": EXPECTED_PAYLOADS.get(
-                ready_substep or phase_name, {}
-            ),
+            "instruction": phase_response.get("instruction"),
+            "expected_payload": phase_response.get("expected_payload"),
             "task_progress": self._get_task_progress() if self.tasks else None,
         }
 
@@ -1953,6 +2080,22 @@ class SessionState:
             return "READY_IMPL"
         else:
             return "READY_COMPLETE"
+
+    def record_phase_summary(self, payload_key: str, step: int, summary: str) -> None:
+        """Record summary-only payload for checkpoint persistence."""
+        if not isinstance(summary, str):
+            return
+        key = self._format_phase_payload_key(payload_key, step)
+        self.phase_payloads[key] = {"summary": summary.strip()}
+
+    def _format_phase_payload_key(self, payload_key: str, step: int) -> str:
+        label_map = {
+            "READY_PLAN": "READY_PLANNING",
+            "READY_IMPL": "READY_IMPLEMENTATION",
+            "READY_COMPLETE": "READY_COMPLETION",
+        }
+        label = label_map.get(payload_key, payload_key)
+        return f"step_{step:02d}_{label}"
 
     def _get_completed_steps(self) -> list[int]:
         """Get list of completed step numbers from phase history."""
@@ -2309,35 +2452,476 @@ class SessionState:
             "failure_history_count": len(self.failure_history),
         }
 
-    def to_dict(self) -> dict:
-        """Full serialization for logging."""
+    def to_checkpoint_dict(self) -> dict:
+        """Minimal serialization for checkpoint persistence (v1.13)."""
+        step = PHASE_STEP_MAP.get(self.phase.name, 0)
+        if self.phase == Phase.READY:
+            step = {"plan": 12, "implement": 13, "complete": 14}.get(self.ready_substep, 12)
+
         return {
+            "orchestrator_state": {
+                "session_id": self.session_id,
+                "intent": self.intent,
+                "query": self.query,
+                "repo_path": self.repo_path,
+                "flags": {
+                    "no_verify": self.no_verify,
+                    "no_quality": self.no_quality,
+                    "fast": self.fast_mode,
+                    "quick": self.quick_mode,
+                    "no_doc": self.no_doc,
+                    "no_intervention": self.no_intervention,
+                    "skip_implementation": self.skip_implementation,
+                },
+                "phase_state": {
+                    "current_phase": self.phase.name,
+                    "step": step,
+                    "ready_substep": self.ready_substep,
+                    "gate_level": self._gate_level,
+                    "risk_level": self.risk_level,
+                },
+                "branch_policy": self.branch_policy,
+                "counters": {
+                    "verification_failure_count": self.verification_failure_count,
+                    "quality_revert_count": self.quality_revert_count,
+                    "intervention_count": self.intervention_count,
+                },
+                "quality_review": {
+                    "enabled": self.quality_review_enabled,
+                    "completed": self.quality_review_completed,
+                    "max_revert": self.quality_review_max_revert,
+                },
+                "commit_state": {
+                    "commit_prepared": self.commit_prepared,
+                    "prepared_commit_message": self.prepared_commit_message,
+                    "prepared_kept_files": self.prepared_kept_files,
+                    "prepared_discarded_files": self.prepared_discarded_files,
+                },
+                "tasks": [t.to_dict() for t in self.tasks],
+            },
+            "phase_payloads": self.phase_payloads,
+            "checkpoint_version": "1.13",
+            "checkpoint_at": datetime.now().isoformat(),
+        }
+
+    def to_dict(self) -> dict:
+        """Full serialization for checkpoint persistence (v1.12)."""
+        # v1.7: Serialize tuple keys in definitions_cache to JSON arrays
+        serialized_cache = {}
+        for key, value in self.definitions_cache.items():
+            serialized_key = json.dumps([key[0], key[1], key[2], key[3]])
+            serialized_cache[serialized_key] = value
+
+        return {
+            # Identity
             "session_id": self.session_id,
             "intent": self.intent,
             "query": self.query,
             "created_at": self.created_at,
+            "repo_path": self.repo_path,
+            # Phase state
             "current_phase": self.phase.name,
-            "decision_log": self.decision_log,
-            "query_frame": self.query_frame.to_dict() if self.query_frame else None,
+            "ready_substep": self.ready_substep,
+            "gate_level": self._gate_level,
             "risk_level": self.risk_level,
+            # Decision log
+            "decision_log": self.decision_log,
+            # Nested dataclass outputs
+            "query_frame": self.query_frame.to_dict() if self.query_frame else None,
             "exploration": self.exploration.to_dict() if self.exploration else None,
             "semantic": self.semantic.to_dict() if self.semantic else None,
             "verification": self.verification.to_dict() if self.verification else None,
             "impact_analysis": self.impact_analysis.to_dict() if self.impact_analysis else None,
             "pre_commit_review": self.pre_commit_review.to_dict() if self.pre_commit_review else None,
-            "task_branch": {
-                "enabled": self.task_branch_enabled,
-                "branch": self.task_branch_name,
-            } if self.task_branch_enabled else None,
+            # Task branch
+            "task_branch_enabled": self.task_branch_enabled,
+            "task_branch_name": self.task_branch_name,
+            "branch_policy": self.branch_policy,
+            # Semantic search
+            "map_results": self.map_results,
+            "forest_results": self.forest_results,
+            "map_hit": self.map_hit,
+            # Tracking
             "tool_calls": self.tool_calls,
             "phase_history": self.phase_history,
             # v1.4: Intervention System
-            "intervention": {
-                "verification_failure_count": self.verification_failure_count,
-                "intervention_count": self.intervention_count,
-                "failure_history": self.failure_history,
-            },
+            "verification_failure_count": self.verification_failure_count,
+            "intervention_count": self.intervention_count,
+            "failure_history": self.failure_history,
+            # v1.5: Quality Review
+            "quality_revert_count": self.quality_revert_count,
+            "quality_review_enabled": self.quality_review_enabled,
+            "quality_review_max_revert": self.quality_review_max_revert,
+            "quality_review_completed": self.quality_review_completed,
+            # v1.8: PRE_COMMIT
+            "commit_prepared": self.commit_prepared,
+            "prepared_commit_message": self.prepared_commit_message,
+            "prepared_kept_files": self.prepared_kept_files,
+            "prepared_discarded_files": self.prepared_discarded_files,
+            # v1.8: Only Explore
+            "skip_implementation": self.skip_implementation,
+            # v1.10: Phase assessments
+            "phase_assessments": self.phase_assessments,
+            # v1.11: Tasks
+            "tasks": [t.to_dict() for t in self.tasks],
+            # v1.13: Summary-only payload persistence
+            "phase_payloads": self.phase_payloads,
+            # v1.11: Flags
+            "no_verify": self.no_verify,
+            "no_quality": self.no_quality,
+            "fast_mode": self.fast_mode,
+            "quick_mode": self.quick_mode,
+            "no_doc": self.no_doc,
+            "no_intervention": self.no_intervention,
+            # v1.7: Definitions cache (tuple keys serialized as JSON arrays)
+            "definitions_cache": serialized_cache,
+            "cache_stats": self.cache_stats,
+            # v1.12: Checkpoint metadata
+            "checkpoint_version": "1.12",
+            "checkpoint_at": datetime.now().isoformat(),
         }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "SessionState":
+        """Restore SessionState from checkpoint dict (v1.12)."""
+        session = cls(
+            session_id=data.get("session_id", "unknown"),
+            intent=data.get("intent", "INVESTIGATE"),
+            query=data.get("query", ""),
+            repo_path=data.get("repo_path", "."),
+        )
+        session.created_at = data.get("created_at", session.created_at)
+
+        # Phase
+        phase_name = data.get("current_phase", "EXPLORATION")
+        try:
+            session.phase = Phase[phase_name]
+        except KeyError:
+            session.phase = Phase.EXPLORATION
+
+        # Phase state
+        session.ready_substep = data.get("ready_substep", "plan")
+        gate_level = data.get("gate_level", "auto")
+        if gate_level in ("full", "auto", "none"):
+            session._gate_level = gate_level
+        else:
+            session._gate_level = "auto"
+        session.risk_level = data.get("risk_level", "LOW")
+
+        # Decision log
+        session.decision_log = data.get("decision_log")
+
+        # Nested dataclasses
+        if data.get("query_frame"):
+            session.query_frame = _restore_query_frame(data["query_frame"])
+        if data.get("exploration"):
+            session.exploration = _restore_exploration(data["exploration"])
+        if data.get("semantic"):
+            session.semantic = _restore_semantic(data["semantic"])
+        if data.get("verification"):
+            session.verification = _restore_verification(data["verification"])
+        if data.get("impact_analysis"):
+            session.impact_analysis = _restore_impact_analysis(data["impact_analysis"])
+        if data.get("pre_commit_review"):
+            session.pre_commit_review = _restore_pre_commit_review(data["pre_commit_review"])
+
+        # Task branch
+        session.task_branch_enabled = data.get("task_branch_enabled", False)
+        session.task_branch_name = data.get("task_branch_name")
+        session.branch_policy = data.get("branch_policy")
+
+        # Semantic search
+        session.map_results = data.get("map_results", [])
+        session.forest_results = data.get("forest_results", [])
+        session.map_hit = data.get("map_hit", False)
+
+        # Tracking
+        session.tool_calls = data.get("tool_calls", [])
+        session.phase_history = data.get("phase_history", [])
+
+        # v1.4: Intervention
+        session.verification_failure_count = data.get("verification_failure_count", 0)
+        session.intervention_count = data.get("intervention_count", 0)
+        session.failure_history = data.get("failure_history", [])
+
+        # v1.5: Quality Review
+        session.quality_revert_count = data.get("quality_revert_count", 0)
+        session.quality_review_enabled = data.get("quality_review_enabled", True)
+        session.quality_review_max_revert = data.get("quality_review_max_revert", 3)
+        session.quality_review_completed = data.get("quality_review_completed", False)
+
+        # v1.8: PRE_COMMIT
+        session.commit_prepared = data.get("commit_prepared", False)
+        session.prepared_commit_message = data.get("prepared_commit_message")
+        session.prepared_kept_files = data.get("prepared_kept_files", [])
+        session.prepared_discarded_files = data.get("prepared_discarded_files", [])
+
+        # v1.8: Only Explore
+        session.skip_implementation = data.get("skip_implementation", False)
+
+        # v1.10: Phase assessments
+        session.phase_assessments = data.get("phase_assessments", {})
+
+        # v1.11: Tasks
+        tasks_data = data.get("tasks", [])
+        session.tasks = []
+        for td in tasks_data:
+            session.tasks.append(TaskModel(
+                id=td.get("id", ""),
+                description=td.get("description", ""),
+                status=td.get("status", "pending"),
+                failure_count=td.get("failure_count", 0),
+                revert_reason=td.get("revert_reason"),
+            ))
+
+        # v1.13: Summary-only payload persistence
+        session.phase_payloads = data.get("phase_payloads", {})
+
+        # v1.11: Flags
+        session.no_verify = data.get("no_verify", False)
+        session.no_quality = data.get("no_quality", False)
+        session.fast_mode = data.get("fast_mode", False)
+        session.quick_mode = data.get("quick_mode", False)
+        session.no_doc = data.get("no_doc", False)
+        session.no_intervention = data.get("no_intervention", False)
+
+        # v1.7: Definitions cache (deserialize JSON array keys back to tuples)
+        raw_cache = data.get("definitions_cache", {})
+        session.definitions_cache = {}
+        for key_str, value in raw_cache.items():
+            try:
+                parts = json.loads(key_str)
+                cache_key = (parts[0], parts[1], parts[2], parts[3])
+                session.definitions_cache[cache_key] = value
+            except (json.JSONDecodeError, IndexError, KeyError):
+                pass
+        session.cache_stats = data.get("cache_stats", {"hits": 0, "misses": 0})
+
+        return session
+
+    @classmethod
+    def from_checkpoint(cls, data: dict) -> "SessionState":
+        """Restore SessionState from v1.13 minimal checkpoint (fallback to v1.12)."""
+        orchestrator_state = data.get("orchestrator_state")
+        if not isinstance(orchestrator_state, dict):
+            return cls.from_dict(data)
+
+        session = cls(
+            session_id=orchestrator_state.get("session_id", "unknown"),
+            intent=orchestrator_state.get("intent", "INVESTIGATE"),
+            query=orchestrator_state.get("query", ""),
+            repo_path=orchestrator_state.get("repo_path", "."),
+        )
+
+        flags = orchestrator_state.get("flags", {})
+        if isinstance(flags, dict):
+            session.no_verify = flags.get("no_verify", False)
+            session.no_quality = flags.get("no_quality", False)
+            session.fast_mode = flags.get("fast", False)
+            session.quick_mode = flags.get("quick", False)
+            session.no_doc = flags.get("no_doc", False)
+            session.no_intervention = flags.get("no_intervention", False)
+            session.skip_implementation = flags.get("skip_implementation", False)
+        session.quality_review_enabled = not session.no_quality
+
+        phase_state = orchestrator_state.get("phase_state", {})
+        if isinstance(phase_state, dict):
+            phase_name = phase_state.get("current_phase", "EXPLORATION")
+            try:
+                session.phase = Phase[phase_name]
+            except KeyError:
+                session.phase = Phase.EXPLORATION
+            session.ready_substep = phase_state.get("ready_substep", "plan")
+            gate_level = phase_state.get("gate_level", "auto")
+            session._gate_level = gate_level if gate_level in ("full", "auto", "none") else "auto"
+            session.risk_level = phase_state.get("risk_level", "LOW")
+
+        session.branch_policy = orchestrator_state.get("branch_policy")
+
+        counters = orchestrator_state.get("counters", {})
+        if isinstance(counters, dict):
+            session.verification_failure_count = counters.get("verification_failure_count", 0)
+            session.quality_revert_count = counters.get("quality_revert_count", 0)
+            session.intervention_count = counters.get("intervention_count", 0)
+
+        quality_review = orchestrator_state.get("quality_review", {})
+        if isinstance(quality_review, dict):
+            session.quality_review_enabled = quality_review.get("enabled", True)
+            session.quality_review_completed = quality_review.get("completed", False)
+            session.quality_review_max_revert = quality_review.get("max_revert", 3)
+
+        commit_state = orchestrator_state.get("commit_state", {})
+        if isinstance(commit_state, dict):
+            session.commit_prepared = commit_state.get("commit_prepared", False)
+            session.prepared_commit_message = commit_state.get("prepared_commit_message")
+            session.prepared_kept_files = commit_state.get("prepared_kept_files", [])
+            session.prepared_discarded_files = commit_state.get("prepared_discarded_files", [])
+
+        tasks_data = orchestrator_state.get("tasks", [])
+        session.tasks = []
+        if isinstance(tasks_data, list):
+            for td in tasks_data:
+                if not isinstance(td, dict):
+                    continue
+                session.tasks.append(TaskModel(
+                    id=td.get("id", ""),
+                    description=td.get("description", ""),
+                    status=td.get("status", "pending"),
+                    failure_count=td.get("failure_count", 0),
+                    revert_reason=td.get("revert_reason"),
+                ))
+
+        session.phase_payloads = data.get("phase_payloads", {})
+
+        return session
+
+
+# =============================================================================
+# v1.12: Checkpoint Restore Helpers
+# =============================================================================
+
+def _restore_query_frame(data: dict) -> "QueryFrame":
+    """Restore QueryFrame from dict."""
+    from tools.query_frame import QueryFrame, MappedSymbol, SlotSource, SlotEvidence
+
+    qf = QueryFrame(raw_query=data.get("raw_query", ""))
+    qf.target_feature = data.get("target_feature")
+    qf.trigger_condition = data.get("trigger_condition")
+    qf.observed_issue = data.get("observed_issue")
+    qf.desired_action = data.get("desired_action")
+    qf.slot_quotes = data.get("slot_quotes", {})
+
+    # Mapped symbols
+    for ms_data in data.get("mapped_symbols", []):
+        evidence = None
+        if ms_data.get("evidence"):
+            ev = ms_data["evidence"]
+            evidence = SlotEvidence(
+                tool=ev.get("tool", ""),
+                params=ev.get("params", {}),
+                result_summary=ev.get("result_summary", ""),
+                timestamp=ev.get("timestamp", ""),
+            )
+        qf.mapped_symbols.append(MappedSymbol(
+            name=ms_data.get("name", ""),
+            source=SlotSource(ms_data.get("source", "UNRESOLVED")),
+            confidence=ms_data.get("confidence", 0.0),
+            evidence=evidence,
+        ))
+
+    # Slot source
+    for k, v in data.get("slot_source", {}).items():
+        qf.slot_source[k] = SlotSource(v)
+
+    # Slot evidence
+    for k, ev_data in data.get("slot_evidence", {}).items():
+        qf.slot_evidence[k] = SlotEvidence(
+            tool=ev_data.get("tool", ""),
+            params=ev_data.get("params", {}),
+            result_summary=ev_data.get("result_summary", ""),
+            timestamp=ev_data.get("timestamp", ""),
+        )
+
+    return qf
+
+
+def _restore_exploration(data: dict) -> ExplorationResult:
+    """Restore ExplorationResult from dict."""
+    return ExplorationResult(
+        symbols_identified=data.get("symbols_identified", []),
+        entry_points=data.get("entry_points", []),
+        existing_patterns=data.get("existing_patterns", []),
+        files_analyzed=data.get("files_analyzed", []),
+        tools_used=data.get("tools_used", []),
+        notes=data.get("notes", ""),
+    )
+
+
+def _restore_semantic(data: dict) -> SemanticResult:
+    """Restore SemanticResult from dict."""
+    hypotheses = []
+    for h in data.get("hypotheses", []):
+        hypotheses.append(Hypothesis(
+            text=h.get("text", ""),
+            confidence=h.get("confidence", "medium"),
+        ))
+
+    semantic_reason = None
+    sr_val = data.get("semantic_reason")
+    if sr_val:
+        try:
+            semantic_reason = SemanticReason(sr_val)
+        except ValueError:
+            pass
+
+    return SemanticResult(
+        hypotheses=hypotheses,
+        semantic_reason=semantic_reason,
+        search_queries=data.get("search_queries", []),
+    )
+
+
+def _restore_verification(data: dict) -> VerificationResult:
+    """Restore VerificationResult from dict."""
+    verified = []
+    for vh_data in data.get("verified", []):
+        ev_data = vh_data.get("evidence", {})
+        evidence = VerificationEvidence(
+            tool=ev_data.get("tool", ""),
+            target=ev_data.get("target", ""),
+            result=ev_data.get("result", ""),
+            files=ev_data.get("files", []),
+        )
+        verified.append(VerifiedHypothesis(
+            hypothesis=vh_data.get("hypothesis", ""),
+            status=vh_data.get("status", "confirmed"),
+            evidence=evidence,
+        ))
+
+    return VerificationResult(
+        verified=verified,
+        all_confirmed=data.get("all_confirmed", False),
+    )
+
+
+def _restore_impact_analysis(data: dict) -> ImpactAnalysisResult:
+    """Restore ImpactAnalysisResult from dict."""
+    verified_files = []
+    for vf_data in data.get("verified_files", []):
+        verified_files.append(VerifiedFile(
+            file=vf_data.get("file", ""),
+            status=vf_data.get("status", ""),
+            reason=vf_data.get("reason"),
+        ))
+
+    return ImpactAnalysisResult(
+        target_files=data.get("target_files", []),
+        must_verify=data.get("must_verify", []),
+        should_verify=data.get("should_verify", []),
+        verified_files=verified_files,
+        inferred_from_rules=data.get("inferred_from_rules", []),
+        mode=data.get("mode", "standard"),
+    )
+
+
+def _restore_pre_commit_review(data: dict) -> PreCommitReviewResult:
+    """Restore PreCommitReviewResult from dict."""
+    reviewed_files = []
+    for rf_data in data.get("reviewed_files", []):
+        reviewed_files.append(ReviewedFile(
+            path=rf_data.get("path", ""),
+            decision=rf_data.get("decision", "keep"),
+            reason=rf_data.get("reason"),
+            change_type=rf_data.get("change_type", "modified"),
+        ))
+
+    return PreCommitReviewResult(
+        total_changes=data.get("total_changes", 0),
+        reviewed_files=reviewed_files,
+        kept_files=data.get("kept_files", []),
+        discarded_files=data.get("discarded_files", []),
+        review_notes=data.get("review_notes", ""),
+    )
 
 
 # =============================================================================
@@ -2438,3 +3022,186 @@ class SessionManager:
             }
             for s in self._sessions.values()
         ]
+
+    @staticmethod
+    def _infer_task_branch_state(session: SessionState, repo_path: str) -> None:
+        if session.task_branch_name:
+            return
+        try:
+            current_proc = subprocess.run(
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                cwd=repo_path,
+                capture_output=True,
+                text=True,
+            )
+            current = current_proc.stdout.strip() if current_proc.returncode == 0 else ""
+            if current.startswith("llm_task_"):
+                session.task_branch_enabled = True
+                session.task_branch_name = current
+                return
+
+            pattern = f"llm_task_{session.session_id}_from_*"
+            list_proc = subprocess.run(
+                ["git", "branch", "--list", pattern],
+                cwd=repo_path,
+                capture_output=True,
+                text=True,
+            )
+            if list_proc.returncode == 0 and list_proc.stdout:
+                branches = [
+                    b.strip().lstrip("* ")
+                    for b in list_proc.stdout.strip().split("\n")
+                    if b.strip()
+                ]
+                if len(branches) == 1:
+                    session.task_branch_enabled = True
+                    session.task_branch_name = branches[0]
+        except Exception:
+            pass
+
+    # =========================================================================
+    # v1.12: Checkpoint Persistence
+    # =========================================================================
+    MAX_CHECKPOINT_BYTES = 256 * 1024
+
+    def save_checkpoint(self, session_id: str, base_path: str) -> bool:
+        """Save session state to .code-intel/sessions/ (atomic write)."""
+        session = self._sessions.get(session_id)
+        if session is None:
+            return False
+
+        sessions_dir = Path(base_path) / ".code-intel" / "sessions"
+        tmp_path = None
+
+        try:
+            sessions_dir.mkdir(parents=True, exist_ok=True)
+
+            target_path = sessions_dir / f"{session_id}.json"
+            data = session.to_checkpoint_dict()
+
+            def _dump_size(d: dict) -> int:
+                return len(json.dumps(d, ensure_ascii=False, indent=2).encode("utf-8"))
+
+            def _compress_phase_payloads(payloads: dict, limit: int) -> dict:
+                compressed: dict[str, dict] = {}
+                for key, value in payloads.items():
+                    summary = ""
+                    if isinstance(value, dict):
+                        summary = str(value.get("summary", ""))
+                    if len(summary) > limit:
+                        summary = summary[:limit].rstrip() + "..."
+                    compressed[key] = {"summary": summary}
+                return compressed
+
+            if _dump_size(data) > self.MAX_CHECKPOINT_BYTES:
+                payloads = data.get("phase_payloads", {})
+                if isinstance(payloads, dict):
+                    for limit in (400, 200, 100):
+                        data["phase_payloads"] = _compress_phase_payloads(payloads, limit)
+                        if _dump_size(data) <= self.MAX_CHECKPOINT_BYTES:
+                            break
+                    if _dump_size(data) > self.MAX_CHECKPOINT_BYTES:
+                        items = list(data.get("phase_payloads", {}).items())
+                        data["phase_payloads"] = dict(items[-10:])
+                        if _dump_size(data) > self.MAX_CHECKPOINT_BYTES:
+                            data["phase_payloads"] = {}
+
+            # Atomic write: tmp file → rename
+            fd, tmp_path = tempfile.mkstemp(
+                dir=str(sessions_dir), suffix=".tmp"
+            )
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            os.rename(tmp_path, str(target_path))
+            return True
+        except Exception:
+            # Clean up tmp file on failure
+            if tmp_path:
+                try:
+                    os.unlink(tmp_path)
+                except Exception:
+                    pass
+            return False
+
+    def load_checkpoint(self, session_id: str, base_path: str) -> SessionState | None:
+        """Load session state from checkpoint file."""
+        cp_path = Path(base_path) / ".code-intel" / "sessions" / f"{session_id}.json"
+        if not cp_path.exists():
+            return None
+
+        try:
+            with open(cp_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            session = SessionState.from_checkpoint(data)
+            # Register in memory
+            self._sessions[session.session_id] = session
+            self._active_session_id = session.session_id
+            self._infer_task_branch_state(session, session.repo_path or base_path)
+            return session
+        except Exception:
+            return None
+
+    def list_checkpoints(self, base_path: str) -> list[dict]:
+        """List available checkpoints with metadata."""
+        sessions_dir = Path(base_path) / ".code-intel" / "sessions"
+        if not sessions_dir.exists():
+            return []
+
+        checkpoints = []
+        for cp_file in sessions_dir.glob("*.json"):
+            try:
+                with open(cp_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if "orchestrator_state" in data:
+                    orchestrator_state = data.get("orchestrator_state", {})
+                    phase_state = orchestrator_state.get("phase_state", {})
+                    checkpoints.append({
+                        "session_id": orchestrator_state.get("session_id", cp_file.stem),
+                        "phase": phase_state.get("current_phase", "UNKNOWN"),
+                        "step": phase_state.get("step", 0),
+                        "intent": orchestrator_state.get("intent", ""),
+                        "query": orchestrator_state.get("query", ""),
+                        "checkpoint_at": data.get("checkpoint_at", ""),
+                    })
+                    continue
+                checkpoints.append({
+                    "session_id": data.get("session_id", cp_file.stem),
+                    "phase": data.get("current_phase", "UNKNOWN"),
+                    "step": PHASE_STEP_MAP.get(data.get("current_phase", ""), 0),
+                    "intent": data.get("intent", ""),
+                    "query": data.get("query", ""),
+                    "checkpoint_at": data.get("checkpoint_at", ""),
+                })
+            except Exception:
+                pass
+
+        checkpoints.sort(key=lambda cp: cp.get("checkpoint_at", ""))
+        return checkpoints
+
+    @staticmethod
+    def delete_checkpoint(session_id: str, base_path: str) -> bool:
+        """Delete a single checkpoint file."""
+        cp_path = Path(base_path) / ".code-intel" / "sessions" / f"{session_id}.json"
+        if cp_path.exists():
+            try:
+                cp_path.unlink()
+                return True
+            except Exception:
+                return False
+        return False
+
+    @staticmethod
+    def delete_checkpoints(base_path: str) -> int:
+        """Delete all checkpoint files (for --clean)."""
+        sessions_dir = Path(base_path) / ".code-intel" / "sessions"
+        if not sessions_dir.exists():
+            return 0
+
+        deleted = 0
+        for cp_file in sessions_dir.glob("*.json"):
+            try:
+                cp_file.unlink()
+                deleted += 1
+            except Exception:
+                pass
+        return deleted

@@ -1,0 +1,54 @@
+# Code Intel Context Configuration v1.3
+# This project uses code-intel for its own development
+
+# Project rules (static, loaded into project_rules layer)
+project_rules:
+  source: "CLAUDE.md"
+
+# Document search settings for analyze_impact (v1.1.1)
+# Controls which documentation files are searched for keyword mentions
+document_search:
+  include_patterns:
+    - "**/*.md"
+    - "**/README*"
+    - "**/docs/**/*"
+  exclude_patterns:
+    - "node_modules/**"
+    - "vendor/**"
+    - ".git/**"
+    - ".venv/**"
+    - "__pycache__/**"
+    # Project-specific exclusions:
+    - "docs/draft/**"  # Draft documents excluded from impact search
+
+# v1.3: Document Research Configuration
+# Enables sub-agent research of design documents during DOCUMENT_RESEARCH phase
+doc_research:
+  enabled: true
+  docs_path:
+    - "docs/"
+  default_prompts:
+    - "default.md"
+
+# v1.4: Intervention Settings
+# Triggered when verification fails repeatedly to break "stuck" loops
+interventions:
+  enabled: true
+  prompts_dir: "interventions/"
+  threshold: 3  # Number of failures before intervention
+  force_escalation_after: 2  # Force user_escalation after N interventions
+  suggest_new_prompts: true  # Suggest new prompts in final report
+  patterns:
+    - threshold: 3
+      pattern: "css_layout"
+      prompts: ["structure_review", "user_escalation"]
+    - threshold: 3
+      pattern: "filament"
+      prompts: ["hypothesis_review", "user_escalation"]
+    - threshold: 3
+      pattern: "default"
+      prompts: ["step_back"]
+
+# Verifier settings
+verifiers:
+  suggest_improvements: true  # Suggest improvements in final report

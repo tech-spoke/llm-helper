@@ -1,0 +1,122 @@
+phases:
+  BRANCH_INTERVENTION:
+    expected_payload:
+      choice: 'str: ''delete'' | ''merge'' | ''continue'''
+      summary: str
+      tools_used: list[str]
+    instruction: Stale ブランチが検出されました。delete/merge/continue の意味を説明して選択肢を提示し、選択結果を submit_phase
+      で送信してください。
+  DOCUMENT_RESEARCH:
+    expected_payload:
+      documents_reviewed: list[str]
+      summary: str
+      tools_used: list[str]
+    instruction: 設計文書を調査してください。完了後 submit_phase で送信してください。
+  EXPLORATION:
+    expected_payload:
+      explored_files: list[str]
+      findings: list[str]
+      summary: str
+      tools_used: list[str]
+    instruction: code-intel ツールを最低2種類使って探索し、結果を submit_phase で送信してください。
+  IMPACT_ANALYSIS:
+    expected_payload:
+      impact_summary: dict
+      summary: str
+      tools_used: list[str]
+    instruction: analyze_impact を実行して影響分析を実施し、完了後 submit_phase で送信してください。
+  MERGE:
+    expected_payload:
+      summary: str
+    instruction: summary を添えて submit_phase で送信し、マージを実行してください。
+  POST_IMPL_VERIFY:
+    expected_payload:
+      details: str
+      failed_tasks: list[str] (if passed=false)
+      passed: bool
+      summary: str
+      tools_used: list[str]
+      verifier_used: str
+    instruction: 実装結果を検証してください。検証結果を submit_phase で送信してください。
+  PRE_COMMIT:
+    expected_payload:
+      commit_message: str
+      review_prompt_used: str
+      reviewed_files: list[str]
+      summary: str
+      tools_used: list[str]
+    instruction: review_changes で差分を取得してレビューし、コミットメッセージとともに submit_phase で送信してください。
+  Q1:
+    expected_payload:
+      needs_more_information: bool
+      reason: str
+      summary: str
+      tools_used: list[str]
+    instruction: SEMANTIC フェーズが必要か評価してください。submit_phase で結果を送信してください。
+  Q2:
+    expected_payload:
+      has_unverified_hypotheses: bool
+      reason: str
+      summary: str
+      tools_used: list[str]
+    instruction: VERIFICATION フェーズが必要か評価してください。submit_phase で結果を送信してください。
+  Q3:
+    expected_payload:
+      needs_impact_analysis: bool
+      reason: str
+      summary: str
+      tools_used: list[str]
+    instruction: IMPACT_ANALYSIS フェーズが必要か評価してください。submit_phase で結果を送信してください。
+  QUALITY_REVIEW:
+    expected_payload:
+      issues: list[str]
+      quality_prompt_used: str
+      quality_score: str
+      summary: str
+      tools_used: list[str]
+    instruction: 品質チェックを実施してください。結果を submit_phase で送信してください。
+  QUERY_FRAME:
+    expected_payload:
+      action_type: str
+      constraints: str
+      scope: str
+      summary: str
+      target_symbols: list[str]
+      tools_used: list[str]
+    instruction: ユーザーの指示から構造化スロットを抽出し submit_phase で送信してください。
+  READY_COMPLETE:
+    expected_payload:
+      summary: str
+    instruction: 全タスクが完了しました。summary を添えて submit_phase で送信してください。
+  READY_IMPL:
+    expected_payload:
+      summary: str
+      task_id: str
+      tools_used: list[str]
+    instruction: 変更対象ファイルは事前に check_write_target を実行し、次のタスクを実装して submit_phase で報告してください。
+  READY_PLAN:
+    expected_payload:
+      summary: str
+      tasks: list[{id, description, status, failure_count?, revert_reason?}]
+      tools_used: list[str]
+    instruction: 探索結果に基づきタスクを分割し、タスクリストを submit_phase で送信してください。
+  SEMANTIC:
+    expected_payload:
+      search_query: str
+      search_results: list[str]
+      summary: str
+      tools_used: list[str]
+    instruction: semantic_search で追加情報を収集してください。完了後 submit_phase で送信してください。
+  VERIFICATION:
+    expected_payload:
+      hypotheses_verified: list[{hypothesis, result, evidence}]
+      summary: str
+      tools_used: list[str]
+    instruction: 仮説検証を実施してください。完了後 submit_phase で送信してください。
+  VERIFY_INTERVENTION:
+    expected_payload:
+      action_taken: str
+      prompt_used: str
+      summary: str
+      tools_used: list[str]
+    instruction: 介入プロンプトを読み、指示に従ってください。実行結果を submit_phase で送信してください。

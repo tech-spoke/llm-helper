@@ -13,7 +13,7 @@ Key Features:
 - Server-side confidence calculation (no LLM self-reporting)
 - QueryFrame for structured natural language processing
 - Forest/Map architecture for semantic search
-- Improvement cycle with DecisionLog + OutcomeLog
+- Checkpoint persistence for session recovery (v1.12)
 
 v1.1 Additions:
 - Essential context provision (design docs + project rules)
@@ -44,12 +44,6 @@ from tools.session import (
     TaskModel, get_phase_response,
     PHASE_STEP_MAP, EXPECTED_PAYLOADS, PHASE_INSTRUCTIONS,
 )
-from tools.outcome_log import (
-    OutcomeLog, OutcomeAnalysis, record_outcome,
-    get_outcomes_for_session, get_failure_stats,
-    record_decision, get_decision_for_session,
-    get_session_analysis, get_improvement_insights,
-)
 from tools.query_frame import (
     QueryFrame, QueryDecomposer, SlotSource, SlotEvidence,
     validate_slot, generate_investigation_guidance,
@@ -61,6 +55,41 @@ from tools.chromadb_manager import (
     CHROMADB_AVAILABLE,
 )
 from tools.branch_manager import BranchManager
+
+
+# v1.12: Response size limit (256KB)
+MAX_RESPONSE_BYTES = 262_144
+
+
+def _truncate_response(content: str, max_bytes: int = MAX_RESPONSE_BYTES) -> tuple[str, bool]:
+    """Truncate response if it exceeds max_bytes. Returns (content, was_truncated)."""
+    content_bytes = content.encode("utf-8")
+    if len(content_bytes) <= max_bytes:
+        return content, False
+
+    # Try to detect total_matches from the original content
+    total_matches = None
+    try:
+        parsed = json.loads(content)
+        if isinstance(parsed, dict) and "matches" in parsed:
+            matches = parsed["matches"]
+            if isinstance(matches, list):
+                total_matches = len(matches)
+    except (json.JSONDecodeError, TypeError):
+        pass
+
+    # Truncate to max_bytes
+    truncated_bytes = content_bytes[:max_bytes]
+    # Decode safely (may cut a multi-byte char)
+    truncated = truncated_bytes.decode("utf-8", errors="ignore")
+
+    # Build warning
+    warning = {"_truncation_warning": {"truncated": True, "message": "レスポンスが 256KB を超えたため切り詰めました。パターンを絞り込んでください。"}}
+    if total_matches is not None:
+        warning["_truncation_warning"]["total_matches"] = total_matches
+    warning_str = "\n" + json.dumps(warning, ensure_ascii=False)
+
+    return truncated + warning_str, True
 
 
 # Create MCP server, router, and session manager
@@ -76,6 +105,11 @@ _ctags_cache_managers: dict[str, "CtagsCacheManager"] = {}
 
 # v1.2.1: Branch manager cache (per session) - OverlayFS removed, git branch only
 _branch_managers: dict[str, BranchManager] = {}
+
+
+def _phase_response(session: SessionState | None, phase_name: str, step: int | None = None, extra: dict | None = None) -> dict:
+    repo_path = session.repo_path if session is not None else "."
+    return get_phase_response(phase_name, step=step, extra=extra, repo_path=repo_path)
 
 
 def _get_or_recreate_branch_manager(session, repo_path: str) -> BranchManager | None:
@@ -166,6 +200,24 @@ async def _create_branch_for_ready(session) -> dict:
         }
 
     repo_path = session.repo_path
+
+    if session.branch_policy == "continue":
+        if not session.task_branch_name:
+            try:
+                branch_status = await BranchManager.is_task_branch_checked_out(repo_path)
+                if branch_status.get("is_task_branch"):
+                    session.task_branch_enabled = True
+                    session.task_branch_name = branch_status.get("current_branch")
+            except Exception:
+                pass
+        return {
+            "success": True,
+            "branch": {
+                "created": False,
+                "name": session.task_branch_name,
+                "reason": "branch_policy_continue",
+            },
+        }
 
     try:
         branch_manager = BranchManager(repo_path)
@@ -342,21 +394,6 @@ async def execute_query(
     ]
     output["total_results"] = len(all_results)
     output["step_outputs"] = step_outputs
-
-    # v3.7: Include decision log for observability
-    # DISABLED: Decision log disabled for performance (v3.10 feature)
-    # if plan.decision_log:
-    #     decision_dict = plan.decision_log.to_dict()
-    #
-    #     # Add session_id if there's an active session
-    #     active_session = session_manager.get_active_session()
-    #     if active_session:
-    #         decision_dict["session_id"] = active_session.session_id
-    #
-    #     # Persist decision log
-    #     record_decision(decision_dict)
-    #
-    #     output["decision_log"] = decision_dict
 
     return output
 
@@ -718,93 +755,18 @@ async def list_tools() -> list[Tool]:
                 "required": ["intent", "query"],
             },
         ),
-        # v1.6: Phase gate start (separated from start_session)
-        Tool(
-            name="begin_phase_gate",
-            description="v1.6: Start phase gate and create task branch. Call after start_session. "
-                        "If stale branches exist, returns error with recovery options (user must decide). "
-                        "Use skip_branch=true for --quick mode. "
-                        "Use skip_exploration=true for --fast mode (creates branch, skips to READY). "
-                        "Use resume_current=true to continue on current branch (for 'Continue as-is' option).",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "session_id": {
-                        "type": "string",
-                        "description": "Session ID from start_session",
-                    },
-                    "skip_branch": {
-                        "type": "boolean",
-                        "description": "Skip branch creation (for --quick mode). Transitions directly to READY without branch.",
-                        "default": False,
-                    },
-                    "skip_exploration": {
-                        "type": "boolean",
-                        "description": "Skip exploration phases (for --fast mode). Creates branch and transitions directly to READY. "
-                                       "Use this when skip_branch=false but exploration should be skipped.",
-                        "default": False,
-                    },
-                    "resume_current": {
-                        "type": "boolean",
-                        "description": "Continue on current branch without creating new one (for 'Continue as-is' option). "
-                                       "If on llm_task_* branch, continues there. Otherwise creates new branch and ignores stale branches.",
-                        "default": False,
-                    },
-                },
-                "required": ["session_id"],
-            },
-        ),
-        Tool(
-            name="set_query_frame",
-            description="Set the QueryFrame for the current session. "
-                        "LLM extracts slots using the prompt from start_session, "
-                        "server validates and creates QueryFrame. "
-                        "Each slot must have 'value' and 'quote' (original text from query).",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "target_feature": {
-                        "type": ["object", "null"],
-                        "properties": {
-                            "value": {"type": "string"},
-                            "quote": {"type": "string"},
-                        },
-                        "description": "Target feature/module (e.g., 'login function')",
-                    },
-                    "trigger_condition": {
-                        "type": ["object", "null"],
-                        "properties": {
-                            "value": {"type": "string"},
-                            "quote": {"type": "string"},
-                        },
-                        "description": "Trigger condition (e.g., 'when XXX is input')",
-                    },
-                    "observed_issue": {
-                        "type": ["object", "null"],
-                        "properties": {
-                            "value": {"type": "string"},
-                            "quote": {"type": "string"},
-                        },
-                        "description": "Observed issue (e.g., 'error occurs')",
-                    },
-                    "desired_action": {
-                        "type": ["object", "null"],
-                        "properties": {
-                            "value": {"type": "string"},
-                            "quote": {"type": "string"},
-                        },
-                        "description": "Desired action (e.g., 'fix XXX')",
-                    },
-                },
-            },
-        ),
         Tool(
             name="get_session_status",
             description="Get the current session status including phase, instruction, and expected_payload. "
                         "Use this to recover after context compaction.",
             inputSchema={
                 "type": "object",
-                "properties": {},
+                "properties": {
+                    "repo_path": {
+                        "type": "string",
+                        "description": "Path to the target repository (used for checkpoint restoration when no active session exists)",
+                    },
+                },
             },
         ),
         # v1.11: Unified submit_phase tool (replaces all submit_* tools)
@@ -822,215 +784,6 @@ async def list_tools() -> list[Tool]:
                     },
                 },
                 "required": ["data"],
-            },
-        ),
-        # v1.10 note: submit_understanding removed (replaced by check_phase_necessity)
-        # submit_exploration validates exploration quality; check_phase_necessity handles phase transitions
-        Tool(
-            name="submit_exploration",
-            description="[DEPRECATED: use submit_phase] Submit exploration results for quality validation. "
-                        "Server evaluates confidence (symbols, entry_points, consistency, NL-symbol mapping). "
-                        "If sufficient: proceed to Q1 check (check_phase_necessity). "
-                        "If insufficient: auto-transitions to SEMANTIC for more context gathering.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "symbols_identified": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "List of key symbols found (classes, functions, etc.)",
-                    },
-                    "entry_points": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "List of entry points identified",
-                    },
-                    "existing_patterns": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "List of existing patterns found (e.g., 'Service + Repository')",
-                    },
-                    "files_analyzed": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "List of files that were analyzed",
-                    },
-                    "notes": {
-                        "type": "string",
-                        "description": "Additional notes about the exploration",
-                    },
-                },
-                "required": ["symbols_identified", "entry_points", "files_analyzed"],
-            },
-        ),
-        Tool(
-            name="submit_semantic",
-            description="Submit semantic search results to complete Phase 2 (SEMANTIC). "
-                        "Required after using semantic_search. Must include hypotheses and reason.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "hypotheses": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "text": {
-                                    "type": "string",
-                                    "description": "Hypothesis text",
-                                },
-                                "confidence": {
-                                    "type": "string",
-                                    "enum": ["high", "medium", "low"],
-                                    "default": "medium",
-                                    "description": "Confidence level of this hypothesis",
-                                },
-                            },
-                            "required": ["text"],
-                        },
-                        "description": "List of hypotheses with confidence levels",
-                    },
-                    "semantic_reason": {
-                        "type": "string",
-                        "enum": [
-                            "no_definition_found",
-                            "no_reference_found",
-                            "no_similar_implementation",
-                            "architecture_unknown",
-                            "context_fragmented",
-                        ],
-                        "description": "Why semantic search was needed",
-                    },
-                    "search_queries": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Queries used for semantic search",
-                    },
-                },
-                "required": ["hypotheses", "semantic_reason"],
-            },
-        ),
-        Tool(
-            name="check_phase_necessity",
-            description="[v1.10] Check if a phase is necessary before executing it. "
-                        "Used for Q1 (SEMANTIC), Q2 (VERIFICATION), Q3 (IMPACT_ANALYSIS) checks. "
-                        "LLM decides necessity based on actual code inspection results. "
-                        "gate_level='full' forces execution, 'auto' respects assessment.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "phase": {
-                        "type": "string",
-                        "enum": ["SEMANTIC", "VERIFICATION", "IMPACT_ANALYSIS"],
-                        "description": "Phase to check necessity for",
-                    },
-                    "assessment": {
-                        "type": ["object", "string"],
-                        "description": "Necessity assessment for the phase (object or JSON string)",
-                        "anyOf": [
-                            {
-                                "description": "Q1: SEMANTIC necessity check",
-                                "properties": {
-                                    "needs_more_information": {
-                                        "type": "boolean",
-                                        "description": "true: need additional information, false: information sufficient",
-                                    },
-                                    "needs_more_information_reason": {
-                                        "type": "string",
-                                        "description": "Reason for needing (or not needing) more information",
-                                    },
-                                },
-                                "required": ["needs_more_information", "needs_more_information_reason"],
-                            },
-                            {
-                                "description": "Q2: VERIFICATION necessity check",
-                                "properties": {
-                                    "has_unverified_hypotheses": {
-                                        "type": "boolean",
-                                        "description": "true: have unverified hypotheses, false: no hypotheses or already verified",
-                                    },
-                                    "has_unverified_hypotheses_reason": {
-                                        "type": "string",
-                                        "description": "Reason for having (or not having) unverified hypotheses",
-                                    },
-                                },
-                                "required": ["has_unverified_hypotheses", "has_unverified_hypotheses_reason"],
-                            },
-                            {
-                                "description": "Q3: IMPACT_ANALYSIS necessity check",
-                                "properties": {
-                                    "needs_impact_analysis": {
-                                        "type": "boolean",
-                                        "description": "true: need impact analysis, false: impact already confirmed",
-                                    },
-                                    "needs_impact_analysis_reason": {
-                                        "type": "string",
-                                        "description": "Reason for needing (or not needing) impact analysis",
-                                    },
-                                },
-                                "required": ["needs_impact_analysis", "needs_impact_analysis_reason"],
-                            },
-                        ],
-                    },
-                },
-                "required": ["phase", "assessment"],
-            },
-        ),
-        Tool(
-            name="submit_verification",
-            description="Submit verification results to complete Phase 3 (VERIFICATION). "
-                        "Evidence must be STRUCTURED with tool, target, and result. "
-                        "This prevents 'fake' verification claims.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "verified": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "hypothesis": {
-                                    "type": "string",
-                                    "description": "The hypothesis being verified",
-                                },
-                                "status": {
-                                    "type": "string",
-                                    "enum": ["confirmed", "rejected"],
-                                },
-                                "evidence": {
-                                    "type": "object",
-                                    "properties": {
-                                        "tool": {
-                                            "type": "string",
-                                            "enum": [
-                                                "find_definitions", "find_references",
-                                                "search_text", "analyze_structure", "query",
-                                            ],
-                                            "description": "Tool used for verification",
-                                        },
-                                        "target": {
-                                            "type": "string",
-                                            "description": "Symbol/file/pattern verified",
-                                        },
-                                        "result": {
-                                            "type": "string",
-                                            "description": "Summary of tool result",
-                                        },
-                                        "files": {
-                                            "type": "array",
-                                            "items": {"type": "string"},
-                                            "description": "Related file paths",
-                                        },
-                                    },
-                                    "required": ["tool", "target", "result"],
-                                },
-                            },
-                            "required": ["hypothesis", "status", "evidence"],
-                        },
-                        "description": "List of verified hypotheses with structured evidence",
-                    },
-                },
-                "required": ["verified"],
             },
         ),
         Tool(
@@ -1087,86 +840,10 @@ async def list_tools() -> list[Tool]:
                 },
             },
         ),
-        # v1.2: PRE_COMMIT phase tools for garbage detection
-        Tool(
-            name="submit_for_review",
-            description="Transition from READY to PRE_COMMIT phase for garbage detection. "
-                        "Call this after implementation is complete to review changes before commit. "
-                        "Requires task branch to be enabled.",
-            inputSchema={
-                "type": "object",
-                "properties": {},
-            },
-        ),
         Tool(
             name="review_changes",
             description="Get all changes captured in the task branch for garbage review. "
                         "Returns list of changed files with diffs for LLM to review.",
-            inputSchema={
-                "type": "object",
-                "properties": {},
-            },
-        ),
-        Tool(
-            name="finalize_changes",
-            description="Apply reviewed changes and commit to task branch. "
-                        "Call after review_changes with decisions about which files to keep/discard.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "reviewed_files": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "path": {"type": "string"},
-                                "decision": {"type": "string", "enum": ["keep", "discard"]},
-                                "reason": {"type": "string"},
-                            },
-                            "required": ["path", "decision"],
-                        },
-                        "description": "List of file decisions. Discard requires reason.",
-                    },
-                    "commit_message": {
-                        "type": "string",
-                        "description": "Commit message for the changes",
-                    },
-                },
-                "required": ["reviewed_files"],
-            },
-        ),
-        # v1.5: Quality Review
-        Tool(
-            name="submit_quality_review",
-            description="v1.5: Report quality review results. "
-                        "Call after reviewing changes in QUALITY_REVIEW phase. "
-                        "If issues found, reverts to READY phase for fixes. "
-                        "If no issues, allows proceed to merge_to_base.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "issues_found": {
-                        "type": ["boolean", "string"],
-                        "description": "Whether any quality issues were found (true/false or 'true'/'false')",
-                    },
-                    "issues": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "List of issues found (required if issues_found=true). Each item should be 'description in file:line' format.",
-                    },
-                    "notes": {
-                        "type": "string",
-                        "description": "Additional notes or comments",
-                    },
-                },
-                "required": ["issues_found"],
-            },
-        ),
-        Tool(
-            name="merge_to_base",
-            description="Merge task branch back to the base branch (where session started). "
-                        "Automatically uses the branch that was active when start_session was called. "
-                        "Call after finalize_changes (or submit_quality_review if enabled) to complete the workflow.",
             inputSchema={
                 "type": "object",
                 "properties": {},
@@ -1192,174 +869,6 @@ async def list_tools() -> list[Tool]:
                         "default": "delete",
                     },
                 },
-            },
-        ),
-        Tool(
-            name="record_outcome",
-            description="Record session outcome (success/failure/partial) for improvement analysis. "
-                        "Also called automatically by /code when failure is detected. "
-                        "Observer only: records, does not intervene or change behavior.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "session_id": {
-                        "type": "string",
-                        "description": "Session ID to record outcome for",
-                    },
-                    "outcome": {
-                        "type": "string",
-                        "enum": ["success", "failure", "partial"],
-                        "description": "Outcome type",
-                    },
-                    "phase_at_outcome": {
-                        "type": "string",
-                        "enum": ["EXPLORATION", "SEMANTIC", "VERIFICATION", "READY"],
-                        "description": "Phase at outcome (optional, auto-detected from session if available)",
-                    },
-                    "intent": {
-                        "type": "string",
-                        "enum": ["IMPLEMENT", "MODIFY", "INVESTIGATE", "QUESTION"],
-                        "description": "Intent type (optional, auto-detected from session if available)",
-                    },
-                    "analysis": {
-                        "type": "object",
-                        "properties": {
-                            "root_cause": {
-                                "type": "string",
-                                "description": "What went wrong / what succeeded",
-                            },
-                            "failure_point": {
-                                "type": ["string", "null"],
-                                "enum": ["EXPLORATION", "SEMANTIC", "VERIFICATION", "READY", None],
-                                "description": "Phase where failure occurred",
-                            },
-                            "related_symbols": {
-                                "type": "array",
-                                "items": {"type": "string"},
-                                "description": "Symbols related to outcome",
-                            },
-                            "related_files": {
-                                "type": "array",
-                                "items": {"type": "string"},
-                                "description": "Files related to outcome",
-                            },
-                            "user_feedback_summary": {
-                                "type": "string",
-                                "description": "Summary of user's feedback",
-                            },
-                        },
-                        "required": ["root_cause"],
-                    },
-                    "trigger_message": {
-                        "type": "string",
-                        "description": "The user message that triggered /outcome",
-                    },
-                },
-                "required": ["session_id", "outcome", "analysis"],
-            },
-        ),
-        Tool(
-            name="get_outcome_stats",
-            description="Get statistics about session outcomes for improvement analysis. "
-                        "Shows breakdown by intent, phase, semantic search usage, and confidence.",
-            inputSchema={
-                "type": "object",
-                "properties": {},
-            },
-        ),
-        # v1.4: Intervention System Tools
-        Tool(
-            name="record_verification_failure",
-            description="Record a verification failure for intervention system tracking. "
-                        "Call this when POST_IMPLEMENTATION_VERIFICATION fails. "
-                        "After 3 failures, intervention is triggered with guidance to select appropriate intervention prompt.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "error_message": {
-                        "type": "string",
-                        "description": "What differed from expectation (e.g., 'logo not displayed, color still #ff0000')",
-                    },
-                    "problem_location": {
-                        "type": "string",
-                        "description": "Where the problem was found (e.g., 'inside header element, .btn-primary class')",
-                    },
-                    "observed_values": {
-                        "type": "string",
-                        "description": "Specific values observed (e.g., 'actual color is #333333, element not found')",
-                    },
-                },
-                "required": ["error_message", "problem_location", "observed_values"],
-            },
-        ),
-        Tool(
-            name="record_intervention_used",
-            description="Record that an intervention prompt was used. "
-                        "Call this after reading and following an intervention prompt from .code-intel/interventions/.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "prompt_name": {
-                        "type": "string",
-                        "description": "Name of intervention prompt used (e.g., 'step_back', 'user_escalation')",
-                    },
-                },
-                "required": ["prompt_name"],
-            },
-        ),
-        Tool(
-            name="get_intervention_status",
-            description="Get current intervention system status. "
-                        "Shows verification failure count, intervention count, and whether escalation is required.",
-            inputSchema={
-                "type": "object",
-                "properties": {},
-            },
-        ),
-        Tool(
-            name="validate_symbol_relevance",
-            description="Validate relevance between natural language term and code symbols. "
-                        "Returns a validation prompt for LLM to determine relevance with code_evidence. "
-                        "LLM must explain WHY symbols are related using code evidence (method names, comments, etc.).",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "target_feature": {
-                        "type": "string",
-                        "description": "Natural language term for the target feature (e.g., 'ログイン機能')",
-                    },
-                    "symbols_identified": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "List of code symbols found during exploration",
-                    },
-                },
-                "required": ["target_feature", "symbols_identified"],
-            },
-        ),
-        Tool(
-            name="confirm_symbol_relevance",
-            description="Confirm symbol relevance after LLM validation. "
-                        "Updates mapped_symbols confidence based on embedding similarity and LLM's code_evidence. "
-                        "Call this after validate_symbol_relevance with LLM's response.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "relevant_symbols": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Symbols that LLM confirmed as relevant",
-                    },
-                    "code_evidence": {
-                        "type": "string",
-                        "description": "Code evidence explaining why symbols are related (required)",
-                    },
-                    "reasoning": {
-                        "type": "string",
-                        "description": "LLM's reasoning for the selection",
-                    },
-                },
-                "required": ["relevant_symbols", "code_evidence"],
             },
         ),
         Tool(
@@ -1474,49 +983,6 @@ async def list_tools() -> list[Tool]:
                 },
             },
         ),
-        # v1.1: Submit impact analysis results
-        Tool(
-            name="submit_impact_analysis",
-            description="Submit impact analysis verification results to complete IMPACT_ANALYSIS phase. "
-                        "Validates that all must_verify files have responses with status and reason. "
-                        "Must be called after analyze_impact before proceeding to READY phase.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "verified_files": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "file": {
-                                    "type": "string",
-                                    "description": "File path that was verified",
-                                },
-                                "status": {
-                                    "type": "string",
-                                    "enum": ["will_modify", "no_change_needed", "not_affected"],
-                                    "description": "Verification status for this file",
-                                },
-                                "reason": {
-                                    "type": "string",
-                                    "description": "Reason for status (required when status != will_modify)",
-                                },
-                            },
-                            "required": ["file", "status"],
-                        },
-                        "description": "List of verified files with status and reason",
-                    },
-                    "inferred_from_rules": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Additional files inferred from project_rules naming conventions",
-                    },
-                },
-                "required": ["verified_files"],
-            },
-        ),
-        # v1.10 note: submit_verification_and_impact removed (v1.9 integration reverted)
-        # Use separate submit_verification and submit_impact_analysis instead
     ]
 
 
@@ -1564,39 +1030,141 @@ def _validate_phase_assessment(phase: str, assessment: dict) -> tuple[bool, str]
     return True, ""
 
 
-def _get_next_instruction(phase: str, phase_required: bool, next_phase: str) -> str:
-    """
-    Generate instruction for the next step after phase necessity check.
-
-    Args:
-        phase: The phase that was checked
-        phase_required: Whether the phase is required
-        next_phase: The next phase or checkpoint
-
-    Returns:
-        Instruction string
-    """
-    if phase_required:
-        if phase == "SEMANTIC":
-            return "Execute SEMANTIC phase: Use semantic_search to gather additional information, then call submit_semantic."
-        elif phase == "VERIFICATION":
-            return "Execute VERIFICATION phase: Verify hypotheses using code-intel tools, then call submit_verification."
-        elif phase == "IMPACT_ANALYSIS":
-            return "Execute IMPACT_ANALYSIS phase: Analyze impact range using analyze_impact, then call submit_impact_analysis."
-    else:
-        if next_phase == "Q2_CHECK":
-            return "SEMANTIC skipped. Now check VERIFICATION necessity using check_phase_necessity(phase='VERIFICATION', assessment={...})."
-        elif next_phase == "Q3_CHECK":
-            return "VERIFICATION skipped. Now check IMPACT_ANALYSIS necessity using check_phase_necessity(phase='IMPACT_ANALYSIS', assessment={...})."
-        elif next_phase == "READY":
-            return "IMPACT_ANALYSIS skipped. Proceed to READY phase for implementation."
-
-    return "Proceed to next step."
-
 
 # =============================================================================
 # v1.11: submit_phase dispatch
 # =============================================================================
+
+READY_PAYLOAD_STEP_MAP = {
+    "READY_PLAN": 12,
+    "READY_IMPL": 13,
+    "READY_COMPLETE": 14,
+}
+
+_IGNORED_TOOL_CALLS = {"submit_phase"}
+_REQUIRED_TOOLS_BY_PAYLOAD: dict[str, set[str]] = {
+    "SEMANTIC": {"semantic_search"},
+    "IMPACT_ANALYSIS": {"analyze_impact"},
+    "READY_IMPL": {"check_write_target"},
+    "PRE_COMMIT": {"review_changes"},
+}
+
+
+def _tools_used_in_phase(session: SessionState, phase_name: str) -> set[str]:
+    phase_start = None
+    for entry in reversed(session.phase_history):
+        if entry.get("phase") == phase_name and entry.get("started_at"):
+            phase_start = entry.get("started_at")
+            break
+
+    def _within_phase(call: dict) -> bool:
+        if call.get("phase") != phase_name:
+            return False
+        if not phase_start:
+            return True
+        ts = call.get("started_at") or call.get("timestamp")
+        if not ts:
+            return True
+        try:
+            return datetime.fromisoformat(ts) >= datetime.fromisoformat(phase_start)
+        except Exception:
+            return True
+
+    return {
+        call.get("tool")
+        for call in session.tool_calls
+        if _within_phase(call) and call.get("tool") not in _IGNORED_TOOL_CALLS
+    }
+
+
+def _validate_tool_usage(session: SessionState, data: dict, payload_key: str) -> dict | None:
+    phase_response = _phase_response_for_payload_key(session, payload_key)
+    expected = phase_response.get("expected_payload", EXPECTED_PAYLOADS.get(payload_key, {}))
+    if "tools_used" not in expected:
+        return None
+
+    actual_tools = _tools_used_in_phase(session, session.phase.name)
+    required = _REQUIRED_TOOLS_BY_PAYLOAD.get(payload_key, set())
+    reported = set(data.get("tools_used", [])) if isinstance(data.get("tools_used"), list) else set()
+
+    if payload_key == "EXPLORATION" and len(actual_tools) < 2:
+        return {
+            "error": "payload_mismatch",
+            "current_phase": session.phase.name,
+            "step": READY_PAYLOAD_STEP_MAP.get(payload_key, PHASE_STEP_MAP.get(payload_key, 0)),
+            "message": "EXPLORATION requires at least 2 distinct tools before submit_phase.",
+            **phase_response,
+        }
+
+    missing = required - actual_tools
+    if missing:
+        missing_list = ", ".join(sorted(missing))
+        return {
+            "error": "payload_mismatch",
+            "current_phase": session.phase.name,
+            "step": READY_PAYLOAD_STEP_MAP.get(payload_key, PHASE_STEP_MAP.get(payload_key, 0)),
+            "message": f"Required tools not used: {missing_list}.",
+            **phase_response,
+        }
+
+    if required and not required.issubset(reported):
+        missing_reported = ", ".join(sorted(required - reported))
+        return {
+            "error": "payload_mismatch",
+            "current_phase": session.phase.name,
+            "step": READY_PAYLOAD_STEP_MAP.get(payload_key, PHASE_STEP_MAP.get(payload_key, 0)),
+            "message": f"tools_used must include required tools: {missing_reported}.",
+            **phase_response,
+        }
+
+    return None
+
+
+def _resolve_payload_key_for_submit(session: SessionState, data: dict) -> str:
+    if session.phase == Phase.READY:
+        if "tasks" in data:
+            return "READY_PLAN"
+        if "task_id" in data:
+            return "READY_IMPL"
+        return "READY_COMPLETE"
+    return session.phase.name
+
+
+def _phase_response_for_payload_key(session: SessionState, payload_key: str) -> dict:
+    if session.phase == Phase.READY:
+        step = READY_PAYLOAD_STEP_MAP.get(payload_key, 12)
+        return _phase_response(session, "READY", step=step, extra={"ready_substep": payload_key})
+    return _phase_response(session, payload_key)
+
+
+def _validate_common_payload(session: SessionState, data: dict, payload_key: str) -> dict | None:
+    phase_response = _phase_response_for_payload_key(session, payload_key)
+    expected = phase_response.get("expected_payload", EXPECTED_PAYLOADS.get(payload_key, {}))
+
+    if "summary" in expected:
+        summary = data.get("summary")
+        if not isinstance(summary, str) or not summary.strip():
+            return {
+                "error": "payload_mismatch",
+                "current_phase": session.phase.name,
+                "step": READY_PAYLOAD_STEP_MAP.get(payload_key, PHASE_STEP_MAP.get(payload_key, 0)),
+                "message": "summary is required for this phase.",
+                **phase_response,
+            }
+
+    if "tools_used" in expected:
+        tools_used = data.get("tools_used")
+        if not isinstance(tools_used, list):
+            return {
+                "error": "payload_mismatch",
+                "current_phase": session.phase.name,
+                "step": READY_PAYLOAD_STEP_MAP.get(payload_key, PHASE_STEP_MAP.get(payload_key, 0)),
+                "message": "tools_used must be a list (empty list allowed).",
+                **phase_response,
+            }
+
+    return None
+
 
 async def _handle_submit_phase(session: SessionState, data: dict) -> dict:
     """
@@ -1688,7 +1256,7 @@ async def _submit_branch_intervention(session: SessionState, data: dict) -> dict
             "current_phase": "BRANCH_INTERVENTION",
             "step": 2,
             "message": "choice must be 'delete', 'merge', or 'continue'.",
-            **get_phase_response("BRANCH_INTERVENTION"),
+            **_phase_response(session, "BRANCH_INTERVENTION"),
         }
 
     repo_path = session.repo_path or "."
@@ -1699,6 +1267,17 @@ async def _submit_branch_intervention(session: SessionState, data: dict) -> dict
         cleanup_result = await BranchManager.cleanup_stale_sessions(repo_path, action="merge")
     else:
         cleanup_result = {"action": "continue"}
+        session.branch_policy = "continue"
+        try:
+            branch_status = await BranchManager.is_task_branch_checked_out(repo_path)
+            if branch_status.get("is_task_branch"):
+                session.task_branch_enabled = True
+                session.task_branch_name = branch_status.get("current_branch")
+        except Exception:
+            pass
+
+    if choice in ("delete", "merge"):
+        session.branch_policy = None
 
     # Determine next phase
     next_phase = Phase.DOCUMENT_RESEARCH
@@ -1711,7 +1290,7 @@ async def _submit_branch_intervention(session: SessionState, data: dict) -> dict
         "success": True,
         "choice": choice,
         "cleanup_result": cleanup_result if choice != "continue" else None,
-        **get_phase_response(next_phase.name),
+        **_phase_response(session, next_phase.name),
     }
 
 
@@ -1730,7 +1309,7 @@ def _submit_document_research(session: SessionState, data: dict) -> dict:
     return {
         "success": True,
         "documents_reviewed": len(documents_reviewed),
-        **get_phase_response("QUERY_FRAME"),
+        **_phase_response(session, "QUERY_FRAME"),
     }
 
 
@@ -1766,7 +1345,7 @@ async def _submit_query_frame(session: SessionState, data: dict) -> dict:
         # Skip exploration → READY
         next_phase = Phase.READY
         session.transition_to_phase(next_phase, reason="query_frame_complete_skip_exploration")
-        response = get_phase_response("READY", extra={"ready_substep": "READY_PLAN"})
+        response = _phase_response(session, "READY", extra={"ready_substep": "READY_PLAN"})
         # --fast: create branch for READY (--quick: no branch)
         if session.fast_mode:
             branch_result = await _create_branch_for_ready(session)
@@ -1775,7 +1354,7 @@ async def _submit_query_frame(session: SessionState, data: dict) -> dict:
     else:
         next_phase = Phase.EXPLORATION
         session.transition_to_phase(next_phase, reason="query_frame_complete")
-        response = get_phase_response("EXPLORATION")
+        response = _phase_response(session, "EXPLORATION")
 
     return {
         "success": True,
@@ -1800,8 +1379,8 @@ def _submit_exploration_v11(session: SessionState, data: dict) -> dict:
     existing_patterns = data.get("existing_patterns", [])
     files_analyzed = data.get("files_analyzed", explored_files)
 
-    # Auto-populate tools_used from session history
-    tools_used = list({tc["tool"] for tc in session.tool_calls if "tool" in tc})
+    # Auto-populate tools_used from current phase history
+    tools_used = list(_tools_used_in_phase(session, session.phase.name))
 
     exploration = ExplorationResult(
         symbols_identified=symbols_identified,
@@ -1827,7 +1406,7 @@ def _submit_exploration_v11(session: SessionState, data: dict) -> dict:
     return {
         "success": True,
         "explored_files_count": len(files_analyzed),
-        **get_phase_response("Q1"),
+        **_phase_response(session, "Q1"),
     }
 
 
@@ -1850,7 +1429,7 @@ async def _submit_q1(session: SessionState, data: dict) -> dict:
         return {
             "success": True,
             "decision": "SEMANTIC required",
-            **get_phase_response("SEMANTIC"),
+            **_phase_response(session, "SEMANTIC"),
         }
     else:
         # Skip SEMANTIC → Q2
@@ -1858,7 +1437,7 @@ async def _submit_q1(session: SessionState, data: dict) -> dict:
         return {
             "success": True,
             "decision": "SEMANTIC skipped",
-            **get_phase_response("Q2"),
+            **_phase_response(session, "Q2"),
         }
 
 
@@ -1878,7 +1457,7 @@ def _submit_semantic_v11(session: SessionState, data: dict) -> dict:
     return {
         "success": True,
         "search_results_count": len(search_results),
-        **get_phase_response("Q2"),
+        **_phase_response(session, "Q2"),
     }
 
 
@@ -1900,14 +1479,14 @@ async def _submit_q2(session: SessionState, data: dict) -> dict:
         return {
             "success": True,
             "decision": "VERIFICATION required",
-            **get_phase_response("VERIFICATION"),
+            **_phase_response(session, "VERIFICATION"),
         }
     else:
         session.transition_to_phase(Phase.Q3, reason="q2_skip_verification")
         return {
             "success": True,
             "decision": "VERIFICATION skipped",
-            **get_phase_response("Q3"),
+            **_phase_response(session, "Q3"),
         }
 
 
@@ -1927,7 +1506,7 @@ def _submit_verification_v11(session: SessionState, data: dict) -> dict:
     return {
         "success": True,
         "verified_count": len(hypotheses_verified),
-        **get_phase_response("Q3"),
+        **_phase_response(session, "Q3"),
     }
 
 
@@ -1949,7 +1528,7 @@ async def _submit_q3(session: SessionState, data: dict) -> dict:
         return {
             "success": True,
             "decision": "IMPACT_ANALYSIS required",
-            **get_phase_response("IMPACT_ANALYSIS"),
+            **_phase_response(session, "IMPACT_ANALYSIS"),
         }
     else:
         # Skip IMPACT_ANALYSIS
@@ -1968,7 +1547,7 @@ async def _submit_q3(session: SessionState, data: dict) -> dict:
         # Create branch for READY
         branch_result = await _create_branch_for_ready(session)
 
-        response = get_phase_response("READY", extra={"ready_substep": "READY_PLAN"})
+        response = _phase_response(session, "READY", extra={"ready_substep": "READY_PLAN"})
         if branch_result.get("branch"):
             response["branch"] = branch_result["branch"]
 
@@ -2002,7 +1581,7 @@ def _submit_impact_analysis_v11(session: SessionState, data: dict) -> dict:
 
     return {
         "success": True,
-        **get_phase_response("READY", extra={"ready_substep": "READY_PLAN"}),
+        **_phase_response(session, "READY", extra={"ready_substep": "READY_PLAN"}),
     }
 
 
@@ -2015,7 +1594,7 @@ def _submit_ready(session: SessionState, data: dict) -> dict:
         if "error" in result:
             return {
                 **result,
-                **get_phase_response("READY", step=12, extra={"ready_substep": "READY_PLAN"}),
+                **_phase_response(session, "READY", step=12, extra={"ready_substep": "READY_PLAN"}),
             }
 
         # Read task_planning.md if exists
@@ -2029,7 +1608,7 @@ def _submit_ready(session: SessionState, data: dict) -> dict:
 
         response = {
             **result,
-            **get_phase_response("READY", step=13, extra={"ready_substep": "READY_IMPL"}),
+            **_phase_response(session, "READY", step=13, extra={"ready_substep": "READY_IMPL"}),
         }
         if planning_guide:
             response["planning_guide"] = planning_guide
@@ -2046,7 +1625,7 @@ def _submit_ready(session: SessionState, data: dict) -> dict:
     if "error" in check:
         return {
             **check,
-            **get_phase_response("READY", step=14, extra={"ready_substep": "READY_COMPLETE"}),
+            **_phase_response(session, "READY", step=14, extra={"ready_substep": "READY_COMPLETE"}),
         }
 
     # All tasks complete → determine next phase
@@ -2060,13 +1639,13 @@ def _submit_ready(session: SessionState, data: dict) -> dict:
         session.transition_to_phase(Phase.PRE_COMMIT, reason="ready_complete_no_verify")
         return {
             "success": True,
-            **get_phase_response("PRE_COMMIT"),
+            **_phase_response(session, "PRE_COMMIT"),
         }
     else:
         session.transition_to_phase(Phase.POST_IMPL_VERIFY, reason="ready_complete")
         return {
             "success": True,
-            **get_phase_response("POST_IMPL_VERIFY"),
+            **_phase_response(session, "POST_IMPL_VERIFY"),
         }
 
 
@@ -2087,7 +1666,7 @@ def _submit_post_impl_verify(session: SessionState, data: dict) -> dict:
         return {
             "success": True,
             "verified": True,
-            **get_phase_response("PRE_COMMIT"),
+            **_phase_response(session, "PRE_COMMIT"),
         }
     else:
         # Increment failure_count for failed tasks
@@ -2111,14 +1690,14 @@ def _submit_post_impl_verify(session: SessionState, data: dict) -> dict:
                     "revert_to": "READY",
                     "reason": "Verification failed (intervention skipped).",
                     "existing_tasks": [t.to_dict() for t in session.tasks],
-                    **get_phase_response("READY", step=12, extra={"ready_substep": "READY_PLAN"}),
+                    **_phase_response(session, "READY", step=12, extra={"ready_substep": "READY_PLAN"}),
                 }
             else:
                 # → VERIFY_INTERVENTION
                 session.transition_to_phase(Phase.VERIFY_INTERVENTION, reason="post_impl_verify_3_failures")
                 return {
                     "success": True,
-                    **get_phase_response("VERIFY_INTERVENTION"),
+                    **_phase_response(session, "VERIFY_INTERVENTION"),
                     "failure_details": details,
                     "failed_tasks": failed_tasks,
                     "high_failure_tasks": [t.to_dict() for t in session.tasks if t.failure_count >= 3],
@@ -2132,7 +1711,7 @@ def _submit_post_impl_verify(session: SessionState, data: dict) -> dict:
                 "revert_to": "READY",
                 "reason": f"Verification failed: {details}",
                 "existing_tasks": [t.to_dict() for t in session.tasks],
-                **get_phase_response("READY", step=12, extra={"ready_substep": "READY_PLAN"}),
+                **_phase_response(session, "READY", step=12, extra={"ready_substep": "READY_PLAN"}),
             }
 
 
@@ -2157,14 +1736,17 @@ def _submit_verify_intervention(session: SessionState, data: dict) -> dict:
 
     # Check if user escalation is needed
     if session.intervention_count >= 2:
+        response = _phase_response(session, "VERIFY_INTERVENTION")
+        response["instruction"] = (
+            ".code-intel/user_escalation.md の手順に従いユーザーへヘルプ要請を行ってください。"
+            "使用した手順書の名前/パスを明記して submit_phase で送信してください。"
+        )
         return {
             "success": True,
             "user_escalation": True,
             "intervention_count": session.intervention_count,
-            "instruction": "ユーザーに相談してください。AskUserQuestion で判断を委ねてください。",
-            "expected_payload": {},
-            "call": "submit_phase",
             "message": f"介入を {session.intervention_count} 回実行しました。ユーザーに相談してください。",
+            **response,
         }
 
     # Revert to READY
@@ -2176,7 +1758,7 @@ def _submit_verify_intervention(session: SessionState, data: dict) -> dict:
         "intervention_count": session.intervention_count,
         "failure_counts_reset": True,
         "existing_tasks": [t.to_dict() for t in session.tasks],
-        **get_phase_response("READY", step=12, extra={"ready_substep": "READY_PLAN"}),
+        **_phase_response(session, "READY", step=12, extra={"ready_substep": "READY_PLAN"}),
     }
 
 
@@ -2189,7 +1771,7 @@ async def _submit_pre_commit(session: SessionState, data: dict) -> dict:
         return {
             "error": "missing_commit_message",
             "message": "commit_message is required.",
-            **get_phase_response("PRE_COMMIT"),
+            **_phase_response(session, "PRE_COMMIT"),
         }
 
     # Get branch manager
@@ -2245,7 +1827,7 @@ async def _submit_pre_commit(session: SessionState, data: dict) -> dict:
                 "success": True,
                 "commit_hash": None if finalize_result.prepared else finalize_result.commit_hash,
                 "prepared": finalize_result.prepared,
-                **get_phase_response("QUALITY_REVIEW"),
+                **_phase_response(session, "QUALITY_REVIEW"),
             }
         # else: skip quality review
 
@@ -2256,7 +1838,7 @@ async def _submit_pre_commit(session: SessionState, data: dict) -> dict:
     return {
         "success": True,
         "commit_hash": finalize_result.commit_hash,
-        **get_phase_response("MERGE"),
+        **_phase_response(session, "MERGE"),
     }
 
 
@@ -2279,7 +1861,7 @@ async def _submit_quality_review_v11(session: SessionState, data: dict) -> dict:
                 "forced_completion": True,
                 "warning": "品質問題が未解決のまま完了",
                 "quality_revert_count": session.quality_revert_count,
-                **get_phase_response("MERGE"),
+                **_phase_response(session, "MERGE"),
             }
 
         # Clear commit preparation
@@ -2298,7 +1880,7 @@ async def _submit_quality_review_v11(session: SessionState, data: dict) -> dict:
             "issues": issues,
             "quality_revert_count": session.quality_revert_count,
             "existing_tasks": [t.to_dict() for t in session.tasks],
-            **get_phase_response("READY", step=12, extra={"ready_substep": "READY_PLAN"}),
+            **_phase_response(session, "READY", step=12, extra={"ready_substep": "READY_PLAN"}),
         }
     else:
         # Execute prepared commit if exists
@@ -2321,7 +1903,7 @@ async def _submit_quality_review_v11(session: SessionState, data: dict) -> dict:
             "success": True,
             "issues_found": False,
             "commit_hash": commit_hash,
-            **get_phase_response("MERGE"),
+            **_phase_response(session, "MERGE"),
         }
 
 
@@ -2339,7 +1921,7 @@ async def _submit_merge(session: SessionState, data: dict) -> dict:
         return {
             "error": "quality_review_required",
             "message": "QUALITY_REVIEW not completed.",
-            **get_phase_response("QUALITY_REVIEW"),
+            **_phase_response(session, "QUALITY_REVIEW"),
         }
 
     repo_path = session.repo_path or "."
@@ -2401,7 +1983,21 @@ def check_phase_access(tool_name: str) -> dict | None:
 
 @server.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
-    """Execute a code intelligence tool."""
+    """Execute a code intelligence tool (v1.12: with response truncation)."""
+    result = await _call_tool_impl(name, arguments)
+
+    # v1.12: Apply response size limit to all tool responses
+    if result and len(result) > 0:
+        content = result[0].text
+        truncated_content, was_truncated = _truncate_response(content)
+        if was_truncated:
+            result = [TextContent(type="text", text=truncated_content)]
+
+    return result
+
+
+async def _call_tool_impl(name: str, arguments: dict) -> list[TextContent]:
+    """Execute a code intelligence tool (implementation)."""
 
     # v1.8: Record tool call start for performance tracking
     session = session_manager.get_active_session()
@@ -2473,7 +2069,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
         # v1.11: Self-contained response
         first_phase = session.phase.name
-        first_response = get_phase_response(first_phase)
+        first_response = _phase_response(session, first_phase)
 
         result = {
             "success": True,
@@ -2606,256 +2202,49 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             result["exploration_hint"] = (
                 "v3.9: Use semantic_search to find past agreements (map) and relevant code (forest). "
                 "If no hit, use code-intel tools to fill missing slots. "
-                "Then call submit_exploration and check_phase_necessity to determine next steps."
+                "Then call submit_phase to proceed."
             )
-        return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
-    elif name == "begin_phase_gate":
-        # v1.6: Start phase gate (separated from start_session)
-        # v1.11: Branch creation moved to READY phase transition
-        session_id = arguments["session_id"]
-        skip_branch = arguments.get("skip_branch", False)
-        skip_exploration = arguments.get("skip_exploration", False)
-        resume_current = arguments.get("resume_current", False)
+        # v1.12: Check for existing checkpoints and notify recovery_available
+        try:
+            checkpoints = session_manager.list_checkpoints(repo_path)
+            # Filter out the current session's checkpoint (it was just created)
+            old_checkpoints = [cp for cp in checkpoints if cp["session_id"] != session.session_id]
+            if old_checkpoints:
+                latest = old_checkpoints[-1]
+                result["recovery_available"] = True
+                result["checkpoint_info"] = latest
+        except Exception:
+            pass
 
-        session = session_manager.get_session(session_id)
-        if session is None:
-            result = {
-                "success": False,
-                "error": "session_not_found",
-                "message": f"Session {session_id} not found. Call start_session first.",
-            }
-            return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+        # v1.12: Save initial checkpoint
+        session_manager.save_checkpoint(session.session_id, repo_path)
 
-        repo_path = session.repo_path
-
-        # Check for stale branches (unless resume_current=true)
-        if not resume_current:
-            stale_info = await BranchManager.list_stale_branches(repo_path)
-            stale_branches = stale_info.get("stale_branches", [])
-            is_on_task_branch = stale_info.get("is_on_task_branch", False)
-            current_branch = stale_info.get("current_branch", "")
-
-            # v1.12: Trigger intervention if ANY task branch exists (including current)
-            # This ensures user always chooses what to do with existing task branches
-            if stale_branches:
-                if is_on_task_branch:
-                    # Currently on a task branch - offer to continue, merge+start fresh, or delete+start fresh
-                    result = {
-                        "success": False,
-                        "error": "on_task_branch",
-                        "has_task_branch": True,
-                        "task_branch": current_branch,
-                        "intervention_needed": True,
-                        "stale_branches": {
-                            "branches": stale_branches,
-                            "message": f"Currently on task branch '{current_branch}'. User action required.",
-                        },
-                        "recovery_options": {
-                            "continue": "Call begin_phase_gate(resume_current=true) to continue on current task branch",
-                            "merge_and_fresh": "Run merge_to_base, then retry begin_phase_gate (creates new branch)",
-                            "delete_and_fresh": "Run cleanup_stale_branches, then retry begin_phase_gate (creates new branch)",
-                        },
-                    }
-                else:
-                    # Not on task branch but stale branches exist
-                    result = {
-                        "success": False,
-                        "error": "stale_branches_detected",
-                        "has_task_branch": True,
-                        "intervention_needed": True,
-                        "stale_branches": {
-                            "branches": stale_branches,
-                            "message": "Previous task branches exist. User action required.",
-                        },
-                        "recovery_options": {
-                            "delete": "Run cleanup_stale_branches, then retry begin_phase_gate",
-                            "merge": "Run merge_to_base for each branch, then retry begin_phase_gate",
-                            "continue": "Call begin_phase_gate(resume_current=true) to leave stale branches and continue",
-                        },
-                    }
-                return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
-
-        # Handle skip_branch
-        if skip_branch:
-            session.task_branch_enabled = False
-
-            # v1.8: Differentiate between --quick mode and exploration-only mode
-            if session.skip_implementation:
-                # Exploration-only mode (INVESTIGATE/QUESTION): start with EXPLORATION
-                session.transition_to_phase(Phase.EXPLORATION, reason="skip_branch (exploration-only)")
-                result = {
-                    "success": True,
-                    "phase": "EXPLORATION",
-                    "branch": {
-                        "created": False,
-                        "reason": "skip_branch=true (exploration-only)",
-                    },
-                }
-            else:
-                # --quick mode: skip directly to READY
-                session.transition_to_phase(Phase.READY, reason="skip_branch (quick mode)")
-                result = {
-                    "success": True,
-                    "phase": "READY",
-                    "branch": {
-                        "created": False,
-                        "reason": "skip_branch=true (quick mode)",
-                    },
-                }
-            return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
-
-        # Handle skip_exploration (--fast mode): skip exploration but create branch
-        if skip_exploration:
-            # Create branch and go directly to READY
-            branch_result = await _create_branch_for_ready(session)
-            if not branch_result.get("success", False) and "error" in branch_result:
-                # Branch creation failed
-                return [TextContent(type="text", text=json.dumps(branch_result, indent=2, ensure_ascii=False))]
-
-            session.transition_to_phase(Phase.READY, reason="skip_exploration (fast mode)")
-            result = {
-                "success": True,
-                "phase": "READY",
-                "branch": branch_result.get("branch"),
-                "message": "Exploration skipped. Branch created. Ready for implementation.",
-            }
-            return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
-
-        # Handle resume_current
-        if resume_current:
-            current_info = await BranchManager.is_task_branch_checked_out(repo_path)
-
-            if current_info.get("is_task_branch"):
-                # Already on a task branch - continue there
-                session.transition_to_phase(Phase.EXPLORATION, reason="resume_current")
-                session.task_branch_enabled = True
-                session.task_branch_name = current_info["current_branch"]
-
-                result = {
-                    "success": True,
-                    "phase": session.phase.name,
-                    "branch": {
-                        "created": False,
-                        "resumed": True,
-                        "name": current_info["current_branch"],
-                        "reason": "resume_current=true (continuing on current task branch)",
-                    },
-                }
-                return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
-            # If not on task branch with resume_current, fall through to normal flow
-
-        # v1.11: Normal flow - just transition to EXPLORATION, no branch creation yet
-        # Branch will be created when transitioning to READY phase
-        session.transition_to_phase(Phase.EXPLORATION, reason="begin_phase_gate")
-        session.task_branch_enabled = False  # Will be enabled when branch is created at READY
-
-        result = {
-            "success": True,
-            "phase": session.phase.name,
-            "branch": {
-                "created": False,
-                "reason": "v1.11: Branch creation deferred to READY phase",
-            },
-        }
-        return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
-
-    elif name == "set_query_frame":
-        # v3.6: Set QueryFrame from LLM extraction
-        session = session_manager.get_active_session()
-        if session is None:
-            result = {"error": "no_active_session", "message": "No active session. Use start_session first."}
-            return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
-
-        raw_query = session.query
-
-        # Validate and extract each slot
-        frame = QueryFrame(raw_query=raw_query)
-        validation_errors = []
-        validated_slots = []
-
-        slot_names = ["target_feature", "trigger_condition", "observed_issue", "desired_action"]
-        for slot_name in slot_names:
-            slot_data = arguments.get(slot_name)
-            if slot_data is not None:
-                # validate_slot returns (value, quote) on success, (None, None) on failure
-                value, validated_quote = validate_slot(slot_name, slot_data, raw_query)
-                if value is None:
-                    # Validation failed - quote not found or semantically inconsistent
-                    provided_quote = slot_data.get("quote", "")
-                    validation_errors.append({
-                        "slot": slot_name,
-                        "error": f"quote '{provided_quote}' not found in query or semantically inconsistent"
-                    })
-                else:
-                    setattr(frame, slot_name, value)
-                    frame.slot_quotes[slot_name] = validated_quote or ""
-                    frame.slot_source[slot_name] = SlotSource.FACT  # From query = FACT
-                    validated_slots.append(slot_name)
-
-        if validation_errors:
-            result = {
-                "success": False,
-                "error": "validation_failed",
-                "validation_errors": validation_errors,
-                "message": "Some slot validations failed. Check quotes match original query.",
-            }
-            return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
-
-        # Set frame on session
-        session.query_frame = frame
-
-        # v1.10: Assess risk level (inlined from assess_risk_level())
-        # Determine risk based on QueryFrame completeness
-        if frame.desired_action and not frame.observed_issue:
-            risk_level = "HIGH"
-        elif session.intent == "MODIFY" and not frame.target_feature:
-            risk_level = "HIGH"
-        elif session.intent == "IMPLEMENT" and not any([
-            frame.target_feature,
-            frame.trigger_condition,
-            frame.observed_issue,
-            frame.desired_action,
-        ]):
-            risk_level = "HIGH"
-        elif frame.observed_issue and len(frame.observed_issue) < 10:
-            risk_level = "MEDIUM"
-        elif frame.get_hypothesis_slots():
-            risk_level = "MEDIUM"
-        else:
-            risk_level = "LOW"
-
-        session.risk_level = risk_level
-
-        # Get missing slots and investigation guidance
-        missing_slots = frame.get_missing_slots()
-        guidance = generate_investigation_guidance(missing_slots)
-
-        result = {
-            "success": True,
-            "query_frame": {
-                "raw_query": raw_query,
-                "target_feature": frame.target_feature,
-                "trigger_condition": frame.trigger_condition,
-                "observed_issue": frame.observed_issue,
-                "desired_action": frame.desired_action,
-                "validated_slots": validated_slots,
-                "slot_sources": {k: v.value for k, v in frame.slot_source.items()},
-            },
-            "risk_level": risk_level,
-            "missing_slots": missing_slots,
-            "investigation_guidance": guidance,
-            "message": f"QueryFrame set. Risk level: {risk_level}. Missing slots: {missing_slots}",
-        }
         return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
     elif name == "get_session_status":
         session = session_manager.get_active_session()
         if session is None:
-            result = {
-                "error": "no_active_session",
-                "message": "No active session. Use start_session first.",
-            }
+            # v1.12: Auto-restore from checkpoint
+            repo_path = arguments.get("repo_path", ".")
+            checkpoints = session_manager.list_checkpoints(repo_path)
+            if checkpoints:
+                latest = checkpoints[-1]  # sorted by checkpoint_at
+                restored = session_manager.load_checkpoint(latest["session_id"], repo_path)
+                if restored:
+                    result = restored.get_status()
+                    result["recovered_from_checkpoint"] = True
+                    result["checkpoint_session_id"] = latest["session_id"]
+                else:
+                    result = {
+                        "error": "no_active_session",
+                        "message": "No active session. Checkpoint found but failed to restore.",
+                    }
+            else:
+                result = {
+                    "error": "no_active_session",
+                    "message": "No active session. Use start_session first.",
+                }
         else:
             result = session.get_status()
         return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
@@ -2878,212 +2267,34 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 result = {"error": "invalid_data", "message": f"Failed to parse data JSON: {e}"}
                 return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
+        payload_key = _resolve_payload_key_for_submit(session, data)
+        validation_error = _validate_common_payload(session, data, payload_key)
+        if validation_error:
+            return [TextContent(type="text", text=json.dumps(validation_error, indent=2, ensure_ascii=False))]
+        tool_validation_error = _validate_tool_usage(session, data, payload_key)
+        if tool_validation_error:
+            return [TextContent(type="text", text=json.dumps(tool_validation_error, indent=2, ensure_ascii=False))]
+
         result = await _handle_submit_phase(session, data)
-        return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
-    # v1.10 note: submit_understanding handler removed (replaced by check_phase_necessity)
-    # submit_exploration validates quality; check_phase_necessity handles phase transitions
-    # v1.11 note: The following handlers are DEPRECATED (use submit_phase instead)
-    # They are kept temporarily for backward compatibility during migration.
+        if result and not result.get("error"):
+            summary = data.get("summary")
+            if isinstance(summary, str) and summary.strip():
+                step = READY_PAYLOAD_STEP_MAP.get(payload_key, PHASE_STEP_MAP.get(payload_key, 0))
+                if step:
+                    session.record_phase_summary(payload_key, step, summary)
 
-    elif name == "submit_exploration":
-        session = session_manager.get_active_session()
-        if session is None:
-            result = {"error": "no_active_session", "message": "No active session."}
-        else:
-            # Auto-populate tools_used from session's tool_calls history
-            # More reliable than LLM self-reporting
-            tools_used = list({tc["tool"] for tc in session.tool_calls if "tool" in tc})
-            exploration = ExplorationResult(
-                symbols_identified=arguments.get("symbols_identified", []),
-                entry_points=arguments.get("entry_points", []),
-                existing_patterns=arguments.get("existing_patterns", []),
-                files_analyzed=arguments.get("files_analyzed", []),
-                tools_used=tools_used,
-                notes=arguments.get("notes", ""),
-            )
-            result = session.submit_exploration(exploration)
-        return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+        # v1.12: Checkpoint persistence after submit_phase
+        if result and not result.get("error"):
+            repo_path = session.repo_path or "."
+            session_complete = result.get("decision", "").startswith("SESSION_COMPLETE") or \
+                               result.get("session_complete", False)
+            if session_complete:
+                # Delete checkpoint on SESSION_COMPLETE (no need to save first)
+                SessionManager.delete_checkpoint(session.session_id, repo_path)
+            else:
+                session_manager.save_checkpoint(session.session_id, repo_path)
 
-    elif name == "submit_semantic":
-        session = session_manager.get_active_session()
-        if session is None:
-            result = {"error": "no_active_session", "message": "No active session."}
-        else:
-            # semantic_reason を文字列から SemanticReason Enum に変換
-            reason_str = arguments.get("semantic_reason")
-            semantic_reason = None
-            if reason_str:
-                try:
-                    semantic_reason = SemanticReason(reason_str)
-                except ValueError:
-                    result = {
-                        "error": "invalid_semantic_reason",
-                        "message": f"Invalid semantic_reason: '{reason_str}'",
-                        "valid_reasons": [r.value for r in SemanticReason],
-                    }
-                    return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
-
-            # hypotheses を Hypothesis オブジェクトに変換
-            hypotheses_raw = arguments.get("hypotheses", [])
-            # Handle string-serialized hypotheses (MCP client workaround)
-            if isinstance(hypotheses_raw, str):
-                try:
-                    hypotheses_raw = json.loads(hypotheses_raw)
-                except json.JSONDecodeError as e:
-                    result = {"error": "invalid_hypotheses", "message": f"Failed to parse hypotheses JSON: {e}"}
-                    return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
-            hypotheses = []
-            for h in hypotheses_raw:
-                if isinstance(h, str):
-                    # 後方互換性: 文字列の場合は medium confidence
-                    hypotheses.append(Hypothesis(text=h, confidence="medium"))
-                elif isinstance(h, dict):
-                    hypotheses.append(Hypothesis(
-                        text=h.get("text", ""),
-                        confidence=h.get("confidence", "medium"),
-                    ))
-
-            semantic = SemanticResult(
-                hypotheses=hypotheses,
-                semantic_reason=semantic_reason,
-                search_queries=arguments.get("search_queries", []),
-            )
-            result = session.submit_semantic(semantic)
-        return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
-
-    elif name == "check_phase_necessity":
-        # v1.10: Check phase necessity before execution
-        session = session_manager.get_active_session()
-        if session is None:
-            result = {"error": "no_active_session", "message": "No active session."}
-        else:
-            phase = arguments["phase"]
-            assessment = arguments["assessment"]
-
-            # Handle string-serialized assessment (MCP client workaround)
-            if isinstance(assessment, str):
-                try:
-                    assessment = json.loads(assessment)
-                except json.JSONDecodeError as e:
-                    result = {"error": "invalid_assessment", "message": f"Failed to parse assessment JSON: {e}"}
-                    return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
-
-            # Validate assessment fields based on phase
-            valid, error_msg = _validate_phase_assessment(phase, assessment)
-            if not valid:
-                result = {"error": "invalid_assessment", "message": error_msg}
-                return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
-
-            # gate_level="full" forces execution of all phases
-            if session.gate_level == "full":
-                session.phase = Phase[phase]
-                session.phase_assessments[phase] = assessment
-                result = {
-                    "success": True,
-                    "phase_required": True,
-                    "next_phase": phase,
-                    "reason": "gate_level=full: All phases are executed regardless of assessment",
-                    "assessment": assessment,
-                }
-                return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
-
-            # gate_level="auto": Use assessment to determine
-            phase_required = False
-            next_phase = None
-            branch_result = None  # v1.11: Track branch creation for READY transition
-
-            if phase == "SEMANTIC":
-                needs_more_info = assessment.get("needs_more_information", False)
-                if needs_more_info:
-                    phase_required = True
-                    next_phase = "SEMANTIC"
-                    session.phase = Phase.SEMANTIC
-                else:
-                    # Skip SEMANTIC, proceed to Q2 check
-                    next_phase = "Q2_CHECK"
-
-            elif phase == "VERIFICATION":
-                has_unverified = assessment.get("has_unverified_hypotheses", False)
-                if has_unverified:
-                    phase_required = True
-                    next_phase = "VERIFICATION"
-                    session.phase = Phase.VERIFICATION
-                else:
-                    # Skip VERIFICATION, proceed to Q3 check
-                    next_phase = "Q3_CHECK"
-
-            elif phase == "IMPACT_ANALYSIS":
-                needs_impact = assessment.get("needs_impact_analysis", False)
-                if needs_impact:
-                    phase_required = True
-                    next_phase = "IMPACT_ANALYSIS"
-                    session.phase = Phase.IMPACT_ANALYSIS
-                else:
-                    # Skip IMPACT_ANALYSIS, proceed to READY
-                    next_phase = "READY"
-                    session.phase = Phase.READY
-
-                    # v1.11: Create branch when transitioning to READY
-                    branch_result = await _create_branch_for_ready(session)
-                    if not branch_result.get("success", False) and "error" in branch_result:
-                        # Branch creation failed
-                        result = branch_result
-                        return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
-
-            # Record assessment
-            session.phase_assessments[phase] = assessment
-
-            result = {
-                "success": True,
-                "phase_required": phase_required,
-                "next_phase": next_phase,
-                "assessment": assessment,
-                "instruction": _get_next_instruction(phase, phase_required, next_phase),
-            }
-
-            # v1.11: Include branch info if created during READY transition
-            if branch_result and branch_result.get("branch"):
-                result["branch"] = branch_result["branch"]
-
-        return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
-
-    elif name == "submit_verification":
-        session = session_manager.get_active_session()
-        if session is None:
-            result = {"error": "no_active_session", "message": "No active session."}
-        else:
-            # v3.3: 構造化された evidence を持つ VerifiedHypothesis に変換
-            verified_raw = arguments.get("verified", [])
-            # Handle string-serialized verified (MCP client workaround)
-            if isinstance(verified_raw, str):
-                try:
-                    verified_raw = json.loads(verified_raw)
-                except json.JSONDecodeError as e:
-                    result = {"error": "invalid_verified", "message": f"Failed to parse verified JSON: {e}"}
-                    return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
-
-            verified_list = []
-            for v in verified_raw:
-                evidence_data = v.get("evidence", {})
-                evidence = VerificationEvidence(
-                    tool=evidence_data.get("tool", ""),
-                    target=evidence_data.get("target", ""),
-                    result=evidence_data.get("result", ""),
-                    files=evidence_data.get("files", []),
-                )
-                verified_hypothesis = VerifiedHypothesis(
-                    hypothesis=v.get("hypothesis", ""),
-                    status=v.get("status", "rejected"),
-                    evidence=evidence,
-                )
-                verified_list.append(verified_hypothesis)
-
-            verification = VerificationResult(
-                verified=verified_list,
-                all_confirmed=all(vh.status == "confirmed" for vh in verified_list),
-            )
-            result = session.submit_verification(verification)
         return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
     elif name == "check_write_target":
@@ -3118,15 +2329,6 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             result = session.revert_to_exploration(
                 keep_results=arguments.get("keep_results", True),
             )
-        return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
-
-    # v1.2: PRE_COMMIT phase tools
-    elif name == "submit_for_review":
-        session = session_manager.get_active_session()
-        if session is None:
-            result = {"error": "no_active_session", "message": "No active session."}
-        else:
-            result = session.submit_for_review()
         return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
     elif name == "review_changes":
@@ -3179,296 +2381,6 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         }
         return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
-    elif name == "finalize_changes":
-        session = session_manager.get_active_session()
-        if session is None:
-            result = {"error": "no_active_session", "message": "No active session."}
-            return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
-
-        if session.phase != Phase.PRE_COMMIT:
-            result = {
-                "error": "phase_blocked",
-                "current_phase": session.phase.name,
-                "message": f"finalize_changes only allowed in PRE_COMMIT phase, current: {session.phase.name}",
-            }
-            return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
-
-        if not session.task_branch_enabled:
-            result = {
-                "error": "task_branch_not_enabled",
-                "message": "Task branch not enabled. Cannot finalize changes.",
-            }
-            return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
-
-        # Get or recreate branch manager for this session
-        repo_path = session.repo_path or "."
-        branch_manager = _get_or_recreate_branch_manager(session, repo_path)
-        if branch_manager is None:
-            result = {
-                "error": "branch_manager_not_found",
-                "message": "Branch manager not found and cannot be recreated (no task_branch_name in session).",
-            }
-            return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
-
-        # Process reviewed files
-        reviewed_files = arguments.get("reviewed_files", [])
-        commit_message = arguments.get("commit_message")
-
-        # Handle string-serialized reviewed_files (MCP client workaround)
-        if isinstance(reviewed_files, str):
-            try:
-                reviewed_files = json.loads(reviewed_files)
-            except json.JSONDecodeError as e:
-                result = {"error": "invalid_reviewed_files", "message": f"Failed to parse reviewed_files JSON: {e}"}
-                return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
-
-        # Submit review to session
-        review_result = session.submit_pre_commit_review(
-            reviewed_files=reviewed_files,
-            review_notes=commit_message or "",
-        )
-
-        if not review_result.get("success"):
-            return [TextContent(type="text", text=json.dumps(review_result, indent=2, ensure_ascii=False))]
-
-        # v1.8: Apply changes using branch manager
-        # If quality_review_enabled, prepare commit but don't execute (for quality check first)
-        # If quality_review_disabled, execute commit immediately
-        execute_commit_now = not session.quality_review_enabled
-
-        finalize_result = await branch_manager.finalize(
-            keep_files=review_result.get("kept_files"),
-            discard_files=review_result.get("discarded_files"),
-            commit_message=commit_message,
-            execute_commit=execute_commit_now,  # v1.8: Skip commit if quality review is enabled
-        )
-
-        if finalize_result.success:
-            # v1.8: Store commit preparation state
-            if finalize_result.prepared:
-                session.commit_prepared = True
-                session.prepared_commit_message = commit_message
-                session.prepared_kept_files = finalize_result.kept_files
-                session.prepared_discarded_files = finalize_result.discarded_files
-
-            # v1.5: Transition to QUALITY_REVIEW phase (if enabled)
-            if session.quality_review_enabled:
-                # Check if quality_review.md exists
-                repo_path = session.repo_path or "."
-                quality_review_path = Path(repo_path) / ".code-intel" / "review_prompts" / "quality_review.md"
-
-                if not quality_review_path.exists():
-                    # Skip QUALITY_REVIEW if prompt file is missing
-                    session.quality_review_completed = True
-                    result = {
-                        "success": True,
-                        "commit_hash": finalize_result.commit_hash,
-                        "kept_files": finalize_result.kept_files,
-                        "discarded_files": finalize_result.discarded_files,
-                        "branch": session.task_branch_name,
-                        "skipped": True,
-                        "warning": f"quality_review.md not found at {quality_review_path}",
-                        "message": "Quality review skipped. Proceeding to merge.",
-                        "next_action": "Call merge_to_base to complete",
-                    }
-                else:
-                    session.transition_to_phase(Phase.QUALITY_REVIEW, reason="finalize_changes")
-                    result = {
-                        "success": True,
-                        "commit_hash": None if finalize_result.prepared else finalize_result.commit_hash,  # v1.8: No commit hash yet if prepared
-                        "prepared": finalize_result.prepared,  # v1.8
-                        "kept_files": finalize_result.kept_files,
-                        "discarded_files": finalize_result.discarded_files,
-                        "branch": session.task_branch_name,
-                        "phase": "QUALITY_REVIEW",
-                        "message": f"Changes prepared. Now in QUALITY_REVIEW phase. Commit will be executed after quality check passes." if finalize_result.prepared else f"Changes finalized. Committed to {session.task_branch_name}. Now in QUALITY_REVIEW phase.",
-                        "next_step": "Read .code-intel/review_prompts/quality_review.md and follow instructions. Call submit_quality_review when done.",
-                    }
-            else:
-                # Quality review disabled (--no-quality)
-                result = {
-                    "success": True,
-                    "commit_hash": finalize_result.commit_hash,
-                    "kept_files": finalize_result.kept_files,
-                    "discarded_files": finalize_result.discarded_files,
-                    "branch": session.task_branch_name,
-                    "message": f"Changes finalized. Committed to {session.task_branch_name}. Quality review skipped.",
-                    "next_step": "Call merge_to_base to merge back to original branch.",  # DISABLED: record_outcome
-                }
-        else:
-            result = {
-                "success": False,
-                "error": finalize_result.error,
-                "kept_files": finalize_result.kept_files,
-                "discarded_files": finalize_result.discarded_files,
-            }
-
-        return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
-
-    elif name == "submit_quality_review":
-        # v1.5: Quality Review phase handler
-        session = session_manager.get_active_session()
-        if session is None:
-            result = {"error": "no_active_session", "message": "No active session."}
-            return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
-
-        if session.phase != Phase.QUALITY_REVIEW:
-            result = {
-                "error": "phase_blocked",
-                "current_phase": session.phase.name,
-                "message": f"submit_quality_review only allowed in QUALITY_REVIEW phase, current: {session.phase.name}",
-            }
-            return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
-
-        issues_found_raw = arguments.get("issues_found", False)
-        # Handle string "true"/"false" from MCP clients
-        if isinstance(issues_found_raw, str):
-            issues_found = issues_found_raw.lower() == "true"
-        else:
-            issues_found = bool(issues_found_raw)
-        issues = arguments.get("issues", [])
-        notes = arguments.get("notes")
-
-        if issues_found:
-            # Validate issues list
-            if not issues:
-                result = {
-                    "error": "issues_required",
-                    "message": "issues_found=true requires non-empty issues list",
-                }
-                return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
-
-            # Check max revert count
-            session.quality_revert_count += 1
-            if session.quality_revert_count > session.quality_review_max_revert:
-                # Force completion - max reverts exceeded
-                session.quality_review_completed = True  # Allow merge_to_base
-                result = {
-                    "success": True,
-                    "issues_found": True,
-                    "forced_completion": True,
-                    "issues": issues,
-                    "revert_count": session.quality_revert_count,
-                    "message": f"Max revert count ({session.quality_review_max_revert}) exceeded. Forcing completion.",
-                    "warning": "Quality issues may remain unresolved.",
-                    "next_action": "Call merge_to_base to complete",
-                }
-                return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
-
-            # v1.8: Clear commit preparation state when reverting
-            session.commit_prepared = False
-            session.prepared_commit_message = None
-            session.prepared_kept_files = []
-            session.prepared_discarded_files = []
-
-            # Revert to READY phase for fixes
-            session.transition_to_phase(Phase.READY, reason="quality_review_issues_found")
-            result = {
-                "success": True,
-                "issues_found": True,
-                "issues": issues,
-                "revert_count": session.quality_revert_count,
-                "next_action": "Fix the issues in READY phase, then re-run verification",
-                "phase": "READY",
-                "message": "Reverted to READY phase. Prepared commit discarded. Fix issues and proceed through POST_IMPL_VERIFY → PRE_COMMIT → QUALITY_REVIEW.",
-            }
-        else:
-            # v1.8: No issues - execute prepared commit if it exists
-            commit_hash = None
-            if session.commit_prepared:
-                # Execute the prepared commit
-                repo_path = session.repo_path or "."
-                branch_manager = _get_or_recreate_branch_manager(session, repo_path)
-                if branch_manager:
-                    commit_result = await branch_manager.execute_prepared_commit(
-                        commit_message=session.prepared_commit_message or "Quality review passed"
-                    )
-                    if commit_result.success:
-                        commit_hash = commit_result.commit_hash
-                        session.commit_prepared = False  # Clear preparation state
-                    else:
-                        result = {
-                            "success": False,
-                            "error": "commit_execution_failed",
-                            "message": f"Failed to execute prepared commit: {commit_result.error}",
-                        }
-                        return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
-
-            # No issues - mark quality review as completed and ready for merge
-            session.quality_review_completed = True
-            result = {
-                "success": True,
-                "issues_found": False,
-                "notes": notes,
-                "commit_hash": commit_hash,  # v1.8: Include commit hash if executed
-                "message": f"Quality review passed. Commit executed: {commit_hash}. Ready for merge." if commit_hash else "Quality review passed. Ready for merge.",
-                "next_action": "Call merge_to_base to complete",
-            }
-
-        return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
-
-    elif name == "merge_to_base":
-        session = session_manager.get_active_session()
-        if session is None:
-            result = {"error": "no_active_session", "message": "No active session."}
-            return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
-
-        if not session.task_branch_enabled:
-            result = {
-                "error": "task_branch_not_enabled",
-                "message": "Task branch not enabled. Cannot merge.",
-            }
-            return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
-
-        # v1.5: Check if QUALITY_REVIEW is required but not completed
-        if session.quality_review_enabled and session.phase == Phase.QUALITY_REVIEW and not session.quality_review_completed:
-            result = {
-                "error": "quality_review_required",
-                "current_phase": session.phase.name,
-                "message": "QUALITY_REVIEW phase not completed. Call submit_quality_review first.",
-                "next_action": "Read .code-intel/review_prompts/quality_review.md and call submit_quality_review",
-            }
-            return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
-
-        # Get or recreate branch manager for this session
-        repo_path = session.repo_path or "."
-        branch_manager = _get_or_recreate_branch_manager(session, repo_path)
-        if branch_manager is None:
-            result = {
-                "error": "branch_manager_not_found",
-                "message": "Branch manager not found and cannot be recreated (no task_branch_name in session).",
-            }
-            return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
-
-        merge_result = await branch_manager.merge_to_base()
-
-        if merge_result["success"]:
-            # Cleanup branch manager cache after successful merge
-            if session.session_id in _branch_managers:
-                del _branch_managers[session.session_id]
-
-            result = {
-                "success": True,
-                "merged": True,
-                "branch_deleted": merge_result.get("branch_deleted", False),
-                "from_branch": merge_result.get("from_branch"),
-                "to_branch": merge_result.get("to_branch"),
-                "message": f"Successfully merged {merge_result.get('from_branch')} to {merge_result.get('to_branch')}." +
-                          (" Branch deleted." if merge_result.get("branch_deleted") else ""),
-                # DISABLED: "next_step": "Call record_outcome to record the result.",
-            }
-        else:
-            result = {
-                "success": False,
-                "merged": False,
-                "branch_deleted": False,
-                "from_branch": merge_result.get("from_branch"),
-                "to_branch": merge_result.get("to_branch"),
-                "error": merge_result.get("error"),
-            }
-
-        return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
-
     elif name == "cleanup_stale_branches":
         # v1.2.1: Clean up stale task branches from interrupted runs
         # v1.10: Added action parameter (delete/merge)
@@ -3481,12 +2393,17 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         merged_count = len(cleanup_result.get("merged_branches", []))
         checked_out_to = cleanup_result.get("checked_out_to")
 
+        # v1.12: Also delete session checkpoint files
+        checkpoints_deleted = SessionManager.delete_checkpoints(repo_path)
+
         if action == "merge":
             message = f"Merged {merged_count} branches, deleted {deleted_count} stale branches."
         else:
             message = f"Cleaned up {deleted_count} stale branches."
         if checked_out_to:
             message = f"Checked out to '{checked_out_to}'. " + message
+        if checkpoints_deleted > 0:
+            message += f" Deleted {checkpoints_deleted} session checkpoint(s)."
 
         result = {
             "success": True,
@@ -3494,383 +2411,13 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             "deleted_branches": cleanup_result.get("deleted_branches", []),
             "errors": cleanup_result.get("errors", []),
             "message": message,
+            "checkpoints_deleted": checkpoints_deleted,
         }
 
         if cleanup_result.get("merged_branches"):
             result["merged_branches"] = cleanup_result["merged_branches"]
         if checked_out_to:
             result["checked_out_to"] = checked_out_to
-
-        return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
-
-    # =========================================================================
-    # v1.4: Intervention System Handlers
-    # =========================================================================
-
-    elif name == "record_verification_failure":
-        # Record verification failure for intervention tracking
-        session = session_manager.get_active_session()
-        if not session:
-            return [TextContent(
-                type="text",
-                text=json.dumps({
-                    "error": "No active session. Start a session first.",
-                }, ensure_ascii=False),
-            )]
-
-        failure_info = {
-            "phase": "POST_IMPLEMENTATION_VERIFICATION",
-            "error_message": arguments["error_message"],
-            "problem_location": arguments["problem_location"],
-            "observed_values": arguments["observed_values"],
-            "attempt_number": session.verification_failure_count + 1,
-        }
-
-        result = session.record_verification_failure(failure_info)
-        return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
-
-    elif name == "record_intervention_used":
-        # Record that an intervention prompt was used
-        session = session_manager.get_active_session()
-        if not session:
-            return [TextContent(
-                type="text",
-                text=json.dumps({
-                    "error": "No active session. Start a session first.",
-                }, ensure_ascii=False),
-            )]
-
-        prompt_name = arguments["prompt_name"]
-        result = session.record_intervention_used(prompt_name)
-
-        # Reset verification failure count after intervention
-        session.reset_verification_failures()
-        result["verification_failures_reset"] = True
-
-        return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
-
-    elif name == "get_intervention_status":
-        # Get current intervention system status
-        session = session_manager.get_active_session()
-        if not session:
-            return [TextContent(
-                type="text",
-                text=json.dumps({
-                    "error": "No active session. Start a session first.",
-                }, ensure_ascii=False),
-            )]
-
-        result = session.get_intervention_status()
-        return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
-
-    elif name == "record_outcome":
-        # v3.5: Record session outcome
-        # v3.10: Support explicit phase/intent for auto-failure detection
-        session_id = arguments["session_id"]
-        session = session_manager.get_session(session_id)
-
-        # Get session context (prefer session data, fallback to arguments)
-        phase_at_outcome = "UNKNOWN"
-        intent = "UNKNOWN"
-        semantic_used = False
-        confidence_was = ""
-
-        if session:
-            phase_at_outcome = session.phase.name
-            intent = session.intent
-            semantic_used = session.semantic is not None
-            if session.exploration:
-                confidence_was = session.exploration._evaluated_confidence
-
-        # Allow explicit override (for cases where session is not in memory)
-        if "phase_at_outcome" in arguments:
-            phase_at_outcome = arguments["phase_at_outcome"]
-        if "intent" in arguments:
-            intent = arguments["intent"]
-
-        # Build analysis
-        analysis_data = arguments.get("analysis", {})
-        analysis = OutcomeAnalysis(
-            root_cause=analysis_data.get("root_cause", ""),
-            failure_point=analysis_data.get("failure_point"),
-            related_symbols=analysis_data.get("related_symbols", []),
-            related_files=analysis_data.get("related_files", []),
-            user_feedback_summary=analysis_data.get("user_feedback_summary", ""),
-        )
-
-        # Create outcome log
-        outcome_log = OutcomeLog(
-            session_id=session_id,
-            outcome=arguments["outcome"],
-            phase_at_outcome=phase_at_outcome,
-            intent=intent,
-            semantic_used=semantic_used,
-            confidence_was=confidence_was,
-            analysis=analysis,
-            trigger_message=arguments.get("trigger_message", ""),
-        )
-
-        result = record_outcome(outcome_log)
-
-        # Cache successful pairs + Generate agreements
-        if arguments["outcome"] == "success" and session and session.query_frame:
-            try:
-                from tools.learned_pairs import cache_successful_pair
-                from tools.agreements import AgreementData, get_agreements_manager
-
-                qf = session.query_frame
-                repo_path = session.repo_path
-
-                if qf.target_feature and qf.mapped_symbols:
-                    cached_count = 0
-                    agreement_files = []
-
-                    for sym in qf.mapped_symbols:
-                        # 1. learned_pairs.json に追加
-                        cache_successful_pair(
-                            nl_term=qf.target_feature,
-                            symbol=sym.name,
-                            similarity=sym.confidence,
-                            code_evidence=sym.evidence.result_summary if sym.evidence else None,
-                            session_id=session_id,
-                            project_root=repo_path,
-                        )
-                        cached_count += 1
-
-                        # agreements/ に Markdown を生成
-                        agreement_data = AgreementData(
-                            nl_term=qf.target_feature,
-                            symbol=sym.name,
-                            similarity=sym.confidence,
-                            code_evidence=sym.evidence.result_summary if sym.evidence else None,
-                            session_id=session_id,
-                            intent=session.intent,
-                            related_files=analysis.related_files if analysis else [],
-                            query_frame_summary={
-                                "target_feature": qf.target_feature,
-                                "trigger_condition": qf.trigger_condition,
-                                "observed_issue": qf.observed_issue,
-                                "desired_action": qf.desired_action,
-                            },
-                        )
-
-                        manager = get_agreements_manager(repo_path)
-                        agreement_file = manager.save_agreement(agreement_data)
-                        agreement_files.append(str(agreement_file.name))
-
-                    result["cached_pairs"] = cached_count
-                    result["agreement_files"] = agreement_files
-                    result["cache_note"] = f"{cached_count} pairs cached, {len(agreement_files)} agreement(s) generated"
-
-                    # ChromaDB map に追加
-                    if CHROMADB_AVAILABLE:
-                        try:
-                            chromadb_manager = get_chromadb_manager(repo_path)
-                            symbols_list = [sym.name for sym in qf.mapped_symbols]
-                            code_evidence = "; ".join(
-                                sym.evidence.result_summary
-                                for sym in qf.mapped_symbols
-                                if sym.evidence and sym.evidence.result_summary
-                            ) or "Success confirmed by user"
-
-                            chromadb_manager.add_agreement(
-                                nl_term=qf.target_feature,
-                                symbols=symbols_list,
-                                code_evidence=code_evidence,
-                                session_id=session_id,
-                                similarity=max(sym.confidence for sym in qf.mapped_symbols) if qf.mapped_symbols else 0.0,
-                            )
-                            result["chromadb_map"] = "agreement added"
-                        except Exception as chromadb_err:
-                            result["chromadb_error"] = str(chromadb_err)
-
-            except Exception as e:
-                result["cache_error"] = str(e)
-
-        # v1.6: Auto-delete branch on failure
-        if arguments["outcome"] == "failure":
-            try:
-                # Determine repo_path
-                repo_path = "."
-                if session:
-                    repo_path = session.repo_path
-
-                # Find and delete the branch for this session
-                stale_info = await BranchManager.list_stale_branches(repo_path)
-                target_branch = None
-
-                for branch in stale_info.get("stale_branches", []):
-                    if branch.get("session_id") == session_id:
-                        target_branch = branch["name"]
-                        break
-
-                if target_branch:
-                    # Check if we're currently on this branch
-                    current_branch = stale_info.get("current_branch", "")
-                    if current_branch == target_branch:
-                        # Need to checkout base branch first
-                        parsed = BranchManager.parse_task_branch(target_branch)
-                        base_branch = parsed.get("base_branch") if parsed else "main"
-                        if base_branch:
-                            checkout_proc = await asyncio.create_subprocess_exec(
-                                "git", "checkout", base_branch,
-                                cwd=repo_path,
-                                stdout=asyncio.subprocess.PIPE,
-                                stderr=asyncio.subprocess.PIPE,
-                            )
-                            await checkout_proc.communicate()
-
-                    # Delete the branch
-                    delete_result = await BranchManager.delete_branch(repo_path, target_branch, force=True)
-
-                    result["branch_cleanup"] = {
-                        "attempted": True,
-                        "deleted": delete_result.get("deleted"),
-                        "message": "Failed session branch deleted automatically." if delete_result.get("success")
-                                   else f"Branch deletion failed: {delete_result.get('error')}",
-                    }
-                else:
-                    result["branch_cleanup"] = {
-                        "attempted": True,
-                        "deleted": None,
-                        "message": "No branch found for session (may have been deleted already).",
-                    }
-            except Exception as e:
-                result["branch_cleanup"] = {
-                    "attempted": True,
-                    "deleted": None,
-                    "error": str(e),
-                    "message": "Branch cleanup failed with exception.",
-                }
-
-        return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
-
-    elif name == "get_outcome_stats":
-        result = get_failure_stats()
-        return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
-
-    elif name == "validate_symbol_relevance":
-        target_feature = arguments["target_feature"]
-        symbols = arguments["symbols_identified"]
-
-        # Build validation prompt for LLM
-        symbols_list = "\n".join(f"- {s}" for s in symbols)
-        validation_prompt = f"""以下のシンボル群から、対象機能「{target_feature}」に関連するものを選んでください。
-
-シンボル一覧:
-{symbols_list}
-
-回答形式（JSON）:
-{{
-  "relevant_symbols": ["関連するシンボル名"],
-  "reasoning": "選定理由",
-  "code_evidence": "コード上の根拠（メソッド名、コメント、命名規則など）"
-}}
-
-※ code_evidence は必須。根拠なしの判定は無効。
-※ 関連するシンボルがない場合は relevant_symbols を空配列に。"""
-
-        result = {
-            "validation_prompt": validation_prompt,
-            "target_feature": target_feature,
-            "symbols_count": len(symbols),
-            "action_required": "LLMがこのプロンプトに回答し、confirm_symbol_relevance で検証結果を確定してください。",
-            "response_schema": {
-                "relevant_symbols": "array of string",
-                "reasoning": "string (required)",
-                "code_evidence": "string (required)",
-            },
-        }
-
-        # Check learned pairs cache first
-        try:
-            from tools.learned_pairs import find_cached_matches
-            cached_matches = find_cached_matches(target_feature, symbols)
-            if cached_matches:
-                result["cached_matches"] = cached_matches
-                result["cache_note"] = (
-                    "cached_matches は過去に成功したペア。優先的に採用してください。"
-                )
-        except Exception as e:
-            result["cache_status"] = f"unavailable: {str(e)}"
-
-        # Embedding-based suggestions (if available)
-        try:
-            from tools.embedding import get_embedding_validator, is_embedding_available
-            if is_embedding_available():
-                validator = get_embedding_validator()
-                suggestions = validator.find_related_symbols(target_feature, symbols, top_k=5)
-                result["embedding_suggestions"] = suggestions
-                result["embedding_note"] = (
-                    "embedding_suggestions はサーバーがベクトル類似度で算出した候補。"
-                    "LLM判定の参考にしてください。similarity > 0.6 は高信頼。"
-                )
-        except Exception as e:
-            result["embedding_status"] = f"unavailable: {str(e)}"
-
-        return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
-
-    elif name == "confirm_symbol_relevance":
-        session = session_manager.get_active_session()
-        if session is None:
-            result = {"error": "no_active_session", "message": "No active session."}
-        elif not session.query_frame:
-            result = {"error": "no_query_frame", "message": "QueryFrame not set. Call set_query_frame first."}
-        else:
-            relevant_symbols = arguments.get("relevant_symbols", [])
-            code_evidence = arguments.get("code_evidence", "")
-            reasoning = arguments.get("reasoning", "")
-
-            qf = session.query_frame
-            updated_count = 0
-            not_found = []
-
-            # Embedding で類似度を取得
-            embedding_scores = {}
-            try:
-                from tools.embedding import get_embedding_validator, is_embedding_available
-                if is_embedding_available() and qf.target_feature:
-                    validator = get_embedding_validator()
-                    suggestions = validator.find_related_symbols(
-                        qf.target_feature, relevant_symbols, top_k=len(relevant_symbols)
-                    )
-                    embedding_scores = {s["symbol"]: s["similarity"] for s in suggestions}
-            except Exception:
-                pass
-
-            # mapped_symbols の confidence を更新
-            for symbol in relevant_symbols:
-                # 既存のシンボルを探す
-                existing = [s for s in qf.mapped_symbols if s.name == symbol]
-                if existing:
-                    # Embedding スコアがあればそれを使用、なければ 0.7（LLM確認済み）
-                    new_confidence = embedding_scores.get(symbol, 0.7)
-                    existing[0].confidence = new_confidence
-                    existing[0].source = SlotSource.FACT
-                    if code_evidence:
-                        existing[0].evidence = SlotEvidence(
-                            tool="confirm_symbol_relevance",
-                            params={"reasoning": reasoning},
-                            result_summary=code_evidence,
-                        )
-                    updated_count += 1
-                else:
-                    # submit_understanding で追加されていないシンボル
-                    not_found.append(symbol)
-
-            result = {
-                "success": True,
-                "updated_count": updated_count,
-                "mapped_symbols": [
-                    {"name": s.name, "confidence": s.confidence, "source": s.source.value}
-                    for s in qf.mapped_symbols
-                ],
-                "message": f"{updated_count} symbols confirmed with code_evidence.",
-            }
-
-            if not_found:
-                result["not_found"] = not_found
-                result["hint"] = "These symbols were not in mapped_symbols. Call submit_exploration first to add them."
 
         return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
@@ -4032,12 +2579,12 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
             # Add guidance for LLM
             result["next_steps"] = {
-                "action": "submit_impact_analysis",
+                "action": "submit_phase",
                 "instructions": (
                     "1. Review must_verify files and check if changes affect them\n"
                     "2. Review should_verify files (tests, factories, seeders)\n"
                     "3. Use project_rules to infer additional related files\n"
-                    "4. Call submit_impact_analysis with verified_files and inferred_from_rules"
+                    "4. Call submit_phase with verified_files and inferred_from_rules"
                 ),
             }
 
@@ -4101,67 +2648,6 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             result = {"error": str(e)}
 
         return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
-
-    elif name == "submit_impact_analysis":
-        # v1.1: Submit impact analysis results to proceed to READY phase
-        # v1.11: Create branch when transitioning to READY
-        session = session_manager.get_active_session()
-        if session is None:
-            result = {"error": "no_active_session", "message": "No active session."}
-        else:
-            verified_files = arguments.get("verified_files", [])
-            inferred_from_rules = arguments.get("inferred_from_rules", [])
-
-            # Handle string-serialized arrays (MCP client workaround)
-            if isinstance(verified_files, str):
-                try:
-                    verified_files = json.loads(verified_files)
-                except json.JSONDecodeError as e:
-                    result = {"error": "invalid_verified_files", "message": f"Failed to parse verified_files JSON: {e}"}
-                    return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
-            if isinstance(inferred_from_rules, str):
-                try:
-                    inferred_from_rules = json.loads(inferred_from_rules)
-                except json.JSONDecodeError as e:
-                    result = {"error": "invalid_inferred_from_rules", "message": f"Failed to parse inferred_from_rules JSON: {e}"}
-                    return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
-
-            # Normalize file paths to absolute paths for matching with must_verify
-            repo_path = Path(session.repo_path).resolve()
-            normalized_verified_files = []
-            for vf in verified_files:
-                file_path = vf.get("file", "")
-                if file_path and not Path(file_path).is_absolute():
-                    file_path = str((repo_path / file_path).resolve())
-                normalized_verified_files.append({**vf, "file": file_path})
-            verified_files = normalized_verified_files
-
-            # Also normalize inferred_from_rules paths
-            normalized_inferred = []
-            for path_str in inferred_from_rules:
-                if path_str and not Path(path_str).is_absolute():
-                    path_str = str((repo_path / path_str).resolve())
-                normalized_inferred.append(path_str)
-            inferred_from_rules = normalized_inferred
-
-            result = session.submit_impact_analysis(
-                verified_files=verified_files,
-                inferred_from_rules=inferred_from_rules,
-            )
-
-            # v1.11: Create branch when transitioning to READY (not exploration-only)
-            if result.get("success") and result.get("next_phase") == "READY":
-                branch_result = await _create_branch_for_ready(session)
-                if not branch_result.get("success", False) and "error" in branch_result:
-                    # Branch creation failed
-                    result = branch_result
-                elif branch_result.get("branch"):
-                    result["branch"] = branch_result["branch"]
-
-        return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
-
-    # v1.10 note: submit_verification_and_impact handler removed (v1.9 integration reverted)
-    # Use separate submit_verification and submit_impact_analysis instead
 
     # Check phase access for other tools
     phase_error = check_phase_access(name)

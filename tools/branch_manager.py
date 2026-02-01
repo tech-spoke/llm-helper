@@ -446,6 +446,7 @@ class BranchManager:
         deleted_branches = []
         merged_branches = []
         checked_out_to = None
+        merge_target = None
 
         try:
             # Get current branch
@@ -457,6 +458,11 @@ class BranchManager:
             )
             stdout, _ = await proc.communicate()
             current_branch = stdout.decode().strip() if proc.returncode == 0 else ""
+
+            if action == "merge" and current_branch.startswith("llm_task_"):
+                merge_target = current_branch
+            elif action == "merge" and current_branch:
+                errors.append("No llm_task_* branch is currently checked out; skipping merge.")
 
             # If currently on a llm_task_* branch, checkout to base branch first
             if current_branch.startswith("llm_task_"):
@@ -525,8 +531,8 @@ class BranchManager:
                         errors.append(f"Skipped {branch}: currently checked out")
                         continue
 
-                    # Merge branch if action="merge"
-                    if action == "merge":
+                    # Merge only the currently checked-out task branch if action="merge"
+                    if action == "merge" and merge_target == branch:
                         try:
                             proc = await asyncio.create_subprocess_exec(
                                 "git", "merge", branch, "--no-edit",
@@ -1085,5 +1091,4 @@ class BranchManager:
             stdout=stdout.decode() if stdout else "",
             stderr=stderr.decode() if stderr else "",
         )
-
 

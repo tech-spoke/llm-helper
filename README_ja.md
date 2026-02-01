@@ -21,7 +21,6 @@ Cursor IDE のようなコードインテリジェンス機能をオープンソ
 
 ```
 LLM に判断をさせない。守らせるのではなく、守らないと進めない設計。
-そして、失敗から学ぶ仕組みを持つ。
 ```
 
 | 原則 | 実装 |
@@ -286,6 +285,7 @@ your-project/
 - `.claude/CLAUDE.md` - LLM が従うべきプロジェクト固有のルール
 - `.claude/PARALLEL_GUIDE.md` - 並列実行による効率化ガイド（v1.7）
 - `.claude/commands/` - スキル定義（`/code`, `/exp` 等）
+  - ※ `llm-helper/templates/skills/claude/` からコピーされます
 
 ### Step 3: .mcp.json の設定
 
@@ -347,6 +347,13 @@ MCP サーバーを読み込むために再起動。
 # Claude Code 内で
 /code --help
 /exp Find all authentication code
+```
+
+### Codex ユーザー向け（スキル配置）
+
+Codex は `$CODEX_HOME/skills` にスキルを配置します。テンプレートをコピーしてください：
+```bash
+cp -r /path/to/llm-helper/templates/skills/codex/* "$CODEX_HOME/skills/"
 ```
 
 ### Step 7: context.yml のカスタマイズ（任意）
@@ -415,7 +422,7 @@ git pull
 ### Step 2: スキルを更新（プロジェクトにコピーしている場合）
 
 ```bash
-cp /path/to/llm-helper/.claude/commands/*.md /path/to/your-project/.claude/commands/
+cp /path/to/llm-helper/templates/skills/claude/*.md /path/to/your-project/.claude/commands/
 ```
 
 ### Step 3: 不足ディレクトリを追加
@@ -433,10 +440,10 @@ mkdir -p .code-intel/interventions
 mkdir -p .code-intel/review_prompts
 
 # テンプレートをコピー（既存ファイルは上書きされない）
-cp -n /path/to/llm-helper/.code-intel/verifiers/*.md .code-intel/verifiers/
-cp -n /path/to/llm-helper/.code-intel/doc_research/*.md .code-intel/doc_research/
-cp -n /path/to/llm-helper/.code-intel/interventions/*.md .code-intel/interventions/
-cp -n /path/to/llm-helper/.code-intel/review_prompts/*.md .code-intel/review_prompts/
+cp -n /path/to/llm-helper/templates/code-intel/verifiers/*.md .code-intel/verifiers/
+cp -n /path/to/llm-helper/templates/code-intel/doc_research/*.md .code-intel/doc_research/
+cp -n /path/to/llm-helper/templates/code-intel/interventions/*.md .code-intel/interventions/
+cp -n /path/to/llm-helper/templates/code-intel/review_prompts/*.md .code-intel/review_prompts/
 ```
 
 ### Step 4: Claude Code を再起動
@@ -642,8 +649,11 @@ llm-helper/
 │   └── ...
 ├── setup.sh                ← サーバーセットアップ
 ├── init-project.sh         ← プロジェクト初期化
-└── .claude/commands/       ← スキル定義
-    └── code.md
+└── templates/
+    ├── code-intel/         ← .code-intel テンプレート
+    └── skills/
+        ├── claude/         ← Claude スキルテンプレート
+        └── codex/          ← Codex スキルテンプレート
 ```
 
 ### 対象プロジェクト
@@ -663,7 +673,7 @@ your-project/
 │   ├── interventions/      ← 介入プロンプト
 │   ├── review_prompts/     ← 品質レビュープロンプト
 │   └── sync_state.json
-├── .claude/commands/       ← スキル（任意コピー）
+├── .claude/commands/       ← スキル（自動生成）
 └── src/                    ← あなたのソースコード
 ```
 

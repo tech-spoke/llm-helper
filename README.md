@@ -21,7 +21,6 @@ This MCP server provides mechanisms to make Claude Code "understand the codebase
 
 ```
 Don't let the LLM decide. Design so it can't proceed without compliance.
-And have a mechanism to learn from failures.
 ```
 
 | Principle | Implementation |
@@ -286,6 +285,7 @@ your-project/
 - `.claude/CLAUDE.md` - Project-specific rules that LLM must follow
 - `.claude/PARALLEL_GUIDE.md` - Parallel execution efficiency guide (v1.7)
 - `.claude/commands/` - Skill definitions (`/code`, `/exp`, etc.)
+  - Copied from `llm-helper/templates/skills/claude/`
 
 ### Step 3: Configure .mcp.json
 
@@ -347,6 +347,13 @@ Check that skills are available:
 # In Claude Code
 /code --help
 /exp Find all authentication code
+```
+
+### Codex Users (Install Skills)
+
+Codex loads skills from `$CODEX_HOME/skills`. Copy the templates:
+```bash
+cp -r /path/to/llm-helper/templates/skills/codex/* "$CODEX_HOME/skills/"
 ```
 
 ### Step 7: Customize context.yml (optional)
@@ -415,7 +422,7 @@ git pull
 ### Step 2: Update Skills (if copied to project)
 
 ```bash
-cp /path/to/llm-helper/.claude/commands/*.md /path/to/your-project/.claude/commands/
+cp /path/to/llm-helper/templates/skills/claude/*.md /path/to/your-project/.claude/commands/
 ```
 
 ### Step 3: Add Missing Directories
@@ -433,10 +440,10 @@ mkdir -p .code-intel/interventions
 mkdir -p .code-intel/review_prompts
 
 # Copy templates (existing files will not be overwritten)
-cp -n /path/to/llm-helper/.code-intel/verifiers/*.md .code-intel/verifiers/
-cp -n /path/to/llm-helper/.code-intel/doc_research/*.md .code-intel/doc_research/
-cp -n /path/to/llm-helper/.code-intel/interventions/*.md .code-intel/interventions/
-cp -n /path/to/llm-helper/.code-intel/review_prompts/*.md .code-intel/review_prompts/
+cp -n /path/to/llm-helper/templates/code-intel/verifiers/*.md .code-intel/verifiers/
+cp -n /path/to/llm-helper/templates/code-intel/doc_research/*.md .code-intel/doc_research/
+cp -n /path/to/llm-helper/templates/code-intel/interventions/*.md .code-intel/interventions/
+cp -n /path/to/llm-helper/templates/code-intel/review_prompts/*.md .code-intel/review_prompts/
 ```
 
 ### Step 4: Restart Claude Code
@@ -642,8 +649,11 @@ llm-helper/
 │   └── ...
 ├── setup.sh                ← Server setup
 ├── init-project.sh         ← Project initialization
-└── .claude/commands/       ← Skill definitions
-    └── code.md
+└── templates/
+    ├── code-intel/         ← Project templates (.code-intel)
+    └── skills/
+        ├── claude/         ← Claude skill templates (commands)
+        └── codex/          ← Codex skill templates
 ```
 
 ### Target Project
@@ -663,7 +673,7 @@ your-project/
 │   ├── interventions/      ← Intervention prompts
 │   ├── review_prompts/     ← Quality review prompts
 │   └── sync_state.json
-├── .claude/commands/       ← Skills (optional copy)
+├── .claude/commands/       ← Skills (auto-generated)
 └── src/                    ← Your source code
 ```
 

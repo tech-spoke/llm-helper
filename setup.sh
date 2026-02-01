@@ -4,7 +4,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-echo "=== Code Intel MCP Server v1.11 Setup ==="
+echo "=== Code Intel MCP Server v1.13 Setup ==="
 echo ""
 echo "This script sets up the MCP server itself."
 echo "For project initialization, use: ./init-project.sh <project-path>"

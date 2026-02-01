@@ -2,12 +2,14 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TEMPLATE_DIR="$SCRIPT_DIR/templates/code-intel"
+SKILLS_TEMPLATE_DIR="$SCRIPT_DIR/templates/skills/claude"
 
 # Usage
 usage() {
     echo "Usage: $0 <project-path> [options]"
     echo ""
-    echo "Initialize a project for Code Intel MCP Server v1.11"
+    echo "Initialize a project for Code Intel MCP Server v1.13"
     echo ""
     echo "Arguments:"
     echo "  project-path    Path to the target project (required)"
@@ -80,7 +82,7 @@ PROJECT_PATH="$(cd "$PROJECT_PATH" 2>/dev/null && pwd)" || {
     exit 1
 }
 
-echo "=== Code Intel Project Initialization v1.11 ==="
+echo "=== Code Intel Project Initialization v1.13 ==="
 echo ""
 echo "Project: $PROJECT_PATH"
 echo "MCP Server: $SCRIPT_DIR"
@@ -169,7 +171,11 @@ done
 
 # Generate config.json (only if not exists - preserve user settings)
 if [ ! -f "$PROJECT_PATH/.code-intel/config.json" ]; then
-    cat > "$PROJECT_PATH/.code-intel/config.json" << EOF
+    if [ -f "$TEMPLATE_DIR/config.json" ]; then
+        cp "$TEMPLATE_DIR/config.json" "$PROJECT_PATH/.code-intel/config.json"
+        echo "  ✓ .code-intel/config.json (from template)"
+    else
+        cat > "$PROJECT_PATH/.code-intel/config.json" << EOF
 {
   "version": "1.0",
   "embedding_model": "multilingual-e5-small",
@@ -189,14 +195,19 @@ if [ ! -f "$PROJECT_PATH/.code-intel/config.json" ]; then
   }
 }
 EOF
-    echo "  ✓ .code-intel/config.json"
+        echo "  ✓ .code-intel/config.json"
+    fi
 else
     echo "  - .code-intel/config.json already exists (skipped)"
 fi
 
 # Generate context.yml (only if not exists - preserve user settings)
 if [ ! -f "$PROJECT_PATH/.code-intel/context.yml" ]; then
-    cat > "$PROJECT_PATH/.code-intel/context.yml" << 'EOF'
+    if [ -f "$TEMPLATE_DIR/context.yml" ]; then
+        cp "$TEMPLATE_DIR/context.yml" "$PROJECT_PATH/.code-intel/context.yml"
+        echo "  ✓ .code-intel/context.yml (from template)"
+    else
+        cat > "$PROJECT_PATH/.code-intel/context.yml" << 'EOF'
 # Code Intel Context Configuration v1.3
 # See: https://github.com/tech-spoke/llm-helper
 
@@ -227,14 +238,15 @@ document_search:
     - ".venv/**"
     - "__pycache__/**"
 EOF
-    echo "  ✓ .code-intel/context.yml"
+        echo "  ✓ .code-intel/context.yml"
+    fi
 else
     echo "  - .code-intel/context.yml already exists (skipped)"
 fi
 
 # Copy default verifier templates (if not exists)
-if [ -d "$SCRIPT_DIR/.code-intel/verifiers" ]; then
-    for file in "$SCRIPT_DIR/.code-intel/verifiers"/*.md; do
+if [ -d "$TEMPLATE_DIR/verifiers" ]; then
+    for file in "$TEMPLATE_DIR/verifiers"/*.md; do
         if [ -f "$file" ]; then
             filename=$(basename "$file")
             if [ ! -f "$PROJECT_PATH/.code-intel/verifiers/$filename" ]; then
@@ -246,8 +258,8 @@ if [ -d "$SCRIPT_DIR/.code-intel/verifiers" ]; then
 fi
 
 # Copy default doc_research prompts (if not exists)
-if [ -d "$SCRIPT_DIR/.code-intel/doc_research" ]; then
-    for file in "$SCRIPT_DIR/.code-intel/doc_research"/*.md; do
+if [ -d "$TEMPLATE_DIR/doc_research" ]; then
+    for file in "$TEMPLATE_DIR/doc_research"/*.md; do
         if [ -f "$file" ]; then
             filename=$(basename "$file")
             if [ ! -f "$PROJECT_PATH/.code-intel/doc_research/$filename" ]; then
@@ -259,8 +271,8 @@ if [ -d "$SCRIPT_DIR/.code-intel/doc_research" ]; then
 fi
 
 # Copy review_prompts (garbage_detection, quality_review)
-if [ -d "$SCRIPT_DIR/.code-intel/review_prompts" ]; then
-    for file in "$SCRIPT_DIR/.code-intel/review_prompts"/*.md; do
+if [ -d "$TEMPLATE_DIR/review_prompts" ]; then
+    for file in "$TEMPLATE_DIR/review_prompts"/*.md; do
         if [ -f "$file" ]; then
             filename=$(basename "$file")
             if [ ! -f "$PROJECT_PATH/.code-intel/review_prompts/$filename" ]; then
@@ -272,8 +284,8 @@ if [ -d "$SCRIPT_DIR/.code-intel/review_prompts" ]; then
 fi
 
 # Copy interventions prompts (v1.4)
-if [ -d "$SCRIPT_DIR/.code-intel/interventions" ]; then
-    for file in "$SCRIPT_DIR/.code-intel/interventions"/*.md; do
+if [ -d "$TEMPLATE_DIR/interventions" ]; then
+    for file in "$TEMPLATE_DIR/interventions"/*.md; do
         if [ -f "$file" ]; then
             filename=$(basename "$file")
             if [ ! -f "$PROJECT_PATH/.code-intel/interventions/$filename" ]; then
@@ -284,16 +296,32 @@ if [ -d "$SCRIPT_DIR/.code-intel/interventions" ]; then
     done
 fi
 
+# Copy user_escalation.md (v1.13)
+if [ -f "$TEMPLATE_DIR/user_escalation.md" ]; then
+    if [ ! -f "$PROJECT_PATH/.code-intel/user_escalation.md" ]; then
+        cp "$TEMPLATE_DIR/user_escalation.md" "$PROJECT_PATH/.code-intel/"
+        echo "  ✓ .code-intel/user_escalation.md"
+    fi
+fi
+
 # Copy task_planning.md (v1.11)
-if [ -f "$SCRIPT_DIR/.code-intel/task_planning.md" ]; then
+if [ -f "$TEMPLATE_DIR/task_planning.md" ]; then
     if [ ! -f "$PROJECT_PATH/.code-intel/task_planning.md" ]; then
-        cp "$SCRIPT_DIR/.code-intel/task_planning.md" "$PROJECT_PATH/.code-intel/"
+        cp "$TEMPLATE_DIR/task_planning.md" "$PROJECT_PATH/.code-intel/"
         echo "  ✓ .code-intel/task_planning.md"
     fi
 fi
 
+# Copy phase_contract.yml (v1.13)
+if [ -f "$TEMPLATE_DIR/phase_contract.yml" ]; then
+    if [ ! -f "$PROJECT_PATH/.code-intel/phase_contract.yml" ]; then
+        cp "$TEMPLATE_DIR/phase_contract.yml" "$PROJECT_PATH/.code-intel/"
+        echo "  ✓ .code-intel/phase_contract.yml"
+    fi
+fi
+
 # Copy .claude directory (project rules, guides, and skills)
-if [ -d "$SCRIPT_DIR/.claude" ]; then
+if [ -d "$SCRIPT_DIR/.claude" ] || [ -d "$SKILLS_TEMPLATE_DIR" ]; then
     mkdir -p "$PROJECT_PATH/.claude/commands"
 
     # Generate CLAUDE.md template (project-specific rules)
@@ -322,9 +350,9 @@ EOF
         echo "  ✓ .claude/PARALLEL_GUIDE.md"
     fi
 
-    # Copy skill files (commands/*.md)
-    if [ -d "$SCRIPT_DIR/.claude/commands" ]; then
-        for file in "$SCRIPT_DIR/.claude/commands"/*.md; do
+    # Copy skill files (templates/skills/claude/*.md)
+    if [ -d "$SKILLS_TEMPLATE_DIR" ]; then
+        for file in "$SKILLS_TEMPLATE_DIR"/*.md; do
             if [ -f "$file" ]; then
                 filename=$(basename "$file")
                 if [ ! -f "$PROJECT_PATH/.claude/commands/$filename" ]; then

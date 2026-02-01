@@ -534,7 +534,7 @@ your-project/
 既存プロジェクトでスキルのみ更新する場合:
 
 ```bash
-cp /path/to/llm-helper/.claude/commands/code.md /path/to/your-project/.claude/commands/
+cp /path/to/llm-helper/templates/skills/claude/code.md /path/to/your-project/.claude/commands/
 ```
 
 ---
