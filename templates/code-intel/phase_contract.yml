@@ -2,121 +2,175 @@ phases:
   BRANCH_INTERVENTION:
     expected_payload:
       choice: 'str: ''delete'' | ''merge'' | ''continue'''
+      compaction_count: int
       summary: str
       tools_used: list[str]
-    instruction: Stale ブランチが検出されました。delete/merge/continue の意味を説明して選択肢を提示し、選択結果を submit_phase
-      で送信してください。
+    instruction: >-
+      llm_task_* ブランチが検出されました。以下の選択肢をユーザーに提示し、選択結果を submit_phase で送信してください。
+      1) delete: すべての llm_task_* ブランチを破棄（複数ブランチ完全破棄）
+      2) merge: 現在ブランチのみ base にマージし、その他は破棄
+      3) continue: 現在ブランチに留まり、READY で新規タスクブランチを作成しない。
+      選択肢の意味を説明した上で選ばせてください。
   DOCUMENT_RESEARCH:
     expected_payload:
+      compaction_count: int
       documents_reviewed: list[str]
       summary: str
       tools_used: list[str]
-    instruction: 設計文書を調査してください。完了後 submit_phase で送信してください。
+    instruction: >-
+      context.yml の project_rules を前提に、doc_research と document_search に従って設計文書を調査してください。
+      サブエージェントに調査を依頼し、rule_refs / must_read を中心に返却してください。
+      返却された must_read はメインエージェントが必ず読んで要約し、必要なルール/制約を理解したうえで submit_phase で送信してください。
+  QUERY_FRAME:
+    expected_payload:
+      action_type: str
+      compaction_count: int
+      constraints: str
+      scope: str
+      summary: str
+      target_symbols: list[str]
+      tools_used: list[str]
+    instruction: >-
+      ユーザー指示を以下のスロットに分解し、各スロットは原文の引用（quote）付きで検証してください。
+      target_feature（何を対象にするか）、trigger_condition（発生条件）、observed_issue（現状の問題）、desired_action（望む対応）。
+      不明なスロットは空にし、推測はしないでください。完了後 submit_phase で送信してください。
   EXPLORATION:
     expected_payload:
+      compaction_count: int
       explored_files: list[str]
       findings: list[str]
       summary: str
       tools_used: list[str]
-    instruction: code-intel ツールを最低2種類使って探索し、結果を submit_phase で送信してください。
+    instruction: >-
+      code-intel ツールを最低2種類使って探索し、探索根拠を findings にまとめて submit_phase で送信してください。
+      使用したツール名は tools_used に列挙してください。
+  Q1:
+    expected_payload:
+      compaction_count: int
+      needs_more_information: bool
+      reason: str
+      summary: str
+      tools_used: list[str]
+    instruction: >-
+      SEMANTIC フェーズ（ChromaDB の意味検索: semantic_search）を実施する必要があるか評価し、理由を添えて submit_phase で送信してください。
+      必要な場合は「何を意味検索で確認したいか」も短く記してください。
+  SEMANTIC:
+    expected_payload:
+      compaction_count: int
+      search_query: str
+      search_results: list[str]
+      summary: str
+      tools_used: list[str]
+    instruction: >-
+      QueryFrame/EXPLORATION の内容から検索クエリを作成し、semantic_search で追加情報を収集してください。
+      map/forest を意識し、map で十分な確度が得られた場合は forest 探索を最小化してください。
+      必要に応じて fetch_chunk_detail を使い、結果を submit_phase で送信してください。
+  Q2:
+    expected_payload:
+      compaction_count: int
+      has_unverified_hypotheses: bool
+      reason: str
+      summary: str
+      tools_used: list[str]
+    instruction: >-
+      VERIFICATION は仮説や探索結果の裏取り（根拠確認・矛盾解消）を指します。
+      未検証の仮説がある／根拠が弱い／相反する結果がある場合は必要と判断し、理由を添えて submit_phase で送信してください。
+  VERIFICATION:
+    expected_payload:
+      compaction_count: int
+      hypotheses_verified: list[{hypothesis, result, evidence}]
+      summary: str
+      tools_used: list[str]
+    instruction: >-
+      仮説を1件ずつ検証し、証拠は file:line もしくはツール出力で示してください。推測は不可。
+      根拠が無い場合は result=false とし、理由を記載してください。
+      コードに関する仮説は必ず code-intel ツールを使い、tools_used に記載してください。
+  Q3:
+    expected_payload:
+      compaction_count: int
+      needs_impact_analysis: bool
+      reason: str
+      summary: str
+      tools_used: list[str]
+    instruction: >-
+      修正箇所の参照先や依存先への影響について十分な調査ができているか評価し、理由を添えて submit_phase で送信してください。
   IMPACT_ANALYSIS:
     expected_payload:
+      compaction_count: int
       impact_summary: dict
       summary: str
       tools_used: list[str]
-    instruction: analyze_impact を実行して影響分析を実施し、完了後 submit_phase で送信してください。
-  MERGE:
+    instruction: >-
+      analyze_impact を実行し、修正箇所の参照先/依存先への影響、関連ファイル・テスト・設定への波及を短くまとめて submit_phase で送信してください。
+  READY_PLAN:
     expected_payload:
+      compaction_count: int
       summary: str
-    instruction: summary を添えて submit_phase で送信し、マージを実行してください。
+      tasks: list[{id, description, status, failure_count?, revert_reason?}]
+      tools_used: list[str]
+    instruction: >-
+      .code-intel/task_planning.md があれば必ず読み、指針に従ってタスクリストを作成し submit_phase で送信してください。
+  READY_IMPL:
+    expected_payload:
+      compaction_count: int
+      summary: str
+      task_id: str
+      tools_used: list[str]
+    instruction: >-
+      変更対象ファイルは事前に check_write_target を実行し、実装後に submit_phase で報告してください。
+  READY_COMPLETE:
+    expected_payload:
+      compaction_count: int
+      summary: str
+    instruction: >-
+      全タスクが完了しました。summary を添えて submit_phase で送信してください。
   POST_IMPL_VERIFY:
     expected_payload:
+      compaction_count: int
       details: str
       failed_tasks: list[str] (if passed=false)
       passed: bool
       summary: str
       tools_used: list[str]
       verifier_used: str
-    instruction: 実装結果を検証してください。検証結果を submit_phase で送信してください。
+    instruction: >-
+      利用者が追加した verifier を含む .code-intel/verifiers/*.md から適切なものを選び、手順に従って検証を実行してください。
+      使用した手順書（verifier）の名前/パスを明記し、失敗時は具体的な失敗内容を記載して submit_phase で送信してください。
+  VERIFY_INTERVENTION:
+    expected_payload:
+      action_taken: str
+      compaction_count: int
+      prompt_used: str
+      summary: str
+      tools_used: list[str]
+    instruction: >-
+      Step 15 の検証失敗が3回続いたので介入を実施します。
+      .code-intel/interventions/*.md から適切な介入プロンプトを選定・実行し、使用したプロンプトの名前/パスを明記して submit_phase で送信してください。
   PRE_COMMIT:
     expected_payload:
       commit_message: str
+      compaction_count: int
       review_prompt_used: str
       reviewed_files: list[str]
       summary: str
       tools_used: list[str]
-    instruction: review_changes で差分を取得してレビューし、コミットメッセージとともに submit_phase で送信してください。
-  Q1:
-    expected_payload:
-      needs_more_information: bool
-      reason: str
-      summary: str
-      tools_used: list[str]
-    instruction: SEMANTIC フェーズが必要か評価してください。submit_phase で結果を送信してください。
-  Q2:
-    expected_payload:
-      has_unverified_hypotheses: bool
-      reason: str
-      summary: str
-      tools_used: list[str]
-    instruction: VERIFICATION フェーズが必要か評価してください。submit_phase で結果を送信してください。
-  Q3:
-    expected_payload:
-      needs_impact_analysis: bool
-      reason: str
-      summary: str
-      tools_used: list[str]
-    instruction: IMPACT_ANALYSIS フェーズが必要か評価してください。submit_phase で結果を送信してください。
+    instruction: >-
+      review_changes で差分一覧を取得し、.code-intel/review_prompts/garbage_detection.md に従って不要物（ゴミ）かどうか判断してください。
+      使用した手順書の名前/パスを明記し、結果を submit_phase で送信してください。
   QUALITY_REVIEW:
     expected_payload:
+      compaction_count: int
       issues: list[str]
       quality_prompt_used: str
       quality_score: str
       summary: str
       tools_used: list[str]
-    instruction: 品質チェックを実施してください。結果を submit_phase で送信してください。
-  QUERY_FRAME:
+    instruction: >-
+      .code-intel/review_prompts/quality_review.md のチェックリストに従って品質レビューを実施してください。
+      使用した手順書の名前/パスを明記し、結果を submit_phase で送信してください。
+  MERGE:
     expected_payload:
-      action_type: str
-      constraints: str
-      scope: str
+      compaction_count: int
       summary: str
-      target_symbols: list[str]
-      tools_used: list[str]
-    instruction: ユーザーの指示から構造化スロットを抽出し submit_phase で送信してください。
-  READY_COMPLETE:
-    expected_payload:
-      summary: str
-    instruction: 全タスクが完了しました。summary を添えて submit_phase で送信してください。
-  READY_IMPL:
-    expected_payload:
-      summary: str
-      task_id: str
-      tools_used: list[str]
-    instruction: 変更対象ファイルは事前に check_write_target を実行し、次のタスクを実装して submit_phase で報告してください。
-  READY_PLAN:
-    expected_payload:
-      summary: str
-      tasks: list[{id, description, status, failure_count?, revert_reason?}]
-      tools_used: list[str]
-    instruction: 探索結果に基づきタスクを分割し、タスクリストを submit_phase で送信してください。
-  SEMANTIC:
-    expected_payload:
-      search_query: str
-      search_results: list[str]
-      summary: str
-      tools_used: list[str]
-    instruction: semantic_search で追加情報を収集してください。完了後 submit_phase で送信してください。
-  VERIFICATION:
-    expected_payload:
-      hypotheses_verified: list[{hypothesis, result, evidence}]
-      summary: str
-      tools_used: list[str]
-    instruction: 仮説検証を実施してください。完了後 submit_phase で送信してください。
-  VERIFY_INTERVENTION:
-    expected_payload:
-      action_taken: str
-      prompt_used: str
-      summary: str
-      tools_used: list[str]
-    instruction: 介入プロンプトを読み、指示に従ってください。実行結果を submit_phase で送信してください。
+    instruction: >-
+      summary を添えて submit_phase で送信し、マージを実行してください。

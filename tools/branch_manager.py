@@ -486,18 +486,7 @@ class BranchManager:
                 if proc.returncode == 0:
                     checked_out_to = base_branch
                 else:
-                    # Try 'master' as fallback
-                    proc = await asyncio.create_subprocess_exec(
-                        "git", "checkout", "master",
-                        cwd=str(repo),
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE,
-                    )
-                    stdout, stderr = await proc.communicate()
-                    if proc.returncode == 0:
-                        checked_out_to = "master"
-                    else:
-                        errors.append(f"Failed to checkout to {base_branch}: {stderr.decode().strip()}")
+                    errors.append(f"Failed to checkout to {base_branch}: {stderr.decode().strip()}")
 
             # List all llm_task_* branches
             proc = await asyncio.create_subprocess_exec(

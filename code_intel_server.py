@@ -173,9 +173,8 @@ async def _create_branch_for_ready(session) -> dict:
     """
     v1.11: Create task branch when transitioning to READY phase.
 
-    This function is called when:
-    - check_phase_necessity skips IMPACT_ANALYSIS (Q3=NO) → READY
-    - submit_impact_analysis completes → READY
+    Called centrally from _submit_ready (idempotent).
+    Skips if branch already exists or skip_implementation mode.
 
     Returns: {"success": bool, "branch": {...}} or {"error": str, "message": str}
     """
@@ -766,6 +765,12 @@ async def list_tools() -> list[Tool]:
                         "type": "string",
                         "description": "Path to the target repository (used for checkpoint restoration when no active session exists)",
                     },
+                    "discard_active": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Discard the current active session and restore from checkpoint instead. "
+                                       "Use when recovery_available=true was returned by start_session and user chose to restore.",
+                    },
                 },
             },
         ),
@@ -1217,7 +1222,7 @@ async def _handle_submit_phase(session: SessionState, data: dict) -> dict:
 
     # --- Steps 12-14: READY (plan/implement/complete) ---
     elif phase == Phase.READY:
-        return _submit_ready(session, data)
+        return await _submit_ready(session, data)
 
     # --- Step 15: POST_IMPL_VERIFY ---
     elif phase == Phase.POST_IMPL_VERIFY:
@@ -1277,6 +1282,20 @@ async def _submit_branch_intervention(session: SessionState, data: dict) -> dict
             pass
 
     if choice in ("delete", "merge"):
+        # Check for cleanup errors — require user intervention if branch operation failed
+        cleanup_errors = cleanup_result.get("errors", []) if isinstance(cleanup_result, dict) else []
+        if cleanup_errors:
+            return {
+                "success": False,
+                "error": "branch_operation_failed",
+                "choice": choice,
+                "cleanup_result": cleanup_result,
+                "current_phase": "BRANCH_INTERVENTION",
+                "step": 2,
+                "message": f"Branch {choice} failed: {'; '.join(cleanup_errors)}",
+                "instruction": "ブランチ操作に失敗しました。ユーザーに失敗内容を通知し、手動での解決を依頼してください。再選択は行わないでください。",
+                "requires_user_intervention": True,
+            }
         session.branch_policy = None
 
     # Determine next phase
@@ -1297,6 +1316,14 @@ async def _submit_branch_intervention(session: SessionState, data: dict) -> dict
 def _submit_document_research(session: SessionState, data: dict) -> dict:
     """Step 3: Handle document research results."""
     documents_reviewed = data.get("documents_reviewed", [])
+
+    # Validate: documents_reviewed must not be empty
+    if not documents_reviewed:
+        return {
+            "error": "payload_mismatch",
+            "message": "指定ドキュメントを読み、`documents_reviewed` に結果を記載して再送してください",
+            **_phase_response(session, "DOCUMENT_RESEARCH"),
+        }
 
     session.phase_history.append({
         "phase": "DOCUMENT_RESEARCH",
@@ -1342,15 +1369,10 @@ async def _submit_query_frame(session: SessionState, data: dict) -> dict:
 
     # Determine next phase
     if session.fast_mode or session.quick_mode:
-        # Skip exploration → READY
+        # Skip exploration → READY (branch creation handled in _submit_ready)
         next_phase = Phase.READY
         session.transition_to_phase(next_phase, reason="query_frame_complete_skip_exploration")
         response = _phase_response(session, "READY", extra={"ready_substep": "READY_PLAN"})
-        # --fast: create branch for READY (--quick: no branch)
-        if session.fast_mode:
-            branch_result = await _create_branch_for_ready(session)
-            if branch_result.get("branch"):
-                response["branch"] = branch_result["branch"]
     else:
         next_phase = Phase.EXPLORATION
         session.transition_to_phase(next_phase, reason="query_frame_complete")
@@ -1372,6 +1394,14 @@ def _submit_exploration_v11(session: SessionState, data: dict) -> dict:
     """Step 5: Handle exploration results via submit_phase."""
     explored_files = data.get("explored_files", [])
     findings = data.get("findings", [])
+
+    # Validate: explored_files and findings must not be empty
+    if not explored_files or not findings:
+        return {
+            "error": "payload_mismatch",
+            "message": "探索結果が空です。code-intel ツールを使って探索し、`explored_files` と `findings` を記載して再送してください",
+            **_phase_response(session, "EXPLORATION"),
+        }
 
     # Also support legacy field names for compatibility
     symbols_identified = data.get("symbols_identified", [])
@@ -1445,6 +1475,14 @@ def _submit_semantic_v11(session: SessionState, data: dict) -> dict:
     """Step 7: Handle semantic search results."""
     search_results = data.get("search_results", [])
 
+    # Validate: search_results must not be empty
+    if not search_results:
+        return {
+            "error": "payload_mismatch",
+            "message": "検索結果が空です。`semantic_search` を実行し、`search_results` を記載して再送してください",
+            **_phase_response(session, "SEMANTIC"),
+        }
+
     session.phase_history.append({
         "phase": "SEMANTIC",
         "search_results_count": len(search_results),
@@ -1494,6 +1532,23 @@ def _submit_verification_v11(session: SessionState, data: dict) -> dict:
     """Step 9: Handle verification results."""
     hypotheses_verified = data.get("hypotheses_verified", [])
 
+    # Validate: hypotheses_verified must not be empty
+    if not hypotheses_verified:
+        return {
+            "error": "payload_mismatch",
+            "message": "検証結果が空です。仮説を1件ずつ検証し、`hypotheses_verified` を記載して再送してください",
+            **_phase_response(session, "VERIFICATION"),
+        }
+
+    # Validate: all hypotheses must have result=true
+    false_results = [h for h in hypotheses_verified if isinstance(h, dict) and h.get("result") is False]
+    if false_results:
+        return {
+            "error": "payload_mismatch",
+            "message": "result=false の仮説があります。全仮説が result=true になるまで再検証し、`hypotheses_verified` を再送してください",
+            **_phase_response(session, "VERIFICATION"),
+        }
+
     session.phase_history.append({
         "phase": "VERIFICATION",
         "verified_count": len(hypotheses_verified),
@@ -1541,26 +1596,27 @@ async def _submit_q3(session: SessionState, data: dict) -> dict:
                 "message": "探索完了。セッションを終了します。",
             }
 
-        # For IMPLEMENT/MODIFY → READY
+        # For IMPLEMENT/MODIFY → READY (branch creation handled in _submit_ready)
         session.transition_to_phase(Phase.READY, reason="q3_skip_impact_to_ready")
-
-        # Create branch for READY
-        branch_result = await _create_branch_for_ready(session)
-
-        response = _phase_response(session, "READY", extra={"ready_substep": "READY_PLAN"})
-        if branch_result.get("branch"):
-            response["branch"] = branch_result["branch"]
 
         return {
             "success": True,
             "decision": "IMPACT_ANALYSIS skipped → READY",
-            **response,
+            **_phase_response(session, "READY", extra={"ready_substep": "READY_PLAN"}),
         }
 
 
 def _submit_impact_analysis_v11(session: SessionState, data: dict) -> dict:
     """Step 11: Handle impact analysis results."""
     impact_summary = data.get("impact_summary", {})
+
+    # Validate: impact_summary must not be empty
+    if not impact_summary:
+        return {
+            "error": "payload_mismatch",
+            "message": "影響分析結果が空です。`analyze_impact` を実行し、`impact_summary` を記載して再送してください",
+            **_phase_response(session, "IMPACT_ANALYSIS"),
+        }
 
     session.phase_history.append({
         "phase": "IMPACT_ANALYSIS",
@@ -1585,8 +1641,23 @@ def _submit_impact_analysis_v11(session: SessionState, data: dict) -> dict:
     }
 
 
-def _submit_ready(session: SessionState, data: dict) -> dict:
+async def _submit_ready(session: SessionState, data: dict) -> dict:
     """Steps 12-14: READY phase dispatches to sub-steps."""
+
+    # Centralized branch creation: ensure branch exists before any READY work.
+    # _create_branch_for_ready is idempotent (skips if branch already exists).
+    # This replaces scattered calls in _submit_q3, _submit_query_frame, etc.
+    branch_info = None
+    if not session.quick_mode:
+        branch_result = await _create_branch_for_ready(session)
+        if not branch_result.get("success", True):
+            return {
+                "error": "branch_creation_failed",
+                "message": "タスクブランチの作成に失敗しました。ユーザーに状況を伝え、`git status` での作業ツリー確認・手動ブランチ作成・`/code --clean` でのリセットのいずれかを依頼してください",
+                "requires_user_intervention": True,
+                **_phase_response(session, "READY"),
+            }
+        branch_info = branch_result.get("branch")
 
     # --- Step 12: Task Plan (has "tasks" key) ---
     if "tasks" in data:
@@ -1610,6 +1681,8 @@ def _submit_ready(session: SessionState, data: dict) -> dict:
             **result,
             **_phase_response(session, "READY", step=13, extra={"ready_substep": "READY_IMPL"}),
         }
+        if branch_info:
+            response["branch"] = branch_info
         if planning_guide:
             response["planning_guide"] = planning_guide
         return response
@@ -1780,7 +1853,9 @@ async def _submit_pre_commit(session: SessionState, data: dict) -> dict:
     if branch_manager is None:
         return {
             "error": "branch_manager_not_found",
-            "message": "Branch manager not found.",
+            "message": "タスクブランチが未作成の状態でコミットフェーズに到達しました。ユーザーに状況を伝え、`git branch` でのブランチ状態確認または `/code --clean` でのセッションリセットを依頼してください",
+            "requires_user_intervention": True,
+            **_phase_response(session, "PRE_COMMIT"),
         }
 
     # Submit review to session
@@ -1790,7 +1865,11 @@ async def _submit_pre_commit(session: SessionState, data: dict) -> dict:
     )
 
     if not review_result.get("success"):
-        return review_result
+        return {
+            **review_result,
+            "message": review_result.get("message", "discard 判定のファイルに reason が未指定です。理由を付けて `reviewed_files` を再送してください"),
+            **_phase_response(session, "PRE_COMMIT"),
+        }
 
     # Determine whether to execute commit now
     execute_commit_now = not session.quality_review_enabled
@@ -1805,7 +1884,10 @@ async def _submit_pre_commit(session: SessionState, data: dict) -> dict:
     if not finalize_result.success:
         return {
             "error": "finalize_failed",
-            "message": finalize_result.error,
+            "message": "git commit に失敗しました。ユーザーに状況を伝え、pre-commit hook のエラー出力や `git status` の確認と手動での問題解決を依頼してください。解決後、再度 submit_phase を実行してください",
+            "details": finalize_result.error,
+            "requires_user_intervention": True,
+            **_phase_response(session, "PRE_COMMIT"),
         }
 
     # Store preparation state
@@ -1895,6 +1977,14 @@ async def _submit_quality_review_v11(session: SessionState, data: dict) -> dict:
                 if commit_result.success:
                     commit_hash = commit_result.commit_hash
                     session.commit_prepared = False
+                else:
+                    # Commit execution failed — do NOT transition to MERGE
+                    return {
+                        "error": "commit_execution_failed",
+                        "message": "品質レビュー後のコミット実行に失敗しました。ユーザーに状況を伝え、`git status` での working tree 確認と手動での問題解決を依頼してください",
+                        "requires_user_intervention": True,
+                        **_phase_response(session, "QUALITY_REVIEW"),
+                    }
 
         session.quality_review_completed = True
         session.transition_to_phase(Phase.MERGE, reason="quality_review_passed")
@@ -1929,7 +2019,9 @@ async def _submit_merge(session: SessionState, data: dict) -> dict:
     if branch_manager is None:
         return {
             "error": "branch_manager_not_found",
-            "message": "Branch manager not found.",
+            "message": "ブランチ管理情報が不整合です。ユーザーに状況を伝え、`git branch` での状態確認または `/code --clean` でのセッションリセットを依頼してください",
+            "requires_user_intervention": True,
+            **_phase_response(session, "MERGE"),
         }
 
     merge_result = await branch_manager.merge_to_base()
@@ -1951,7 +2043,9 @@ async def _submit_merge(session: SessionState, data: dict) -> dict:
         return {
             "success": False,
             "error": merge_result.get("error"),
-            "message": "Merge failed.",
+            "message": "ブランチのマージに失敗しました。ユーザーに状況を伝え、`git status` でのコンフリクト確認と手動解決を依頼してください。解決後、再度 submit_phase を実行してください",
+            "requires_user_intervention": True,
+            **_phase_response(session, "MERGE"),
         }
 
 
@@ -2214,6 +2308,11 @@ async def _call_tool_impl(name: str, arguments: dict) -> list[TextContent]:
                 latest = old_checkpoints[-1]
                 result["recovery_available"] = True
                 result["checkpoint_info"] = latest
+                result["recovery_instruction"] = (
+                    "前回のセッションのチェックポイントが見つかりました。"
+                    "復元する場合は get_session_status(discard_active=true, repo_path=\".\") を呼び出してください。"
+                    "新規セッションで続行する場合はそのまま submit_phase を呼んでください。"
+                )
         except Exception:
             pass
 
@@ -2223,11 +2322,22 @@ async def _call_tool_impl(name: str, arguments: dict) -> list[TextContent]:
         return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
     elif name == "get_session_status":
+        discard_active = arguments.get("discard_active", False)
+        discarded_session_id = None
         session = session_manager.get_active_session()
+        if discard_active and session is not None:
+            # Discard the active session to allow checkpoint restoration
+            discarded_session_id = session.session_id
+            session_manager._sessions.pop(session.session_id, None)
+            session_manager._active_session_id = None
+            session = None
         if session is None:
             # v1.12: Auto-restore from checkpoint
             repo_path = arguments.get("repo_path", ".")
             checkpoints = session_manager.list_checkpoints(repo_path)
+            # Exclude the discarded session's checkpoint
+            if discarded_session_id:
+                checkpoints = [cp for cp in checkpoints if cp["session_id"] != discarded_session_id]
             if checkpoints:
                 latest = checkpoints[-1]  # sorted by checkpoint_at
                 restored = session_manager.load_checkpoint(latest["session_id"], repo_path)
@@ -2283,6 +2393,18 @@ async def _call_tool_impl(name: str, arguments: dict) -> list[TextContent]:
                 step = READY_PAYLOAD_STEP_MAP.get(payload_key, PHASE_STEP_MAP.get(payload_key, 0))
                 if step:
                     session.record_phase_summary(payload_key, step, summary)
+
+        # v1.13: Compaction resilience - detect count mismatch and return summaries
+        if result and not result.get("error"):
+            received_count = data.get("compaction_count")
+            if isinstance(received_count, int) and received_count != session.compaction_count:
+                # Mismatch detected: compaction occurred
+                phase_summaries = session.get_phase_summaries_flat()
+                if phase_summaries:
+                    result["phase_summaries"] = phase_summaries
+                session.compaction_count = received_count
+            # Always include compaction_count in response for LLM reference
+            result["compaction_count"] = session.compaction_count
 
         # v1.12: Checkpoint persistence after submit_phase
         if result and not result.get("error"):

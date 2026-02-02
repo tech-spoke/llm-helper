@@ -790,7 +790,19 @@ def get_phase_response(
             if k != "ready_substep":
                 response[k] = v
 
-    return _apply_phase_contract_overrides(response, payload_key, phase_name, repo_path)
+    response = _apply_phase_contract_overrides(response, payload_key, phase_name, repo_path)
+
+    # v1.13: Append compaction protocol note to instruction
+    compaction_note = (
+        "\n[compaction_protocol] submit_phase の data に compaction_count（整数）を含めてください。"
+        "直前の submit_phase レスポンスに含まれる compaction_count をそのまま送信してください。"
+        "コンテキスト圧縮が発生して直前の submit_phase レスポンスが参照できない場合は、"
+        "最後に確認した compaction_count に +1 した値を送信してください（不明な場合は 1）。"
+        "レスポンスに phase_summaries が含まれていた場合は、前フェーズまでの文脈復元に活用してください。"
+    )
+    response["instruction"] = response.get("instruction", "") + compaction_note
+
+    return response
 
 
 # =============================================================================
@@ -1126,6 +1138,9 @@ class SessionState:
 
     # v1.13: Summary-only payload persistence
     phase_payloads: dict[str, dict] = field(default_factory=dict)
+
+    # v1.13: Compaction resilience counter
+    compaction_count: int = 0
 
     # v1.11: Session flags (parsed from command options by LLM)
     no_verify: bool = False       # --no-verify
@@ -2061,6 +2076,7 @@ class SessionState:
             "instruction": phase_response.get("instruction"),
             "expected_payload": phase_response.get("expected_payload"),
             "task_progress": self._get_task_progress() if self.tasks else None,
+            "compaction_count": self.compaction_count,
         }
 
         # v1.2: Add task branch info if enabled
@@ -2096,6 +2112,14 @@ class SessionState:
         }
         label = label_map.get(payload_key, payload_key)
         return f"step_{step:02d}_{label}"
+
+    def get_phase_summaries_flat(self) -> dict[str, str]:
+        """Return phase_payloads as flat dict {key: summary_text} for compaction recovery."""
+        result = {}
+        for key, payload in self.phase_payloads.items():
+            if isinstance(payload, dict) and "summary" in payload:
+                result[key] = payload["summary"]
+        return result
 
     def _get_completed_steps(self) -> list[int]:
         """Get list of completed step numbers from phase history."""
@@ -2498,6 +2522,7 @@ class SessionState:
                     "prepared_discarded_files": self.prepared_discarded_files,
                 },
                 "tasks": [t.to_dict() for t in self.tasks],
+                "compaction_count": self.compaction_count,
             },
             "phase_payloads": self.phase_payloads,
             "checkpoint_version": "1.13",
@@ -2566,6 +2591,8 @@ class SessionState:
             "tasks": [t.to_dict() for t in self.tasks],
             # v1.13: Summary-only payload persistence
             "phase_payloads": self.phase_payloads,
+            # v1.13: Compaction resilience counter
+            "compaction_count": self.compaction_count,
             # v1.11: Flags
             "no_verify": self.no_verify,
             "no_quality": self.no_quality,
@@ -2677,6 +2704,9 @@ class SessionState:
         # v1.13: Summary-only payload persistence
         session.phase_payloads = data.get("phase_payloads", {})
 
+        # v1.13: Compaction resilience counter
+        session.compaction_count = data.get("compaction_count", 0)
+
         # v1.11: Flags
         session.no_verify = data.get("no_verify", False)
         session.no_quality = data.get("no_quality", False)
@@ -2772,6 +2802,9 @@ class SessionState:
                 ))
 
         session.phase_payloads = data.get("phase_payloads", {})
+
+        # v1.13: Compaction resilience counter
+        session.compaction_count = orchestrator_state.get("compaction_count", 0)
 
         return session
 
