@@ -2,7 +2,7 @@
 
 > **Current Version: v1.16**
 
-An MCP server that enforces LLMs to implement code exactly as specified.
+An MCP server that enforces LLMs like Claude and Codex to implement code exactly as specified.
 
 ## Overview
 

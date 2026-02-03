@@ -2,7 +2,7 @@
 
 > **Current Version: v1.16**
 
-LLM に「仕様通りの完全な実装」を強制する MCP サーバー。
+Claude や Codex などの LLM に「仕様通りの完全な実装」を強制する MCP サーバー。
 
 ## 概要
 
