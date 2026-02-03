@@ -150,7 +150,7 @@ See [DESIGN.md](docs/DESIGN.md) for details.
 ## Requirements
 
 - Python 3.10+
-- Supported OS: Linux (apt/dnf/pacman), macOS (brew)
+- Supported OS: Linux (Ubuntu/Debian, Fedora/RHEL, Arch), macOS, Windows (WSL)
 
 ### Tools Installed by setup.sh
 

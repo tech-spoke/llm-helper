@@ -150,7 +150,7 @@ LLM に判断をさせない。守らせるのではなく、守らないと進�
 ## Requirements
 
 - Python 3.10+
-- 対応 OS: Linux (apt/dnf/pacman), macOS (brew)
+- 対応 OS: Linux (Ubuntu/Debian, Fedora/RHEL, Arch), macOS, Windows (WSL)
 
 ### setup.sh が導入するツール
 
