@@ -1,6 +1,6 @@
 ---
 name: code
-description: Code implementation workflow using code-intel MCP server (mirror of /code command).
+description: "Use this skill ONLY when the user explicitly says '/code'. Never use automatically."
 metadata:
   short-description: Code implementation workflow
 ---

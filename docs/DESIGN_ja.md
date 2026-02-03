@@ -105,6 +105,16 @@ LLM に決めさせない。従わないと進めない設計にする。
 └─────────────────────────────────────────────────────┘
 ```
 
+### オーケストレーター → LLM → submit_phase の責務分離
+
+- **オーケストレーター（サーバー）**: 現在フェーズを特定し、`instruction` + `expected_payload` を返す
+- **LLM**: 指示を実行し、`expected_payload` 形式で **`submit_phase` のみ**を呼ぶ
+- **サーバー**: ペイロードを検証し、次フェーズを決定する
+
+v1.13 以降はフェーズ契約（`instruction` / `expected_payload` / 必須ツール）を
+`.code-intel/phase_contract.yml` に集約し、**契約に沿わない送信は弾く**。
+契約の最小単位は **summary + tools_used**（READY 完了 / MERGE など一部例外あり）。
+
 ### Forest/Map 2層構造
 
 | 名前 | 目的 | 内容 | 更新タイミング |
@@ -157,6 +167,21 @@ LLM 側前処理（サーバー呼び出しなし）:
 | 17 | PRE_COMMIT | review_changes でレビュー | |
 | 18 | QUALITY_REVIEW | 品質チェック | quality_revert_count ≥ 3 → forced_completion |
 | 19 | MERGE | — | SESSION_COMPLETE |
+
+---
+
+## チェックポイント復元（v1.12）
+
+`submit_phase` 成功ごとに **セッション状態を永続化**し、CLI 再起動後も復元できる。
+
+- **保存先**: `.code-intel/sessions/{session_id}.json`
+- **復元方法**: `/code --resume` → `get_session_status` がチェックポイントを読み込み
+- **通常フロー**: `start_session` が `recovery_available` を返す場合は選択肢を提示
+- **完了時**: MERGE（SESSION_COMPLETE）でチェックポイントを削除
+- **掃除**: `--clean` で stale ブランチ削除 + チェックポイント全削除
+
+> 注意: `get_session_status` 単体で復元すると、LLM 側の文脈が不足するため
+> 原則 `/code --resume` で **LLM文脈 + サーバー状態**を同時に確保する。
 
 ---
 
@@ -223,6 +248,7 @@ start_session → submit_phase (×N) → SESSION_COMPLETE
 - LLM が呼ぶフェーズ遷移ツールは `submit_phase` のみ
 - サーバーが `SessionState.phase` から現在フェーズを特定し、ペイロードをバリデーション
 - サーバーが次フェーズを決定してレスポンスを返す
+- v1.13 以降は `phase_contract.yml` の契約に従い、**必須ツールの使用証跡**を要求する
 
 ### レスポンス形式（自己完結型）
 
@@ -247,24 +273,24 @@ LLM はレスポンスの `instruction` に従い処理を実行し、`expected_
 
 | Step | Phase | LLM → サーバー (`data`) | サーバー判定 |
 |------|-------|------------------------|------------|
-| 2 | BRANCH_INTERVENTION | `{choice: "delete" \| "merge" \| "continue"}` | 処理実行 → 次フェーズ |
-| 3 | DOCUMENT_RESEARCH | `{documents_reviewed: [...]}` | → 次フェーズ |
-| 4 | QUERY_FRAME | `{action_type, target_symbols, scope, constraints}` | → 次フェーズ |
-| 5 | EXPLORATION | `{explored_files: [...], findings: [...]}` | → 次フェーズ |
+| 2 | BRANCH_INTERVENTION | `{choice: "delete" \| "merge" \| "continue", tools_used, summary}` | 処理実行 → 次フェーズ |
+| 3 | DOCUMENT_RESEARCH | `{documents_reviewed: [...], tools_used, summary}` | → 次フェーズ |
+| 4 | QUERY_FRAME | `{action_type, target_symbols, scope, constraints, tools_used, summary}` | → 次フェーズ |
+| 5 | EXPLORATION | `{explored_files: [...], findings: [...], tools_used, summary}` | → 次フェーズ |
 | 6 | Q1 | `{needs_more_information: bool, reason}` | true→SEMANTIC / false→Q2 |
-| 7 | SEMANTIC | `{search_results: [...]}` | → 次フェーズ |
+| 7 | SEMANTIC | `{search_results: [...], tools_used, summary}` | → 次フェーズ |
 | 8 | Q2 | `{has_unverified_hypotheses: bool, reason}` | true→VERIFICATION / false→Q3 |
-| 9 | VERIFICATION | `{hypotheses_verified: [...]}` | → 次フェーズ |
+| 9 | VERIFICATION | `{hypotheses_verified: [...], tools_used, summary}` | → 次フェーズ |
 | 10 | Q3 | `{needs_impact_analysis: bool, reason}` | true→IMPACT / false(実装)→READY / false(調査)→SESSION_COMPLETE |
-| 11 | IMPACT_ANALYSIS | `{impact_summary: {...}}` | 実装→READY / 調査→SESSION_COMPLETE |
-| 12 | READY (計画) | `{tasks: [{id, description, status, ...}]}` | タスク登録（冪等） |
-| 13 | READY (実装) | `{task_id, summary}` | 順序チェック、×N |
-| 14 | READY (完了) | `{}` | 全タスク完了チェック → 次フェーズ |
-| 15 | POST_IMPL_VERIFY | `{passed: bool, failed_tasks?, details}` | pass→17 / fail→12 |
-| 16 | VERIFY_INTERVENTION | `{prompt_used, action_taken}` | failure_count リセット → 12 |
-| 17 | PRE_COMMIT | `{reviewed_files: [...], commit_message}` | コミット → 次フェーズ |
-| 18 | QUALITY_REVIEW | `{quality_score, issues: [...]}` | 問題なし→MERGE / 問題あり→12 |
-| 19 | MERGE | `{}` | マージ → SESSION_COMPLETE |
+| 11 | IMPACT_ANALYSIS | `{impact_summary: {...}, tools_used, summary}` | 実装→READY / 調査→SESSION_COMPLETE |
+| 12 | READY (計画) | `{tasks: [...], tools_used, summary}` | タスク登録（冪等） |
+| 13 | READY (実装) | `{task_id, summary, tools_used}` | 順序チェック、×N |
+| 14 | READY (完了) | `{summary}` | 全タスク完了チェック → 次フェーズ |
+| 15 | POST_IMPL_VERIFY | `{passed: bool, failed_tasks?, details, tools_used, summary}` | pass→17 / fail→12 |
+| 16 | VERIFY_INTERVENTION | `{prompt_used, action_taken, tools_used, summary}` | failure_count リセット → 12 |
+| 17 | PRE_COMMIT | `{reviewed_files: [...], commit_message, tools_used, summary}` | コミット → 次フェーズ |
+| 18 | QUALITY_REVIEW | `{quality_score, issues: [...], tools_used, summary}` | 問題なし→MERGE / 問題あり→12 |
+| 19 | MERGE | `{summary}` | マージ → SESSION_COMPLETE |
 
 **注**: `gate_level="full"` の場合、サーバーは Q1/Q2/Q3 の評価を無視し全フェーズ強制実行。
 
@@ -507,6 +533,7 @@ your-project/
     ├── agreements/            (NL→Symbol ペア)
     ├── chroma/                (ChromaDB)
     ├── logs/                  (DecisionLog, OutcomeLog)
+    ├── sessions/              (チェックポイント保存先, v1.12)
     ├── verifiers/             (検証プロンプト)
     ├── doc_research/          (ドキュメント調査プロンプト)
     ├── review_prompts/        (ゴミ検出, 品質レビュー)
@@ -538,6 +565,15 @@ cp /path/to/llm-helper/templates/skills/claude/code.md /path/to/your-project/.cl
 ```
 
 ---
+
+## 配付構成（v1.14）
+
+v1.14 では **private/public の 2 リポジトリ構成**で配付物を管理する。
+配付テンプレートは `templates/` に集約し、`init-project.sh` はテンプレートをコピーする。
+
+- **public**: 配付に必要な最小セットのみ（`templates/`, `tools/`, `docs/` など）
+- **private**: テスト・サンプル・内部運用ドキュメントを含む
+- **生成物**: `.code-intel/**`, `.claude/commands/**`, `.codex/**` は Git 管理しない
 
 ## 設定
 
@@ -651,6 +687,10 @@ class TaskModel:
 
 | Version | Description | Link |
 |---------|-------------|------|
+| v1.14 | 配付構成の再整理（private/public 2 リポジトリ方式、テンプレート集約） | [v1.14](updates/v1.14_ja.md) |
+| v1.13-1 | フェーズ失敗時のエラーハンドリング監査（契約違反の検知強化） | [v1.13-1](updates/v1.13-1_phase_failure_handling_audit.md) |
+| v1.13 | フェーズ契約形式化（instruction/expected_payload/tools_used の明文化） | [v1.13](updates/v1.13_ja.md) |
+| v1.12 | チェックポイント永続化 & レガシーツール削除 | [v1.12](updates/v1.12_ja.md) |
 | v1.11 | submit_phase 統一 & タスクオーケストレーション（17個のツール→1個、コンパクト耐性、サーバー強制タスク管理） | [v1.11](updates/v1.11_ja.md) |
 | v1.10 | Individual Phase Checks（各フェーズ前の個別チェック、VERIFICATION/IMPACT分離、gate_level再編） | [v1.10](updates/v1.10_ja.md) |
 | v1.9 | Performance Optimization（sync_index バッチ処理 - 15-20秒削減） | [v1.9](updates/v1.9_ja.md) |
