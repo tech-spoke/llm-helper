@@ -335,22 +335,13 @@ if [ -d "$SCRIPT_DIR/.claude" ] || [ -d "$SKILLS_TEMPLATE_DIR" ]; then
 
 ## Core Rules
 
-1. **Always use parallel execution** when making multiple tool calls
-2. **Use \`/code\`** for guided implementation workflow with phase gates
-
-See [PARALLEL_GUIDE.md](PARALLEL_GUIDE.md) for details.
+1. **Use \`/code\`** for guided implementation workflow with phase gates
 
 ## Project-Specific Rules
 
 <!-- Add your project-specific rules here -->
 EOF
         echo "  ✓ .claude/CLAUDE.md (template)"
-    fi
-
-    # Copy PARALLEL_GUIDE.md from templates
-    if [ -f "$CLAUDE_TEMPLATE_DIR/PARALLEL_GUIDE.md" ] && [ ! -f "$PROJECT_PATH/.claude/PARALLEL_GUIDE.md" ]; then
-        cp "$CLAUDE_TEMPLATE_DIR/PARALLEL_GUIDE.md" "$PROJECT_PATH/.claude/"
-        echo "  ✓ .claude/PARALLEL_GUIDE.md"
     fi
 
     # Copy skill files (templates/skills/claude/*.md)
@@ -419,8 +410,7 @@ echo "Project structure:"
 echo "  $PROJECT_PATH/"
 echo "  ├── .claude/"
 echo "  │   ├── CLAUDE.md            (project rules for LLM)"
-echo "  │   ├── PARALLEL_GUIDE.md    (efficiency guide for LLM)"
-echo "  │   └── commands/            (skill files: /code, /exp, etc.)"
+echo "  │   └── commands/            (skill files: /code, etc.)"
 echo "  └── .code-intel/"
 echo "      ├── config.json          (indexing configuration)"
 echo "      ├── context.yml          (context & doc research settings)"

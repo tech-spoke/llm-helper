@@ -387,33 +387,34 @@ CLI 再起動 → /code --resume
 
 サーバーが各 submit_phase レスポンスで次フェーズを決定。LLM はフラグを知る必要がない。
 
-| Step | Phase | 実装 | 調査 | --no-verify | --no-quality | --fast | --quick | --no-doc | -ni | 備考 |
-|------|-------|:----:|:----:|:-----------:|:------------:|:------:|:-------:|:--------:|:---:|------|
-| 1 | start_session | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | |
-| 2 | BRANCH_INTERVENTION | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | stale 検出時のみ |
-| 3 | DOCUMENT_RESEARCH | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | |
-| 4 | QUERY_FRAME | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | |
-| 5 | EXPLORATION | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | |
-| 6 | Q1 | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | |
-| 7 | SEMANTIC | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | Q1=false 時スキップ |
-| 8 | Q2 | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | |
-| 9 | VERIFICATION | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | Q2=false 時スキップ |
-| 10 | Q3 | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | |
-| 11 | IMPACT_ANALYSIS | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | Q3=false 時スキップ |
-| 12 | READY (計画) | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ブランチ作成 |
-| 13 | READY (実装) | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ×N |
-| 14 | READY (完了) | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 未完了時ブロック |
-| 15 | POST_IMPL_VERIFY | ✅ | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | fail→Step 12 差戻し |
-| 16 | VERIFY_INTERVENTION | ✅ | ❌ | ❌ | ✅ | ✅ | ❌ | ✅ | ❌ | タスク failure_count ≥ 3 時のみ |
-| 17 | PRE_COMMIT | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | |
-| 18 | QUALITY_REVIEW | ✅ | ❌ | ✅ | ❌ | ❌ | ❌ | ✅ | ✅ | |
-| 19 | MERGE | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | |
+| Step | Phase | 実装 | -e | -v | --no-verify | --no-quality | --fast | --quick | --no-doc | -ni | 備考 |
+|------|-------|:----:|:--:|:--:|:-----------:|:------------:|:------:|:-------:|:--------:|:---:|------|
+| 1 | start_session | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | |
+| 2 | BRANCH_INTERVENTION | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | stale 検出時のみ |
+| 3 | DOCUMENT_RESEARCH | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | |
+| 4 | QUERY_FRAME | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | |
+| 5 | EXPLORATION | ✅ | ✅ | ❌ | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | |
+| 6 | Q1 | ✅ | ✅ | ❌ | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | |
+| 7 | SEMANTIC | ✅ | ✅ | ❌ | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | Q1=false 時スキップ |
+| 8 | Q2 | ✅ | ✅ | ❌ | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | |
+| 9 | VERIFICATION | ✅ | ✅ | ❌ | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | Q2=false 時スキップ |
+| 10 | Q3 | ✅ | ✅ | ❌ | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | |
+| 11 | IMPACT_ANALYSIS | ✅ | ✅ | ❌ | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | Q3=false 時スキップ |
+| 12 | READY (計画) | ✅ | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ブランチ作成 |
+| 13 | READY (実装) | ✅ | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ×N |
+| 14 | READY (完了) | ✅ | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 未完了時ブロック |
+| 15 | POST_IMPL_VERIFY | ✅ | ❌ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | fail→Step 12 差戻し |
+| 16 | VERIFY_INTERVENTION | ✅ | ❌ | ❌ | ❌ | ✅ | ✅ | ❌ | ✅ | ❌ | タスク failure_count ≥ 3 時のみ |
+| 17 | PRE_COMMIT | ✅ | ❌ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | |
+| 18 | QUALITY_REVIEW | ✅ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ✅ | ✅ | |
+| 19 | MERGE | ✅ | ❌ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | |
 
 **凡例**:
 - **実装**: IMPLEMENT / MODIFY intent（デフォルト）
-- **調査**: INVESTIGATE / QUESTION intent（`--only-explore` と同等、探索完了で SESSION_COMPLETE）
+- **-e**: `--only-explore`（探索のみ、Step 11 で SESSION_COMPLETE）
+- **-v**: `--only-verify`（検証のみ、Step 15 のみ実行）
 - **-ni**: `--no-intervention`（Step 16 VERIFY_INTERVENTION をスキップ）
-- フラグ列は実装 intent に対する修飾。調査 intent では Step 12 以降が存在しない。
+- フラグ列は実装 intent に対する修飾。`-e` では Step 12 以降が存在しない。
 
 ### コマンドオプション
 
@@ -482,8 +483,8 @@ LLM はレスポンスの `instruction` に従い処理を実行し、`expected_
 | 9 | VERIFICATION | `{hypotheses_verified: [...], tools_used, summary}` | → 次フェーズ |
 | 10 | Q3 | `{needs_impact_analysis: bool, reason}` | true→IMPACT / false(実装)→READY / false(調査)→SESSION_COMPLETE |
 | 11 | IMPACT_ANALYSIS | `{impact_summary: {...}, tools_used, summary}` | 実装→READY / 調査→SESSION_COMPLETE |
-| 12 | READY (計画) | `{tasks: [...], tools_used, summary}` | タスク登録（冪等） |
-| 13 | READY (実装) | `{task_id, summary, tools_used}` | 順序チェック、×N |
+| 12 | READY (計画) | `{tasks: [{id, description, status, checklist: [{item, status}]}], tools_used, summary}` | タスク登録（冪等） |
+| 13 | READY (実装) | `{task_id, checklist: [{item, status, evidence?, reason?}], summary, tools_used}` | checklist 検証、×N |
 | 14 | READY (完了) | `{summary}` | 全タスク完了チェック → 次フェーズ |
 | 15 | POST_IMPL_VERIFY | `{passed: bool, failed_tasks?, details, tools_used, summary}` | pass→17 / fail→12 |
 | 16 | VERIFY_INTERVENTION | `{prompt_used, action_taken, tools_used, summary}` | failure_count リセット → 12 |
@@ -502,24 +503,39 @@ READY フェーズは内部的に 3 サブステップ（計画 → 実装 → �
 
 ### Step 12: タスク計画
 
-タスクモデル: `{id, description, status, failure_count?, revert_reason?}`
+タスクモデル: `{id, description, status, checklist, failure_count?, revert_reason?}`
+
+チェックリスト項目: `{item, status, evidence?, reason?}`
+
+| status | evidence | reason | 説明 |
+|--------|----------|--------|------|
+| `pending` | - | - | 初期状態 |
+| `done` | **必須** | - | 実装完了（`file:line` で証拠を示す） |
+| `skipped` | - | **必須** | 実装しない（理由を明記、10文字以上） |
 
 ```python
 # 初回
 submit_phase(data={
   "tasks": [
-    {"id": "task_1", "description": "CSSコンポーネントユーティリティ化", "status": "pending"},
-    {"id": "task_2", "description": "@themeトークン化", "status": "pending"}
+    {
+      "id": "task_1",
+      "description": "認証機能を実装",
+      "status": "pending",
+      "checklist": [
+        {"item": "auth.py に login() メソッドを追加", "status": "pending"},
+        {"item": "auth.py に logout() メソッドを追加", "status": "pending"},
+        {"item": "auth.py に validate_password() を追加", "status": "pending"}
+      ]
+    }
   ]
 })
 
 # 差戻し時（完了済み + 修正タスクの完全なリスト）
 submit_phase(data={
   "tasks": [
-    {"id": "task_1", "description": "...", "status": "completed"},
-    {"id": "task_2", "description": "...", "status": "completed"},
+    {"id": "task_1", "description": "...", "status": "completed", "checklist": [...]},
     {"id": "fix_1", "description": "テスト失敗箇所の修正", "status": "pending",
-     "failure_count": 1, "revert_reason": "テストX失敗"}
+     "checklist": [...], "failure_count": 1, "revert_reason": "テストX失敗"}
   ]
 })
 ```
@@ -529,8 +545,28 @@ submit_phase(data={
 ### Step 13: タスク完了報告 (×N)
 
 ```python
-submit_phase(data={"task_id": "task_1", "summary": "変換完了"})
+submit_phase(data={
+  "task_id": "task_1",
+  "summary": "認証機能実装完了",
+  "checklist": [
+    {"item": "auth.py に login() メソッドを追加", "status": "done", "evidence": "auth.py:42-58"},
+    {"item": "auth.py に logout() メソッドを追加", "status": "done", "evidence": "auth.py:60-75"},
+    {"item": "auth.py に validate_password() を追加", "status": "skipped",
+     "reason": "既存の PasswordValidator クラスを再利用するため"}
+  ]
+})
 ```
+
+**検証ロジック（サーバー側）**:
+
+1. **全項目報告チェック**: 登録時の checklist 項目と一致するか
+2. **status チェック**: 全項目が `done` または `skipped`（`pending` 残存は不可）
+3. **evidence 検証** (`done` の場合):
+   - フォーマット: `file.py:42` または `file.py:42-58`
+   - ファイル存在チェック
+   - 行番号範囲チェック
+   - 空実装検出（pass/TODO/NotImplementedError のみの場合はエラー）
+4. **reason 検証** (`skipped` の場合): 10文字以上の理由が必須
 
 登録順に完了報告。サーバーが進捗を追跡し次タスクを返す。
 
@@ -655,8 +691,7 @@ class SessionState:
 your-project/
 ├── .claude/
 │   ├── CLAUDE.md              (プロジェクトルールテンプレート)
-│   ├── PARALLEL_GUIDE.md      (並列実行ガイド)
-│   └── commands/              (スキル: code.md, exp.md 等)
+│   └── commands/              (スキル: code.md 等)
 └── .code-intel/
     ├── config.json            (インデックス設定)
     ├── context.yml            (コンテキスト & doc_research 設定)
@@ -773,10 +808,18 @@ class SessionState:
     quality_revert_count: int
 
 @dataclass
+class ChecklistItem:
+    item: str
+    status: str                    # pending/done/skipped
+    evidence: str | None = None    # done 時必須（file.py:42 形式）
+    reason: str | None = None      # skipped 時必須（10文字以上）
+
+@dataclass
 class TaskModel:
     id: str
     description: str
     status: str                    # pending/completed
+    checklist: list[ChecklistItem] # 実装項目一覧
     failure_count: int = 0
     revert_reason: str = ""
 ```

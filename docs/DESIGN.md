@@ -1,6 +1,6 @@
-# Code Intelligence MCP Server - Design Document v1.14
+# Code Intelligence MCP Server - Design Document v1.16
 
-> This document describes the complete system specification as of v1.14.
+> This document describes the complete system specification as of v1.16.
 > For version history, see [CHANGELOG](#changelog).
 
 ---
@@ -105,6 +105,7 @@ And have a mechanism to learn from failures.
 | **submit_phase Unification** | Unify all phase exits to single tool (compaction resilience) |
 | **Server-Enforced Task Management** | Server verifies task completion (prevent LLM skipping) |
 | **Safety Valves** | Prevent infinite loops with server-side counters |
+| **Implementation Checklist (v1.16)** | Verify all checklist items with evidence/reason on task completion, detect empty implementations |
 
 ---
 
@@ -480,8 +481,8 @@ LLM follows response `instruction`, then calls `submit_phase` with `expected_pay
 | 9 | VERIFICATION | `{hypotheses_verified: [...], tools_used, summary}` | → Next phase |
 | 10 | Q3 | `{needs_impact_analysis: bool, reason}` | true→IMPACT / false(impl)→READY / false(investigate)→SESSION_COMPLETE |
 | 11 | IMPACT_ANALYSIS | `{impact_summary: {...}, tools_used, summary}` | Impl→READY / Investigate→SESSION_COMPLETE |
-| 12 | READY (planning) | `{tasks: [...], tools_used, summary}` | Register tasks (idempotent) |
-| 13 | READY (implementation) | `{task_id, summary, tools_used}` | Order check, ×N |
+| 12 | READY (planning) | `{tasks: [{id, description, status, checklist: [{item, status}]}], tools_used, summary}` | Register tasks (idempotent) |
+| 13 | READY (implementation) | `{task_id, checklist: [{item, status, evidence?, reason?}], summary, tools_used}` | Checklist validation, ×N |
 | 14 | READY (completion) | `{summary}` | All tasks complete check → Next phase |
 | 15 | POST_IMPL_VERIFY | `{passed: bool, failed_tasks?, details, tools_used, summary}` | pass→17 / fail→12 |
 | 16 | VERIFY_INTERVENTION | `{prompt_used, action_taken, tools_used, summary}` | failure_count reset → 12 |
@@ -500,24 +501,39 @@ All sent via `submit_phase`, server distinguishes by internal state.
 
 ### Step 12: Task Planning
 
-Task model: `{id, description, status, failure_count?, revert_reason?}`
+Task model: `{id, description, status, checklist, failure_count?, revert_reason?}`
+
+Checklist item: `{item, status, evidence?, reason?}`
+
+| status | evidence | reason | Description |
+|--------|----------|--------|-------------|
+| `pending` | - | - | Initial state |
+| `done` | **Required** | - | Implementation complete (provide evidence as `file:line`) |
+| `skipped` | - | **Required** | Not implementing (explain reason, min 10 chars) |
 
 ```python
 # Initial
 submit_phase(data={
   "tasks": [
-    {"id": "task_1", "description": "CSS component utilization", "status": "pending"},
-    {"id": "task_2", "description": "@theme tokenization", "status": "pending"}
+    {
+      "id": "task_1",
+      "description": "Implement authentication",
+      "status": "pending",
+      "checklist": [
+        {"item": "Add login() method to auth.py", "status": "pending"},
+        {"item": "Add logout() method to auth.py", "status": "pending"},
+        {"item": "Add validate_password() to auth.py", "status": "pending"}
+      ]
+    }
   ]
 })
 
 # On revert (complete list of completed + fix tasks)
 submit_phase(data={
   "tasks": [
-    {"id": "task_1", "description": "...", "status": "completed"},
-    {"id": "task_2", "description": "...", "status": "completed"},
+    {"id": "task_1", "description": "...", "status": "completed", "checklist": [...]},
     {"id": "fix_1", "description": "Fix test failure", "status": "pending",
-     "failure_count": 1, "revert_reason": "Test X failed"}
+     "checklist": [...], "failure_count": 1, "revert_reason": "Test X failed"}
   ]
 })
 ```
@@ -527,8 +543,28 @@ submit_phase(data={
 ### Step 13: Task Completion Report (×N)
 
 ```python
-submit_phase(data={"task_id": "task_1", "summary": "Conversion complete"})
+submit_phase(data={
+  "task_id": "task_1",
+  "summary": "Authentication implementation complete",
+  "checklist": [
+    {"item": "Add login() method to auth.py", "status": "done", "evidence": "auth.py:42-58"},
+    {"item": "Add logout() method to auth.py", "status": "done", "evidence": "auth.py:60-75"},
+    {"item": "Add validate_password() to auth.py", "status": "skipped",
+     "reason": "Reusing existing PasswordValidator class"}
+  ]
+})
 ```
+
+**Validation Logic (Server-side)**:
+
+1. **All items reported check**: Do reported items match registered checklist items?
+2. **Status check**: All items must be `done` or `skipped` (no `pending` remaining)
+3. **Evidence validation** (for `done`):
+   - Format: `file.py:42` or `file.py:42-58`
+   - File existence check
+   - Line number range check
+   - Empty implementation detection (error if only pass/TODO/NotImplementedError)
+4. **Reason validation** (for `skipped`): Requires reason with minimum 10 characters
 
 Report completion in registration order. Server tracks progress and returns next task.
 
@@ -653,8 +689,7 @@ Project structure after running `init-project.sh`:
 your-project/
 ├── .claude/
 │   ├── CLAUDE.md              (Project rules template)
-│   ├── PARALLEL_GUIDE.md      (Parallel execution guide)
-│   └── commands/              (Skills: code.md, exp.md, etc.)
+│   └── commands/              (Skills: code.md, etc.)
 └── .code-intel/
     ├── config.json            (Index configuration)
     ├── context.yml            (Context & doc_research settings)
@@ -771,10 +806,18 @@ class SessionState:
     quality_revert_count: int
 
 @dataclass
+class ChecklistItem:
+    item: str
+    status: str                    # pending/done/skipped
+    evidence: str | None = None    # Required for done (file.py:42 format)
+    reason: str | None = None      # Required for skipped (min 10 chars)
+
+@dataclass
 class TaskModel:
     id: str
     description: str
     status: str                    # pending/completed
+    checklist: list[ChecklistItem] # Implementation items list
     failure_count: int = 0
     revert_reason: str = ""
 ```
@@ -785,6 +828,7 @@ class TaskModel:
 
 | Version | Description | Link |
 |---------|-------------|------|
+| v1.16 | Task implementation checklist (evidence validation, empty implementation detection, reason requirement) | [v1.16](updates/v1.16.md) |
 | v1.14 | Distribution structure reorganization (private/public 2-repo system, template consolidation) | [v1.14](updates/v1.14.md) |
 | v1.13-1 | Phase failure error handling audit (contract violation detection enhancement) | [v1.13-1](updates/v1.13-1_phase_failure_handling_audit.md) |
 | v1.13 | Phase contract formalization (instruction/expected_payload/tools_used clarification) | [v1.13](updates/v1.13.md) |

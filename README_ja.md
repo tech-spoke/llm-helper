@@ -2,53 +2,63 @@
 
 > **Current Version: v1.16**
 
-Cursor IDE のようなコードインテリジェンス機能をオープンソースツールで実現する MCP サーバー。
+LLM に「仕様通りの完全な実装」を強制する MCP サーバー。
 
 ## 概要
 
-同じ Opus 4.5 モデルでも、呼び出し元によって挙動が異なる：
+### 解決する課題
 
-| 呼び出し元 | 挙動 |
-|-----------|------|
-| **Cursor** | コードベース全体を理解した上で修正する |
-| **Claude Code** | 修正箇所だけを見て修正する傾向がある |
+LLM によるコード実装には3つの課題がある：
 
-この MCP サーバーは、Claude Code に「コードベースを理解させる」ための仕組みを提供する。
+| 課題 | 症状 |
+|------|------|
+| **探索不足** | 修正箇所だけを見て、関連コードを無視する |
+| **ルール無視** | 設計ドキュメントやコーディング規約を読まない |
+| **実装の手抜き** | タスクを抜かす、モックで済ます、空実装を返す |
 
----
-
-## 設計思想
+### 本ツールの解決策
 
 ```
 LLM に判断をさせない。守らせるのではなく、守らないと進めない設計。
 ```
 
-| 原則 | 実装 |
+| 課題 | 解決策 | 実装 |
+|------|--------|------|
+| 探索不足 | **探索強制** | EXPLORATION フェーズで code-intel ツール使用を強制 |
+| ルール無視 | **ドキュメント強制** | DOCUMENT_RESEARCH フェーズで設計ドキュメント読み込みを強制 |
+| 実装の手抜き | **検証強制** | checklist + evidence 必須、空実装検出（pass/TODO/NotImplementedError） |
+
+### 立ち位置
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  上位: スペック仕様開発ワークフロー                           │
+│  「何を作るか」を定義（仕様書作成・タスク分解）               │
+└─────────────────────────────────────────────────────────────┘
+                         ↓ 仕様・タスクを渡す
+┌─────────────────────────────────────────────────────────────┐
+│  本ツール: Code Intelligence MCP Server                      │
+│  「仕様通りに作らせる」を強制                                 │
+│  ・探索 → ルール確認 → 実装 → 検証 の19ステップを強制実行    │
+│  ・サーバー側でフェーズ遷移を制御（LLM がスキップ不可）       │
+└─────────────────────────────────────────────────────────────┘
+```
+
+本ツールはスペック駆動開発ワークフローの **下位レイヤー** として機能し、「仕様は正しいのに LLM が正しく実装しない」問題を解決する。
+
+---
+
+## 設計思想
+
+| 原則 | 内容 |
 |------|------|
-| フェーズ強制 | ツール使用制限（EXPLORATION で semantic_search 禁止等） |
-| サーバー評価 | confidence はサーバーが算出、LLM の自己申告を排除 |
-| 構造化入力 | Quote 検証による幻覚防止 |
-| Embedding 検証 | NL→Symbol の関連性をベクトル類似度で客観評価 |
-| Write 制限 | 探索済みファイルのみ許可 |
-| 改善サイクル | DecisionLog + OutcomeLog + agreements による学習 |
-| 自動失敗検出 | /code 開始時に前回失敗を自動判定・記録 |
-| プロジェクト分離 | 各プロジェクトごとに独立した学習データ |
-| 必須コンテキスト（v1.1） | セッション開始時に設計ドキュメントとプロジェクトルールを自動提供 |
-| 影響範囲分析（v1.1） | READY フェーズ前に影響確認を強制 |
-| ゴミ分離（v1.2） | Git ブランチで変更を隔離、clean で一括破棄 |
-| ドキュメント調査（v1.3） | サブエージェントで設計ドキュメントを調査、タスク固有ルールを抽出 |
-| マークアップクロスリファレンス（v1.3） | CSS/HTML/JS の軽量クロスリファレンス分析 |
-| 介入システム（v1.4） | 検証ループにハマった時のリトライベース介入 |
-| 品質レビュー（v1.5） | 実装後の品質チェック、リトライループ |
-| ブランチライフサイクル（v1.6） | stale ブランチ警告、失敗時自動削除、begin_phase_gate 分離 |
-| 並列実行最適化（v1.7） | search_text 複数パターン対応、Read/Grep 並列実行で27-35秒削減 |
-| 探索のみモード（v1.8） | Intent自動判定（INVESTIGATE/QUESTION）+ --only-explore フラグ、ブランチ作成なし |
-| 個別フェーズチェック（v1.10） | 各フェーズ前の必要性チェック、VERIFICATION/IMPACT分離、gate_level再編で20-60秒削減 |
-| submit_phase 統一（v1.11） | 17個のsubmit_*ツール→1個に統一、コンパクト耐性の基盤 |
-| タスクオーケストレーション（v1.11） | サーバー強制のタスク管理、LLM がスキップ不可 |
-| コンパクト耐性設計（v1.11） | 4層の耐性（ツール・レスポンス・リカバリ・防御） |
-| 安全弁（v1.11） | サーバー側カウンターで無限ループ防止 |
-| 実装チェックリスト（v1.16） | タスク完了時に全項目の evidence/reason 検証、空実装検出 |
+| **フェーズ強制** | 探索なしに実装フェーズに進めない。サーバーがフェーズ遷移を制御 |
+| **サーバー評価** | 信頼度はサーバーが算出。LLM の自己申告を排除 |
+| **Write 制限** | 探索済みファイルのみ修正可能。未探索ファイルへの書き込みはブロック |
+| **安全弁** | サーバー側カウンターで無限ループを防止。検証失敗3回で介入発動 |
+| **改善サイクル** | DecisionLog + OutcomeLog で失敗パターンを学習 |
+
+詳細は [DESIGN_ja.md](docs/DESIGN_ja.md) を参照。
 
 ---
 
@@ -83,20 +93,22 @@ LLM に判断をさせない。守らせるのではなく、守らないと進�
     └───────────────────┘
 ```
 
-### 森と地図（Forest/Map）
+### セマンティック検索（Forest/Map）
 
-| 名称 | コレクション | 役割 | データの性質 |
-|------|-------------|------|-------------|
-| **森 (Forest)** | forest | ソースコード全体の意味検索 | 生データ・HYPOTHESIS |
-| **地図 (Map)** | map | 過去の成功ペア・合意事項 | 確定データ・FACT |
+**用途**: 「認証処理」→ `AuthService.login()` のように、自然言語からコードを探す
 
-**Short-circuit Logic**: 地図でスコア ≥ 0.7 → 森の探索をスキップ
+| 層 | 検索対象 | 効果 |
+|----|---------|------|
+| **Map** | 用語→シンボル対応表 | 学習済みの用語は即座にシンボル特定 |
+| **Forest** | ソースコード全体 | 初見の用語でも関連コードを発見 |
+
+**動作**: Map で高スコア（≥0.7）→ Forest スキップで高速化
 
 ---
 
 ## 処理フロー（19 Steps）
 
-v1.11 では全フェーズの出口を `submit_phase` に統一。LLM 側前処理（Flag Check, Intent Classification）の後、全ステップが `start_session` → `submit_phase` (×N) → SESSION_COMPLETE で完結。
+各フェーズをゲート管理し、LLM がフェーズをスキップしないようにオーケストレーターが制御する。
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -131,106 +143,38 @@ v1.11 では全フェーズの出口を `submit_phase` に統一。LLM 側前処
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### セッション開始（Steps 1-4）
-
-| Step | Phase | 内容 | スキップ |
-|------|-------|------|---------|
-| 1 | — | Intent 判定 → `start_session` で初期化 | - |
-| 2 | BRANCH_INTERVENTION | stale ブランチ検出時にユーザーへ選択肢提示 | stale 検出時のみ |
-| 3 | DOCUMENT_RESEARCH | サブエージェントで設計ドキュメントを調査 | `--no-doc` |
-| 4 | QUERY_FRAME | NL → 構造化スロット抽出 | - |
-
-### 探索フェーズ（Steps 5-11）
-
-| Step | Phase | 内容 | スキップ |
-|------|-------|------|---------|
-| 5 | EXPLORATION | code-intel ツールで探索 | `--fast`/`--quick` |
-| 6 | Q1 | SEMANTIC 必要性を評価 | サーバー判定で 7 をスキップ可 |
-| 7 | SEMANTIC | semantic_search で追加情報収集 | Q1=false 時スキップ |
-| 8 | Q2 | VERIFICATION 必要性を評価 | サーバー判定で 9 をスキップ可 |
-| 9 | VERIFICATION | 仮説検証 | Q2=false 時スキップ |
-| 10 | Q3 | IMPACT_ANALYSIS 必要性を評価 | サーバー判定で 11 をスキップ可 |
-| 11 | IMPACT_ANALYSIS | 影響分析 | Q3=false 時スキップ / 調査: SESSION_COMPLETE |
-
-### 実装フェーズ（Steps 12-19）
-
-| Step | Phase | 内容 | 備考 |
-|------|-------|------|------|
-| 12 | READY | タスク分解・計画 | ブランチ作成 |
-| 13 | READY | Edit/Write で実装 | タスク数分繰り返し (×N) |
-| 14 | READY | 全タスク完了を確認 | 未完了時ブロック |
-| 15 | POST_IMPL_VERIFY | verifier プロンプト実行 | fail 時 Step 12 差戻し |
-| 16 | VERIFY_INTERVENTION | 介入プロンプト読み取り・実行 | failure_count ≥ 3 時のみ |
-| 17 | PRE_COMMIT | review_changes でレビュー | |
-| 18 | QUALITY_REVIEW | 品質チェック | quality_revert_count ≥ 3 → 強制完了 |
-| 19 | MERGE | マージ → SESSION_COMPLETE | |
-
-### フェーズマトリクス
-
-サーバーが各 submit_phase レスポンスで次フェーズを決定。LLM はフラグを知る必要がない。
-
-| オプション | DOC調査 | 探索 | 実装 | 検証 | 介入 | ゴミ取 | 品質 | ブランチ |
-|-----------|:----:|:----:|:----:|:----:|:------:|:----:|:-------:|:-------:|
-| (デフォルト) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| 調査 intent | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `--no-verify` | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | ✅ |
-| `--no-quality` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
-| `--fast` / `-f` | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
-| `--quick` / `-q` | ✅ | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
-| `--no-doc` | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-
-**凡例**:
-- **DOC調査**: DOCUMENT_RESEARCH (Step 3)
-- **探索**: EXPLORATION〜IMPACT_ANALYSIS (Steps 5-11)
-- **調査 intent**: INVESTIGATE / QUESTION（`--only-explore` と同等）
+詳細は [DESIGN_ja.md](docs/DESIGN_ja.md) を参照。
 
 ---
 
-## ツール一覧
+## Requirements
 
-### セッション管理
+- Python 3.10+
+- 対応 OS: Linux (apt/dnf/pacman), macOS (brew)
 
-| ツール | 用途 |
-|--------|------|
-| `start_session` | intent, query, flags でセッション開始 |
-| `submit_phase` | **全フェーズの唯一の出口** — サーバーが次フェーズを決定（v1.11） |
-| `get_session_status` | 現在のフェーズ + instruction + expected_payload を取得（リカバリ用） |
+### setup.sh が導入するツール
 
-### コード探索
+**環境構築:**
+- venv — Python 仮想環境を作成
+- pip — 最新版にアップグレード
 
-| ツール | 用途 |
-|--------|------|
-| `search_text` | テキストパターン検索（並列対応） |
-| `find_definitions` | シンボル定義検索 (ctags) |
-| `find_references` | 参照検索 (ripgrep) |
-| `analyze_structure` | コード構造分析 (tree-sitter) |
-| `get_symbols` | ファイルのシンボル一覧取得 |
-| `search_files` | ファイル名パターン検索 |
-| `semantic_search` | Forest/Map のベクトル検索（SEMANTIC フェーズ） |
-| `query` | 汎用自然言語クエリ |
+**システムツール:**
+- ripgrep (rg) — テキスト検索
+- universal-ctags — シンボル定義検索
 
-### 実装制御
-
-| ツール | 用途 |
-|--------|------|
-| `check_write_target` | ファイル修正可能か検証 |
-| `add_explored_files` | 探索済みリストにファイル追加 |
-| `review_changes` | PRE_COMMIT で全ファイル変更を表示 |
-
-### ブランチ管理
-
-| ツール | 用途 |
-|--------|------|
-| `cleanup_stale_branches` | 全 `llm_task_*` ブランチを削除 |
-
-### インデックス & 学習
-
-| ツール | 用途 |
-|--------|------|
-| `sync_index` | ChromaDB インデックスを同期 |
-| `update_context` | context.yml の要約を更新 |
-| `record_outcome` | 成功/失敗を記録 |
-| `get_outcome_stats` | 学習統計を取得 |
+**Python パッケージ:**
+| パッケージ | バージョン | 用途 |
+|-----------|-----------|------|
+| mcp | ≥1.0.0 | MCP サーバーフレームワーク |
+| chromadb | ≥1.0.0 | ベクトル検索 (Forest/Map) |
+| tree-sitter | ≥0.21.0, <0.22.0 | AST 解析 |
+| tree-sitter-languages | ≥1.10.0 | 言語パーサー |
+| sentence-transformers | ≥2.2.0 | Embedding モデル |
+| scikit-learn | ≥1.0.0 | 類似度計算 |
+| PyYAML | ≥6.0.0 | context.yml 解析 |
+| asyncio | — | 非同期処理 |
+| pytest | ≥7.0.0 | テスト |
+| pytest-asyncio | ≥0.21.0 | 非同期テスト |
 
 ---
 
@@ -260,32 +204,28 @@ cd llm-helper
 ./init-project.sh /path/to/your-project --exclude=tests,docs,*.log
 ```
 
-これにより以下が作成されます：
+これにより以下が作成されます（◎ = 修正必須、★ = 追加/修正可、〇 = 修正可）：
 
 ```
 your-project/
 ├── .claude/
-│   ├── CLAUDE.md          ← LLM 用プロジェクトルール（自動生成）
-│   ├── PARALLEL_GUIDE.md  ← 効率化ガイド（v1.7）
-│   └── commands/          ← スキルファイル: /code, /exp 等（自動生成）
+│   ├── CLAUDE.md          〇 LLM 用プロジェクトルール（ルール追加可）
+│   └── commands/          ← スキルファイル（自動生成）
 └── .code-intel/
-    ├── config.json        ← 設定
-    ├── context.yml        ← プロジェクトルール・ドキュメント調査設定（自動生成）
-    ├── task_planning.md   ← タスク分割ガイド（v1.11）
-    ├── chroma/            ← ChromaDB データ（自動生成）
-    ├── agreements/        ← 成功パターン保存
-    ├── logs/              ← DecisionLog, OutcomeLog
-    ├── verifiers/         ← 検証プロンプト（backend.md, html_css.md 等）
-    ├── doc_research/      ← ドキュメント調査プロンプト
-    ├── interventions/     ← 介入プロンプト（v1.4）
-    └── review_prompts/    ← 品質レビュープロンプト（v1.5）
+    ├── config.json           ← 設定（自動生成）
+    ├── context.yml           ◎ プロジェクト設定（Step 6 参照）
+    ├── phase_contract.yml    ← フェーズ契約定義（v1.13）
+    ├── task_planning.md      〇 タスク分割ガイド（v1.11）
+    ├── user_escalation.md    〇 ユーザーエスカレーション手順
+    ├── chroma/               ← ChromaDB データ（自動管理）
+    ├── sessions/             ← チェックポイント（自動管理）
+    ├── agreements/           ← 成功パターン（自動管理）
+    ├── logs/                 ← DecisionLog, OutcomeLog（自動管理）
+    ├── verifiers/            ★ 検証プロンプト（追加/修正可）
+    ├── doc_research/         ★ ドキュメント調査プロンプト（追加/修正可）
+    ├── interventions/        ★ 介入プロンプト（追加/修正可）
+    └── review_prompts/       ★ 品質レビュープロンプト（追加/修正可）
 ```
-
-**重要な作成ファイル:**
-- `.claude/CLAUDE.md` - LLM が従うべきプロジェクト固有のルール
-- `.claude/PARALLEL_GUIDE.md` - 並列実行による効率化ガイド（v1.7）
-- `.claude/commands/` - スキル定義（`/code`, `/exp` 等）
-  - ※ `llm-helper/templates/skills/claude/` からコピーされます
 
 ### Step 3: .mcp.json の設定
 
@@ -304,49 +244,16 @@ your-project/
 }
 ```
 
-### Step 4: プロジェクトルールの理解（重要）
-
-`init-project.sh` は `.claude/CLAUDE.md` を自動作成し、以下の基本ルールを設定します：
-
-```markdown
-# your-project
-
-## Core Rules
-
-1. **Always use parallel execution** when making multiple tool calls
-2. **Use `/exp`** for quick tasks and parallel execution (exploration + implementation)
-
-See [PARALLEL_GUIDE.md](PARALLEL_GUIDE.md) for details.
-```
-
-**重要なポイント:**
-- **並列実行**（v1.7）: 同じツールを複数回呼び出す場合（Read, Grep, search_text）、**1メッセージ内で並列実行**することで 27-35秒 節約
-- **`/exp` コマンド**: 高速並列実行ツール - クイックフィックス、探索、軽量実装向け。Phase Gate なし、直接実行
-
-例：
-```
-✅ 正しい（並列実行）:
-<Read file_path="file1.py" />
-<Read file_path="file2.py" />
-<Read file_path="file3.py" />
-
-❌ 間違い（順次実行）:
-<Read file_path="file1.py" />
-[待機]
-<Read file_path="file2.py" />
-```
-
-### Step 5: Claude Code を再起動
+### Step 4: Claude Code を再起動
 
 MCP サーバーを読み込むために再起動。
 
-### Step 6: スキルの確認
+### Step 5: スキルの確認
 
 スキルが利用可能か確認：
 ```bash
 # Claude Code 内で
 /code --help
-/exp Find all authentication code
 ```
 
 ### Codex ユーザー向け（スキル配置）
@@ -356,7 +263,7 @@ Codex は `$CODEX_HOME/skills` にスキルを配置します。テンプレー�
 cp -r /path/to/llm-helper/templates/skills/codex/* "$CODEX_HOME/skills/"
 ```
 
-### Step 7: context.yml のカスタマイズ（任意）
+### Step 6: context.yml のカスタマイズ
 
 `.code-intel/context.yml` ファイルで各種動作を制御できます。必要に応じてカスタマイズしてください：
 
@@ -405,69 +312,15 @@ verifiers:
 
 ---
 
-## アップグレード（既存ユーザー向け）
-
-**注意:** 新規セットアップの場合、このセクションは不要です。`init-project.sh` がすべてのディレクトリを作成します。
-
-v1.2 以前からアップグレードする場合のみ、以下の手順を実行してください。
-
-### Step 1: llm-helper サーバーを更新
-
-```bash
-cd /path/to/llm-helper
-git pull
-./setup.sh  # 依存関係を更新
-```
-
-### Step 2: スキルを更新（プロジェクトにコピーしている場合）
-
-```bash
-cp /path/to/llm-helper/templates/skills/claude/*.md /path/to/your-project/.claude/commands/
-```
-
-### Step 3: 不足ディレクトリを追加
-
-v1.3 以降で追加されたディレクトリがない場合、作成してテンプレートをコピー：
-
-```bash
-cd /path/to/your-project
-
-# 不足ディレクトリを作成（既存の場合はスキップされる）
-mkdir -p .code-intel/logs
-mkdir -p .code-intel/verifiers
-mkdir -p .code-intel/doc_research
-mkdir -p .code-intel/interventions
-mkdir -p .code-intel/review_prompts
-
-# テンプレートをコピー（既存ファイルは上書きされない）
-cp -n /path/to/llm-helper/templates/code-intel/verifiers/*.md .code-intel/verifiers/
-cp -n /path/to/llm-helper/templates/code-intel/doc_research/*.md .code-intel/doc_research/
-cp -n /path/to/llm-helper/templates/code-intel/interventions/*.md .code-intel/interventions/
-cp -n /path/to/llm-helper/templates/code-intel/review_prompts/*.md .code-intel/review_prompts/
-```
-
-### Step 4: Claude Code を再起動
-
-MCP サーバーを再読み込みするために再起動。
-
-### 変更不要なもの
-
-- `.code-intel/config.json` - 互換性あり、変更不要
-- `.code-intel/context.yml` - 自動更新される
-- `.code-intel/chroma/` - 既存のインデックスはそのまま動作
-- `.mcp.json` - 変更不要
-
-`context.yml` は次回のセッション開始時に自動作成されます。
-
----
-
 ## 利用方法
 
-### /code スキルを使う（推奨）
+### /code スキルを使う
 
 ```
 /code AuthServiceのlogin関数でパスワードが空のときエラーが出ないバグを直して
 ```
+
+**デフォルト動作:** フルモード（探索 + 実装 + 検証 + ゴミ取り + 品質）
 
 ### コマンドオプション
 
@@ -480,17 +333,29 @@ MCP サーバーを再読み込みするために再起動。
 | `--only-explore` | `-e` | 探索のみ実行（実装スキップ） |
 | `--fast` | `-f` | 高速モード: 探索スキップ、ブランチあり |
 | `--quick` | `-q` | 最小モード: 探索スキップ、ブランチなし |
-| `--doc-research=PROMPTS` | - | 調査プロンプトを指定（v1.3） |
 | `--no-doc-research` | - | ドキュメント調査をスキップ（v1.3） |
 | `--no-intervention` | `-ni` | 介入システムをスキップ（v1.4） |
-| `--clean` | `-c` | stale セッションのクリーンアップ |
-| `--rebuild` | `-r` | 全インデックスを強制再構築 |
+| `--resume` | `-r` | チェックポイントからセッション再開 |
+| `--clean` | `-c` | stale ブランチ削除 + チェックポイント全削除 |
+| `--rebuild` | - | 全インデックスを強制再構築 |
 
 **gate_level オプション（v1.10）:**
-- `--gate=full` または `-g=f`: 全チェックを無視して全フェーズ実行
-- `--gate=auto` または `-g=a`: 各フェーズ前に都度チェック（デフォルト）
+- `--gate=full` または `-g=f`: Q1/Q2/Q3 チェックを無視して全フェーズ実行
+- `--gate=auto` または `-g=a`: LLM が各フェーズ前に必要性を判断（デフォルト）
 
-**デフォルト動作:** フルモード（探索 + 実装 + 検証 + ゴミ取り + 品質）
+#### フェーズマトリクス
+
+| オプション | DOC調査 | 探索 | 実装 | 検証 | 介入 | ゴミ取 | 品質 | ブランチ |
+|-----------|:----:|:----:|:----:|:----:|:------:|:----:|:-------:|:-------:|
+| (デフォルト) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `--only-explore` / `-e` | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `--only-verify` / `-v` | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| `--no-verify` | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | ✅ |
+| `--no-quality` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
+| `--no-intervention` / `-ni` | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ |
+| `--no-doc` | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `--fast` / `-f` | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
+| `--quick` / `-q` | ✅ | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
 
 #### 使用例
 
@@ -516,117 +381,18 @@ MCP サーバーを再読み込みするために再起動。
 # クイックモード（最小限、ブランチなし）
 /code -q change the button color to blue
 
-# ドキュメント調査で特定プロンプト使用（v1.3）
-/code --doc-research=security add authentication
-
 # ドキュメント調査をスキップ（v1.3）
 /code --no-doc-research fix typo
+
+# チェックポイントから再開
+/code -r
 
 # stale セッションのクリーンアップ
 /code -c
 
 # 全インデックスを強制再構築
-/code -r
+/code --rebuild
 ```
-
-#### --clean オプション（v1.2）
-
-中断されたセッションの stale ブランチをクリーンアップ：
-
-```
-/code -c
-```
-
-`-c` / `--clean` を指定すると：
-- 現在 `llm_task_*` ブランチにいる場合、まずベースブランチにチェックアウト
-  - ベースブランチはブランチ名から抽出: `llm_task_{session}_from_{base}` → `{base}`
-- 全ての `llm_task_*` ブランチを削除
-- セッション中断（Ctrl+C、クラッシュ等）後に使用してクリーンな状態から再開
-
-#### 通常の実行フロー（19 Steps）
-
-v1.11 では全フェーズの出口が `submit_phase` に統一。スキルが自動的に：
-
-1. **start_session**: Intent 判定 → セッション初期化
-2. **BRANCH_INTERVENTION**: stale ブランチ検出時にユーザー介入
-3. **DOCUMENT_RESEARCH**: 設計ドキュメント調査 ← `--no-doc` でスキップ
-4. **QUERY_FRAME**: NL → 構造化スロット抽出
-5. **EXPLORATION**: code-intel ツールで探索 ← `--fast`/`--quick` でスキップ
-6. **Q1**: SEMANTIC 必要性評価 ← `--gate=full` で無視
-7. **SEMANTIC**: 追加情報収集（Q1=true 時のみ）
-8. **Q2**: VERIFICATION 必要性評価 ← `--gate=full` で無視
-9. **VERIFICATION**: 仮説検証（Q2=true 時のみ）
-10. **Q3**: IMPACT_ANALYSIS 必要性評価 ← `--gate=full` で無視
-11. **IMPACT_ANALYSIS**: 影響分析（Q3=true 時のみ）
-12. **READY（計画）**: タスク分解 + ブランチ作成
-13. **READY（実装）**: Edit/Write で実装（×N）
-14. **READY（完了）**: 全タスク完了確認
-15. **POST_IMPL_VERIFY**: 検証 ← `--no-verify` でスキップ / fail→Step 12
-16. **VERIFY_INTERVENTION**: 介入（failure_count ≥ 3 時のみ）
-17. **PRE_COMMIT**: レビュー
-18. **QUALITY_REVIEW**: 品質チェック ← `--no-quality` / `--fast` / `--quick` でスキップ
-19. **MERGE**: マージ → SESSION_COMPLETE
-
-### 直接ツールを呼び出す
-
-```
-# テキスト検索（単一パターン）
-mcp__code-intel__search_text でパターン "Router" を検索して
-
-# テキスト検索（複数パターン並列、v1.7）
-mcp__code-intel__search_text でパターン ["Router", "SessionState", "QueryFrame"] を並列検索して
-
-# 定義検索
-mcp__code-intel__find_definitions で "SessionState" の定義を探して
-
-# 意味検索
-mcp__code-intel__semantic_search でクエリ "ログイン機能" を検索して
-```
-
----
-
-## 改善サイクル
-
-### 2つのログ
-
-| ログ | ファイル | トリガー |
-|------|----------|---------|
-| DecisionLog | `.code-intel/logs/decisions.jsonl` | query 実行時（自動） |
-| OutcomeLog | `.code-intel/logs/outcomes.jsonl` | 失敗検出時（自動）または手動 |
-
-### 自動失敗検出
-
-`/code` 開始時に、今回のリクエストが「前回の失敗」を示しているか自動判定：
-- 「やり直して」「動かない」「違う」等のパターンを検出
-- 自動で OutcomeLog に failure を記録
-- `/outcome` 手動呼び出し不要
-
----
-
-## 依存関係
-
-### システムツール
-
-| ツール | 必須 | 用途 |
-|--------|------|------|
-| ripgrep (rg) | Yes | search_text, find_references |
-| universal-ctags | Yes | find_definitions, get_symbols |
-| Python 3.10+ | Yes | サーバー本体 |
-
-### Python パッケージ
-
-```
-mcp>=1.0.0
-chromadb>=1.0.0
-tree-sitter>=0.21.0
-tree-sitter-languages>=1.10.0
-sentence-transformers>=2.2.0
-scikit-learn>=1.0.0
-PyYAML>=6.0.0
-pytest>=7.0.0
-```
-
----
 
 ## プロジェクト構造
 
@@ -656,26 +422,21 @@ llm-helper/
         └── codex/          ← Codex スキルテンプレート
 ```
 
-### 対象プロジェクト
+> 対象プロジェクトの構造は「[セットアップ > Step 2](#step-2-対象プロジェクトの初期化)」を参照
 
-```
-your-project/
-├── .mcp.json               ← MCP 設定（手動設定）
-├── .code-intel/            ← Code Intel データ（自動生成）
-│   ├── config.json
-│   ├── context.yml         ← コンテキスト設定
-│   ├── task_planning.md    ← タスク分割ガイド（v1.11）
-│   ├── chroma/             ← ChromaDB データ
-│   ├── agreements/         ← 成功ペア
-│   ├── logs/               ← DecisionLog, OutcomeLog
-│   ├── verifiers/          ← 検証プロンプト
-│   ├── doc_research/       ← ドキュメント調査プロンプト
-│   ├── interventions/      ← 介入プロンプト
-│   ├── review_prompts/     ← 品質レビュープロンプト
-│   └── sync_state.json
-├── .claude/commands/       ← スキル（自動生成）
-└── src/                    ← あなたのソースコード
-```
+---
+
+## ツール一覧
+
+| カテゴリ | ツール |
+|---------|--------|
+| セッション | `start_session`, `submit_phase`, `get_session_status` |
+| 探索 | `search_text`, `find_definitions`, `find_references`, `analyze_structure`, `get_symbols`, `search_files`, `semantic_search`, `query` |
+| 実装制御 | `check_write_target`, `add_explored_files`, `review_changes` |
+| ブランチ | `cleanup_stale_branches` |
+| インデックス | `sync_index`, `update_context`, `record_outcome`, `get_outcome_stats` |
+
+詳細は [DESIGN_ja.md](docs/DESIGN_ja.md) を参照。
 
 ---
 
