@@ -26,9 +26,8 @@ Select this when failure_history shows the following patterns:
 ## Recommended Actions (by priority)
 
 1. **Revert first** - Undo changes and start from a clean state
-2. Use `revert_to_exploration` to return to the exploration phase
-3. Re-read the error message carefully
-4. Re-read the related code (verify with Read tool)
-5. Report the situation to the user and ask for advice
+2. Re-read the error message carefully
+3. Re-read the related code (verify with Read tool)
+4. Report the situation to the user and ask for advice
 
 **Important:** If your hypothesis keeps being wrong, continuing to modify code is futile. Revert and restart the investigation.

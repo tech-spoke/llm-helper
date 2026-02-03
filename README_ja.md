@@ -1,6 +1,6 @@
 # Code Intelligence MCP Server
 
-> **Current Version: v1.11**
+> **Current Version: v1.16**
 
 Cursor IDE のようなコードインテリジェンス機能をオープンソースツールで実現する MCP サーバー。
 
@@ -48,6 +48,7 @@ LLM に判断をさせない。守らせるのではなく、守らないと進�
 | タスクオーケストレーション（v1.11） | サーバー強制のタスク管理、LLM がスキップ不可 |
 | コンパクト耐性設計（v1.11） | 4層の耐性（ツール・レスポンス・リカバリ・防御） |
 | 安全弁（v1.11） | サーバー側カウンターで無限ループ防止 |
+| 実装チェックリスト（v1.16） | タスク完了時に全項目の evidence/reason 検証、空実装検出 |
 
 ---
 
@@ -214,7 +215,6 @@ v1.11 では全フェーズの出口を `submit_phase` に統一。LLM 側前処
 |--------|------|
 | `check_write_target` | ファイル修正可能か検証 |
 | `add_explored_files` | 探索済みリストにファイル追加 |
-| `revert_to_exploration` | EXPLORATION フェーズに戻る |
 | `review_changes` | PRE_COMMIT で全ファイル変更を表示 |
 
 ### ブランチ管理

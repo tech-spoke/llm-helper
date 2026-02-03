@@ -22,8 +22,7 @@ Stop, refresh your thinking, and reconsider.
 ## Recommended Actions (by priority)
 
 1. **Revert first** - Undo changes and start from a clean state
-2. Use `revert_to_exploration` to return to the exploration phase
-3. Consider an alternative approach
-4. If unable to resolve, consult the user
+2. Consider an alternative approach
+3. If unable to resolve, consult the user
 
 **Important:** After 3 failures, minor tweaks in the same direction are forbidden. Always revert before restarting.

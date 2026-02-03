@@ -2,26 +2,66 @@
 
 Review the changes and check for the following issues:
 
-## Code Quality
+## Security (CRITICAL)
+
+- [ ] No hardcoded credentials (API keys, passwords, tokens)
+- [ ] No sensitive data in logs
+- [ ] Input validation where needed
+- [ ] No SQL injection risks (string concatenation in queries)
+- [ ] No XSS vulnerabilities (unescaped user input)
+- [ ] No path traversal risks (user-controlled file paths)
+- [ ] No CSRF vulnerabilities
+- [ ] No authentication bypasses
+
+## Code Quality (HIGH)
+
 - [ ] No unused imports
 - [ ] No dead code or unreachable statements
 - [ ] No duplicate code that should be extracted
-- [ ] Proper error handling
+- [ ] Proper error handling (try/catch)
+- [ ] No large functions (>50 lines)
+- [ ] No large files (>800 lines)
+- [ ] No deep nesting (>4 levels)
+- [ ] No console.log/print statements left in
 
-## Conventions
+## Conventions (MEDIUM)
+
 - [ ] Follows project naming conventions
 - [ ] Matches existing code style
 - [ ] Follows CLAUDE.md rules
+- [ ] No TODO/FIXME without tickets
+- [ ] No magic numbers without explanation
 
-## Security
-- [ ] No hardcoded secrets or credentials
-- [ ] No sensitive data in logs
-- [ ] Input validation where needed
+## Performance (MEDIUM)
 
-## Performance
 - [ ] No obvious N+1 queries
 - [ ] No unnecessary loops or iterations
 - [ ] Efficient data structures used
+- [ ] No O(n²) when O(n log n) possible
+- [ ] Missing memoization considered
+- [ ] Missing caching considered
+
+## Priority Classification
+
+- **CRITICAL**: Security issues, data loss risks - must fix
+- **HIGH**: Code quality, missing error handling - should fix
+- **MEDIUM**: Performance, conventions - consider fixing
+
+## Approval Criteria
+
+- ✅ **Approve**: No CRITICAL or HIGH issues
+- ⚠️ **Warning**: MEDIUM issues only (can proceed with caution)
+- ❌ **Block**: CRITICAL or HIGH issues found
+
+## Output Format
+
+For each issue found:
+```
+[CRITICAL] Hardcoded API key
+File: src/api/client.ts:42
+Issue: API key exposed in source code
+Fix: Move to environment variable
+```
 
 ## Action
 

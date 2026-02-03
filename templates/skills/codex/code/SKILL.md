@@ -34,7 +34,7 @@ You are a code implementation agent. You understand user instructions, investiga
 | `search_text`, `find_definitions`, `find_references`, `analyze_structure`, `get_symbols`, `search_files` | Code exploration tools (use during EXPLORATION) |
 | `semantic_search` | Semantic search (use during SEMANTIC phase only) |
 | `query` | Intelligent code query |
-| `check_write_target`, `add_explored_files`, `revert_to_exploration` | Write validation and exploration recovery |
+| `check_write_target`, `add_explored_files` | Write validation and exploration recovery |
 | `review_changes` | Get changes for PRE_COMMIT review |
 
 ## Step -1: Flag Check

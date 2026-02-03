@@ -6,11 +6,11 @@ phases:
       summary: str
       tools_used: list[str]
     instruction: >-
-      llm_task_* ブランチが検出されました。以下の選択肢をユーザーに提示し、選択結果を submit_phase で送信してください。
-      1) delete: すべての llm_task_* ブランチを破棄（複数ブランチ完全破棄）
-      2) merge: 現在ブランチのみ base にマージし、その他は破棄
-      3) continue: 現在ブランチに留まり、READY で新規タスクブランチを作成しない。
-      選択肢の意味を説明した上で選ばせてください。
+      llm_task_* branches detected. Present the following options to the user and submit the selection via submit_phase.
+      1) delete: Discard all llm_task_* branches (complete deletion of multiple branches)
+      2) merge: Merge only the current branch to base and discard others
+      3) continue: Stay on current branch and do not create a new task branch in READY.
+      Explain the meaning of each option before asking the user to choose.
   DOCUMENT_RESEARCH:
     expected_payload:
       compaction_count: int
@@ -18,9 +18,9 @@ phases:
       summary: str
       tools_used: list[str]
     instruction: >-
-      context.yml の project_rules を前提に、doc_research と document_search に従って設計文書を調査してください。
-      サブエージェントに調査を依頼し、rule_refs / must_read を中心に返却してください。
-      返却された must_read はメインエージェントが必ず読んで要約し、必要なルール/制約を理解したうえで submit_phase で送信してください。
+      Based on project_rules in context.yml, investigate design documents following doc_research and document_search.
+      Delegate investigation to a sub-agent and return results focusing on rule_refs / must_read.
+      The main agent must read and summarize the returned must_read, understand necessary rules/constraints, then submit via submit_phase.
   QUERY_FRAME:
     expected_payload:
       action_type: str
@@ -31,9 +31,9 @@ phases:
       target_symbols: list[str]
       tools_used: list[str]
     instruction: >-
-      ユーザー指示を以下のスロットに分解し、各スロットは原文の引用（quote）付きで検証してください。
-      target_feature（何を対象にするか）、trigger_condition（発生条件）、observed_issue（現状の問題）、desired_action（望む対応）。
-      不明なスロットは空にし、推測はしないでください。完了後 submit_phase で送信してください。
+      Decompose user instructions into the following slots, verifying each slot with quotes from the original text.
+      target_feature (what to target), trigger_condition (occurrence condition), observed_issue (current problem), desired_action (desired response).
+      Leave unknown slots empty; do not guess. Submit via submit_phase when complete.
   EXPLORATION:
     expected_payload:
       compaction_count: int
@@ -42,8 +42,8 @@ phases:
       summary: str
       tools_used: list[str]
     instruction: >-
-      code-intel ツールを最低2種類使って探索し、探索根拠を findings にまとめて submit_phase で送信してください。
-      使用したツール名は tools_used に列挙してください。
+      Explore using at least 2 different code-intel tools, summarize exploration rationale in findings, and submit via submit_phase.
+      List the tool names used in tools_used.
   Q1:
     expected_payload:
       compaction_count: int
@@ -52,8 +52,8 @@ phases:
       summary: str
       tools_used: list[str]
     instruction: >-
-      SEMANTIC フェーズ（ChromaDB の意味検索: semantic_search）を実施する必要があるか評価し、理由を添えて submit_phase で送信してください。
-      必要な場合は「何を意味検索で確認したいか」も短く記してください。
+      Evaluate whether the SEMANTIC phase (ChromaDB semantic search: semantic_search) is needed, and submit with reason via submit_phase.
+      If needed, briefly describe what you want to verify with semantic search.
   SEMANTIC:
     expected_payload:
       compaction_count: int
@@ -62,9 +62,9 @@ phases:
       summary: str
       tools_used: list[str]
     instruction: >-
-      QueryFrame/EXPLORATION の内容から検索クエリを作成し、semantic_search で追加情報を収集してください。
-      map/forest を意識し、map で十分な確度が得られた場合は forest 探索を最小化してください。
-      必要に応じて fetch_chunk_detail を使い、結果を submit_phase で送信してください。
+      Create search queries from QueryFrame/EXPLORATION content and collect additional information with semantic_search.
+      Consider map/forest; minimize forest exploration if sufficient confidence is achieved with map.
+      Use fetch_chunk_detail as needed and submit results via submit_phase.
   Q2:
     expected_payload:
       compaction_count: int
@@ -73,8 +73,8 @@ phases:
       summary: str
       tools_used: list[str]
     instruction: >-
-      VERIFICATION は仮説や探索結果の裏取り（根拠確認・矛盾解消）を指します。
-      未検証の仮説がある／根拠が弱い／相反する結果がある場合は必要と判断し、理由を添えて submit_phase で送信してください。
+      VERIFICATION refers to validating hypotheses and exploration results (confirming evidence, resolving contradictions).
+      Judge as needed if there are unverified hypotheses, weak evidence, or conflicting results, and submit with reason via submit_phase.
   VERIFICATION:
     expected_payload:
       compaction_count: int
@@ -82,9 +82,9 @@ phases:
       summary: str
       tools_used: list[str]
     instruction: >-
-      仮説を1件ずつ検証し、証拠は file:line もしくはツール出力で示してください。推測は不可。
-      根拠が無い場合は result=false とし、理由を記載してください。
-      コードに関する仮説は必ず code-intel ツールを使い、tools_used に記載してください。
+      Verify hypotheses one by one, providing evidence as file:line or tool output. No guessing allowed.
+      If no evidence exists, set result=false and document the reason.
+      For code-related hypotheses, always use code-intel tools and list them in tools_used.
   Q3:
     expected_payload:
       compaction_count: int
@@ -93,7 +93,7 @@ phases:
       summary: str
       tools_used: list[str]
     instruction: >-
-      修正箇所の参照先や依存先への影響について十分な調査ができているか評価し、理由を添えて submit_phase で送信してください。
+      Evaluate whether sufficient investigation has been done on the impact to references and dependencies of the modification, and submit with reason via submit_phase.
   IMPACT_ANALYSIS:
     expected_payload:
       compaction_count: int
@@ -101,29 +101,39 @@ phases:
       summary: str
       tools_used: list[str]
     instruction: >-
-      analyze_impact を実行し、修正箇所の参照先/依存先への影響、関連ファイル・テスト・設定への波及を短くまとめて submit_phase で送信してください。
+      Run analyze_impact and briefly summarize the impact on references/dependencies of the modification, ripple effects to related files, tests, and configurations, then submit via submit_phase.
   READY_PLAN:
     expected_payload:
       compaction_count: int
       summary: str
-      tasks: list[{id, description, status, failure_count?, revert_reason?}]
+      tasks: "list[{id, description, status, checklist: list[{item, status}], failure_count?, revert_reason?}]"
       tools_used: list[str]
     instruction: >-
-      .code-intel/task_planning.md があれば必ず読み、指針に従ってタスクリストを作成し submit_phase で送信してください。
+      If .code-intel/task_planning.md exists, read it and create a task list following the guidelines.
+      Each task MUST include a checklist of specific implementation items.
+      Submit via submit_phase.
   READY_IMPL:
     expected_payload:
       compaction_count: int
       summary: str
       task_id: str
+      checklist: "list[{item, status, evidence?, reason?}]"
       tools_used: list[str]
     instruction: >-
-      変更対象ファイルは事前に check_write_target を実行し、実装後に submit_phase で報告してください。
+      Run check_write_target before modifying files.
+      After implementation, report task completion with checklist status:
+      - For each checklist item, set status to "done" or "skipped"
+      - "done" requires evidence in strict format: <file_path>:<line> or <file_path>:<start>-<end>
+        Examples: "auth.py:42", "src/services/auth.py:42-58"
+        Invalid: "auth.py line 42", "line 42 in auth.py", "around line 42"
+      - "skipped" requires reason (min 10 characters explaining why not needed)
+      Submit via complete_task(task_id, data={summary, checklist}).
   READY_COMPLETE:
     expected_payload:
       compaction_count: int
       summary: str
     instruction: >-
-      全タスクが完了しました。summary を添えて submit_phase で送信してください。
+      All tasks are complete. Submit via submit_phase with a summary.
   POST_IMPL_VERIFY:
     expected_payload:
       compaction_count: int
@@ -134,8 +144,8 @@ phases:
       tools_used: list[str]
       verifier_used: str
     instruction: >-
-      利用者が追加した verifier を含む .code-intel/verifiers/*.md から適切なものを選び、手順に従って検証を実行してください。
-      使用した手順書（verifier）の名前/パスを明記し、失敗時は具体的な失敗内容を記載して submit_phase で送信してください。
+      Select an appropriate verifier from .code-intel/verifiers/*.md (including user-added verifiers) and execute verification following the procedure.
+      Specify the name/path of the verifier used, document specific failure details if failed, and submit via submit_phase.
   VERIFY_INTERVENTION:
     expected_payload:
       action_taken: str
@@ -144,8 +154,8 @@ phases:
       summary: str
       tools_used: list[str]
     instruction: >-
-      Step 15 の検証失敗が3回続いたので介入を実施します。
-      .code-intel/interventions/*.md から適切な介入プロンプトを選定・実行し、使用したプロンプトの名前/パスを明記して submit_phase で送信してください。
+      Verification in Step 15 has failed 3 consecutive times, so intervention is being performed.
+      Select and execute an appropriate intervention prompt from .code-intel/interventions/*.md, specify the name/path of the prompt used, and submit via submit_phase.
   PRE_COMMIT:
     expected_payload:
       commit_message: str
@@ -155,8 +165,8 @@ phases:
       summary: str
       tools_used: list[str]
     instruction: >-
-      review_changes で差分一覧を取得し、.code-intel/review_prompts/garbage_detection.md に従って不要物（ゴミ）かどうか判断してください。
-      使用した手順書の名前/パスを明記し、結果を submit_phase で送信してください。
+      Get the diff list with review_changes and determine whether items are garbage following .code-intel/review_prompts/garbage_detection.md.
+      Specify the name/path of the procedure used and submit the result via submit_phase.
   QUALITY_REVIEW:
     expected_payload:
       compaction_count: int
@@ -166,11 +176,335 @@ phases:
       summary: str
       tools_used: list[str]
     instruction: >-
-      .code-intel/review_prompts/quality_review.md のチェックリストに従って品質レビューを実施してください。
-      使用した手順書の名前/パスを明記し、結果を submit_phase で送信してください。
+      Perform quality review following the checklist in .code-intel/review_prompts/quality_review.md.
+      Specify the name/path of the procedure used and submit the result via submit_phase.
   MERGE:
     expected_payload:
       compaction_count: int
       summary: str
     instruction: >-
-      summary を添えて submit_phase で送信し、マージを実行してください。
+      Submit via submit_phase with a summary and execute the merge.
+
+# =============================================================================
+# v1.15: Externalized Message Definitions
+# =============================================================================
+
+# Common validation errors (applied to all phases)
+common_failures:
+  summary_required:
+    error: payload_mismatch
+    message: "summary is required for this phase."
+  tools_used_invalid:
+    error: payload_mismatch
+    message: "tools_used must be a list (empty list allowed)."
+  exploration_min_tools:
+    error: payload_mismatch
+    message: "EXPLORATION requires at least 2 distinct tools before submit_phase."
+  required_tools_not_used:
+    error: payload_mismatch
+    message: "Required tools not used: {missing_list}."
+  required_tools_not_reported:
+    error: payload_mismatch
+    message: "tools_used must include required tools: {missing_reported}."
+  unknown_phase:
+    error: unknown_phase
+    message: "No handler for phase {phase}."
+
+# Phase-specific failure cases
+failures:
+  BRANCH_INTERVENTION:
+    invalid_choice:
+      error: payload_mismatch
+      message: "choice must be 'delete', 'merge', or 'continue'."
+    branch_operation_failed:
+      error: branch_operation_failed
+      message: "Branch {choice} failed: {errors}"
+      instruction: "Branch operation failed. Notify the user of the failure details and request manual resolution."
+      requires_user_intervention: true
+
+  DOCUMENT_RESEARCH:
+    empty_documents:
+      error: payload_mismatch
+      message: "Read the specified documents and resubmit with results in `documents_reviewed`."
+
+  EXPLORATION:
+    empty_result:
+      error: payload_mismatch
+      message: "Exploration results are empty. Use code-intel tools to explore and resubmit with `explored_files` and `findings`."
+
+  SEMANTIC:
+    empty_search_results:
+      error: payload_mismatch
+      message: "Search results are empty. Execute `semantic_search` and resubmit with `search_results`."
+
+  VERIFICATION:
+    empty_hypotheses:
+      error: payload_mismatch
+      message: "Verification results are empty. Verify hypotheses one by one and resubmit with `hypotheses_verified`."
+    result_false_exists:
+      error: payload_mismatch
+      message: "Hypotheses with result=false exist. Re-verify until all hypotheses have result=true and resubmit `hypotheses_verified`."
+
+  IMPACT_ANALYSIS:
+    empty_impact_summary:
+      error: payload_mismatch
+      message: "Impact analysis results are empty. Execute `analyze_impact` and resubmit with `impact_summary`."
+
+  READY:
+    branch_creation_failed:
+      error: branch_creation_failed
+      message: "Task branch creation failed. Inform the user and request either checking the working tree with `git status`, manual branch creation, or session reset with `/code --clean`."
+      requires_user_intervention: true
+    phase_mismatch_register:
+      error: phase_mismatch
+      message: "Task registration is only allowed in READY phase."
+    empty_tasks:
+      error: payload_mismatch
+      message: "At least one task is required."
+    duplicate_task_ids:
+      error: payload_mismatch
+      message: "Task IDs must be unique."
+    no_pending_tasks:
+      error: payload_mismatch
+      message: "At least one task must have status 'pending'."
+    phase_mismatch_complete:
+      error: phase_mismatch
+      message: "Task completion only in READY phase."
+    no_tasks:
+      error: no_tasks
+      message: "No tasks registered. Call submit_phase with tasks first."
+    unknown_task:
+      error: unknown_task
+      message: "Task '{task_id}' not found."
+    already_completed:
+      error: already_completed
+      message: "Task '{task_id}' is already completed."
+    wrong_order:
+      error: wrong_order
+      message: "Must complete '{expected_task}' before '{task_id}'."
+    no_tasks_registered:
+      error: no_tasks
+      message: "No tasks registered. Submit task plan first."
+    incomplete_tasks:
+      error: incomplete_tasks
+      message: "{count} task(s) still pending."
+    # v1.16: Checklist validation errors
+    checklist_items_mismatch:
+      error: payload_mismatch
+      message: "Reported checklist items don't match registered items. Include all items from the original checklist."
+    checklist_item_pending:
+      error: payload_mismatch
+      message: "Checklist item '{item}' is still pending. Set status to 'done' (with evidence) or 'skipped' (with reason)."
+    checklist_evidence_required:
+      error: payload_mismatch
+      message: "Checklist item '{item}' with status 'done' requires evidence. Format: 'file.py:42' or 'file.py:42-58'."
+    checklist_evidence_format_invalid:
+      error: payload_mismatch
+      message: "Evidence '{evidence}' has invalid format. Required format: <file_path>:<line> or <file_path>:<start>-<end>. Examples: 'auth.py:42', 'src/auth.py:42-58'."
+    checklist_evidence_file_not_found:
+      error: payload_mismatch
+      message: "Evidence file not found: {file_path}. Verify the file path is correct and the file exists."
+    checklist_evidence_line_out_of_range:
+      error: payload_mismatch
+      message: "Evidence line {line} exceeds file length ({total} lines). Use a valid line number within 1-{total}."
+    checklist_evidence_empty_impl:
+      error: payload_mismatch
+      message: "Empty implementation detected at '{evidence}'. Contains only pass/TODO/NotImplementedError. Add actual implementation code."
+    checklist_reason_required:
+      error: payload_mismatch
+      message: "Checklist item '{item}' with status 'skipped' requires reason (min 10 chars). Explain why this item is not needed."
+
+  PRE_COMMIT:
+    missing_commit_message:
+      error: missing_commit_message
+      message: "commit_message is required."
+    branch_manager_not_found:
+      error: branch_manager_not_found
+      message: "Reached commit phase without task branch created. Inform the user and request either checking branch state with `git branch` or session reset with `/code --clean`."
+      requires_user_intervention: true
+    review_failed:
+      error: review_failed
+      message: "Files marked for discard are missing reason. Resubmit `reviewed_files` with reasons."
+    finalize_failed:
+      error: finalize_failed
+      message: "git commit failed. Inform the user and request checking pre-commit hook output or `git status` and manual problem resolution. Retry submit_phase after resolution."
+      requires_user_intervention: true
+
+  QUALITY_REVIEW:
+    commit_execution_failed:
+      error: commit_execution_failed
+      message: "Commit execution after quality review failed. Inform the user and request checking working tree with `git status` and manual problem resolution."
+      requires_user_intervention: true
+    quality_forced_completion:
+      error: quality_forced_completion
+      message: "Completed with unresolved quality issues."
+
+  MERGE:
+    quality_review_required:
+      error: quality_review_required
+      message: "QUALITY_REVIEW not completed."
+    branch_manager_not_found:
+      error: branch_manager_not_found
+      message: "Branch management information is inconsistent. Inform the user and request either checking state with `git branch` or session reset with `/code --clean`."
+      requires_user_intervention: true
+    merge_failed:
+      error: merge_failed
+      message: "Branch merge failed. Inform the user and request checking for conflicts with `git status` and manual resolution. Retry submit_phase after resolution."
+      requires_user_intervention: true
+
+  VERIFY_INTERVENTION:
+    user_escalation:
+      error: user_escalation
+      message: "Follow the procedure in .code-intel/user_escalation.md to request help from the user. Specify the name/path of the procedure used and submit via submit_phase."
+    escalation_count:
+      error: escalation_count
+      message: "Intervention executed {count} times. Consult the user."
+
+# Success completion messages
+success:
+  Q3:
+    investigation_complete:
+      message: "Exploration complete. Ending session."
+  IMPACT_ANALYSIS:
+    investigation_complete:
+      message: "Exploration complete. Ending session."
+  READY:
+    session_complete_no_verify_quick:
+      message: "All tasks complete. Session ending (--no-verify + --quick)."
+  POST_IMPL_VERIFY:
+    session_complete_quick:
+      message: "Verification passed. Session ending (--quick)."
+  MERGE:
+    no_task_branch_complete:
+      message: "No task branch. Session complete."
+    merge_success:
+      message: "Merged {from_branch} → {to_branch}. Session complete."
+
+# Tool-specific errors
+tool_errors:
+  review_changes:
+    phase_blocked:
+      error: phase_blocked
+      message: "review_changes only allowed in PRE_COMMIT phase, current: {phase}."
+    task_branch_not_enabled:
+      error: task_branch_not_enabled
+      message: "Task branch not enabled. Cannot review changes."
+    branch_manager_not_found:
+      error: branch_manager_not_found
+      message: "Branch manager not found and cannot be recreated (no task_branch_name in session)."
+
+  check_write_target:
+    write_blocked:
+      error: write_blocked
+      message: "Add the file to exploration first, or run additional exploration."
+    write_phase_blocked:
+      error: write_phase_blocked
+      message: "Write not allowed in phase {phase}"
+
+  add_explored_files:
+    phase_mismatch:
+      error: phase_mismatch
+      message: "add_explored_files is only allowed in READY phase, current: {phase}."
+    no_files:
+      error: no_files
+      message: "No files provided to add."
+
+  check_phase_necessity:
+    semantic_needs_more_information_required:
+      error: validation_error
+      message: "needs_more_information field is required for SEMANTIC assessment"
+    semantic_reason_required:
+      error: validation_error
+      message: "needs_more_information_reason field is required for SEMANTIC assessment"
+    semantic_needs_more_information_type:
+      error: validation_error
+      message: "needs_more_information must be a boolean"
+    semantic_reason_length:
+      error: validation_error
+      message: "needs_more_information_reason must be at least 10 characters"
+    verification_has_unverified_required:
+      error: validation_error
+      message: "has_unverified_hypotheses field is required for VERIFICATION assessment"
+    verification_reason_required:
+      error: validation_error
+      message: "has_unverified_hypotheses_reason field is required for VERIFICATION assessment"
+    verification_has_unverified_type:
+      error: validation_error
+      message: "has_unverified_hypotheses must be a boolean"
+    verification_reason_length:
+      error: validation_error
+      message: "has_unverified_hypotheses_reason must be at least 10 characters"
+    impact_needs_analysis_required:
+      error: validation_error
+      message: "needs_impact_analysis field is required for IMPACT_ANALYSIS assessment"
+    impact_reason_required:
+      error: validation_error
+      message: "needs_impact_analysis_reason field is required for IMPACT_ANALYSIS assessment"
+    impact_needs_analysis_type:
+      error: validation_error
+      message: "needs_impact_analysis must be a boolean"
+    impact_reason_length:
+      error: validation_error
+      message: "needs_impact_analysis_reason must be at least 10 characters"
+
+  query:
+    no_pattern:
+      error: no_pattern
+      message: "No pattern specified"
+    no_symbol:
+      error: no_symbol
+      message: "No symbol specified"
+    no_file_path:
+      error: no_file_path
+      message: "No file_path specified"
+    chromadb_not_available:
+      error: chromadb_not_available
+      message: "chromadb is not installed. Install with: pip install chromadb"
+    unknown_tool:
+      error: unknown_tool
+      message: "Unknown tool: {tool}"
+    semantic_search_failed:
+      error: semantic_search_failed
+      message: "Semantic search failed: {error}"
+
+  start_session:
+    branch_setup_failed:
+      error: branch_setup_failed
+      # message is dynamic: setup_result.error
+    branch_setup_exception:
+      error: branch_setup_exception
+      # message is dynamic: exception message
+
+# Session-related messages
+session_messages:
+  checkpoint_recovery:
+    message: "Previous session checkpoint found. To restore, call get_session_status(discard_active=true, repo_path=\".\"). To continue with a new session, call submit_phase directly."
+  no_active_session:
+    message: "No active session. Use start_session first."
+  no_active_session_short:
+    message: "No active session."
+  checkpoint_restore_failed:
+    message: "No active session. Checkpoint found but failed to restore."
+  invalid_data:
+    message: "Failed to parse data JSON: {error}."
+
+# Common hints
+hints:
+  phase_blocked_hint:
+    message: "Use get_session_status to see current phase requirements."
+
+# QUERY_FRAME investigation hints
+query_frame_hints:
+  target_feature_missing:
+    message: "Cannot identify the target feature or module."
+  observed_issue_missing:
+    message: "The current problem motivating the fix is unclear."
+  trigger_condition_missing:
+    message: "The reproduction condition for the problem has not been identified."
+  desired_action_missing:
+    message: "The expected fix approach is unclear."
+
+# Warning messages
+warnings:
+  truncation_warning:
+    message: "Response exceeded 256KB and was truncated. Please narrow down the pattern."

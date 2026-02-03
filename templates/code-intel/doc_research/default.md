@@ -1,44 +1,44 @@
-# ドキュメント調査プロンプト
+# Document Research Prompt
 
-## タスク
-**ユーザー依頼:** {{task_description}}
+## Task
+**User Request:** {{task_description}}
 
-## 対象ドキュメント
+## Target Documents
 {{docs_path}}
 
-## 指示
-1. docs_path 配下を Glob で一覧化して構造を把握する
-2. `document_search` の include/exclude（context.yml）を尊重する
-3. 関連度の高いファイルだけ Read し、必要な箇所のみ読む
-4. 今回の修正/調査で守るべきルールの箇所と、メインエージェントが読むべき箇所を抽出する
-5. 返却は参照位置（file:line / file:line-range）を中心に書く
+## Instructions
+1. Use Glob to list and understand the structure under docs_path
+2. Respect the include/exclude settings from `document_search` in context.yml
+3. Read only highly relevant files, focusing on necessary sections
+4. Extract rules to follow for this modification/investigation and sections the main agent should read
+5. Focus on reference locations (file:line / file:line-range) in the output
 
-## 出力形式
+## Output Format
 
 ### rule_refs
-守るべきルールの参照位置:
-- [ルール要約]: path:line
+Reference locations for rules to follow:
+- [Rule summary]: path:line
 
 ### must_read
-メインエージェントが読むべき箇所:
-- [目的/理由]: path:line-range
+Sections the main agent must read:
+- [Purpose/Reason]: path:line-range
 
 ### dependencies
-考慮すべき依存/影響:
-- [対象]: 理由
+Dependencies/impacts to consider:
+- [Target]: reason
 
 ### warnings
-注意点/落とし穴:
-- [内容]: 根拠または理由
+Caveats/pitfalls:
+- [Content]: basis or reason
 
-## ガイドライン
-- 必要最小限を読む（全読み禁止）
-- 参照は必ず file:line 形式で示す
-- 一般論ではなくタスク固有のルールを優先
-- 該当が無い場合は「該当ルールなし」「必読箇所なし」と明記
-- 優先順位:
-  1. アーキテクチャ制約
-  2. データ/スキーマ要件
-  3. 命名/配置規約
-  4. 連携パターン
-  5. セキュリティ要件
+## Guidelines
+- Read the minimum necessary (no full file reads)
+- Always specify references in file:line format
+- Prioritize task-specific rules over general guidelines
+- If none found, explicitly state "No applicable rules" or "No required reading"
+- Priority order:
+  1. Architecture constraints
+  2. Data/schema requirements
+  3. Naming/placement conventions
+  4. Integration patterns
+  5. Security requirements

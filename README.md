@@ -214,7 +214,6 @@ The server determines the next phase in each `submit_phase` response. The LLM do
 |------|---------|
 | `check_write_target` | Verify file can be modified |
 | `add_explored_files` | Add files to explored list |
-| `revert_to_exploration` | Return to EXPLORATION phase |
 | `review_changes` | Show all file changes in PRE_COMMIT |
 
 ### Branch Management

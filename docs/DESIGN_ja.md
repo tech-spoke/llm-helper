@@ -1,6 +1,6 @@
-# Code Intelligence MCP Server - 設計ドキュメント v1.11
+# Code Intelligence MCP Server - 設計ドキュメント v1.16
 
-> このドキュメントは v1.11 時点の完全なシステム仕様を記述しています。
+> このドキュメントは v1.16 時点の完全なシステム仕様を記述しています。
 > バージョン履歴については [CHANGELOG](#changelog) を参照してください。
 
 ---
@@ -10,40 +10,77 @@
 1. [概要](#概要)
 2. [設計思想](#設計思想)
 3. [アーキテクチャ](#アーキテクチャ)
-4. [Complete Flow (19 Steps)](#complete-flow-19-steps)
-5. [フェーズマトリクス](#フェーズマトリクス)
-6. [submit_phase API](#submit_phase-api)
-7. [タスクオーケストレーション](#タスクオーケストレーション)
-8. [安全弁（ループ防止）](#安全弁ループ防止)
-9. [コンパクト耐性設計](#コンパクト耐性設計)
-10. [2層コンテキスト](#2層コンテキスト)
-11. [ツールリファレンス](#ツールリファレンス)
-12. [セットアップガイド](#セットアップガイド)
-13. [設定](#設定)
-14. [内部リファレンス](#内部リファレンス)
-15. [CHANGELOG](#changelog)
+4. [フェーズ契約](#フェーズ契約)
+5. [Complete Flow (19 Steps)](#complete-flow-19-steps)
+6. [セッション管理と復元](#セッション管理と復元)
+7. [フェーズマトリクス](#フェーズマトリクス)
+8. [submit_phase API](#submit_phase-api)
+9. [タスクオーケストレーション](#タスクオーケストレーション)
+10. [安全弁（ループ防止）](#安全弁ループ防止)
+11. [2層コンテキスト](#2層コンテキスト)
+12. [ツールリファレンス](#ツールリファレンス)
+13. [プロジェクト構成](#プロジェクト構成)
+14. [設定](#設定)
+15. [内部リファレンス](#内部リファレンス)
+16. [CHANGELOG](#changelog)
 
 ---
 
 ## 概要
 
-Code Intelligence MCP Server は、LLM がコードベースを正確に理解し、安全に実装を行うためのガードレールを提供します。
+### 狙い
 
-| 呼び出し元 | デフォルトの動作 |
-|-----------|-----------------|
-| **Cursor** | コードベース全体を理解してから修正 |
-| **Claude Code** | 特定の場所のみを修正しがち |
+LLM エージェントが「コードベースを正確に理解してから実装する」ワークフローを強制する。
+LLM に判断を委ねず、サーバー側でフェーズ遷移・検証・復元を制御することで、
+実装品質と再現性を担保する。
 
-このサーバーは、実装前に構造化された探索を強制することで、Claude Code を Cursor のように動作させます。
+### 実現していること
 
-### v1.11 の主要変更
-
-| 変更 | 内容 |
+| 機能 | 内容 |
 |------|------|
-| **submit_phase 統一** | 17 個の submit_* ツール → `submit_phase` 一本 |
-| **自己完結型レスポンス** | 毎回 `instruction` + `expected_payload` を返す |
-| **タスクオーケストレーション** | サーバー強制のタスク管理（LLM がスキップ不可） |
-| **コンパクト耐性** | 4層の耐性設計（ツール・レスポンス・リカバリ・防御） |
+| **フェーズ強制** | 探索 → 検証 → 実装 → レビューの順序をサーバーが強制。ショートカット不可 |
+| **フェーズ契約** | 各フェーズの指示・期待 payload・必須ツールを明文化。契約違反は弾く |
+| **コード探索** | ctags / ripgrep / tree-sitter / ChromaDB による構造化探索 |
+| **セッション永続化** | CLI 再起動後もチェックポイントから復元可能 |
+| **コンパクト耐性** | LLM の文脈喪失を検知し、サマリーを自動復元 |
+| **書き込み制限** | 探索済みファイルのみ修正可能 |
+
+### 技術概要
+
+```
+┌─────────────────────────────────────────────────────┐
+│            LLM Agent (Claude Code / Codex)          │
+│                     /code skill                      │
+└─────────────────────┬───────────────────────────────┘
+                      │ MCP Protocol
+                      ▼
+┌─────────────────────────────────────────────────────┐
+│             Code Intelligence Server                 │
+│  ・フェーズ契約 (phase_contract.yml)                 │
+│  ・チェックポイント永続化 (sessions/*.json)          │
+│  ・ChromaDB (Forest/Map 2層ベクトル検索)            │
+└─────────────────────┬───────────────────────────────┘
+                      │
+                      ▼
+┌─────────────────────────────────────────────────────┐
+│                  Tool Layer                          │
+│  ctags │ ripgrep │ tree-sitter │ AST Chunker        │
+└─────────────────────────────────────────────────────┘
+```
+
+| コンポーネント | 役割 |
+|---------------|------|
+| **MCP Server** | フェーズ遷移、ペイロード検証、チェックポイント保存 |
+| **Phase Contract** | 各フェーズの instruction / expected_payload / required_tools を定義 |
+| **ChromaDB** | Forest（コード全体）と Map（成功パターン）の 2 層ベクトル検索 |
+| **Tool Layer** | ctags（シンボル定義）、ripgrep（検索）、tree-sitter（構造分析） |
+
+### 対応クライアント
+
+| クライアント | 対応状況 |
+|-------------|---------|
+| **Claude Code** | `/code` スキルで利用 |
+| **Codex** | `/code` スキルで利用 |
 
 ---
 
@@ -69,6 +106,7 @@ LLM に決めさせない。従わないと進めない設計にする。
 | **submit_phase 統一** | 全フェーズの出口を1ツールに統一（コンパクト耐性） |
 | **サーバー強制タスク管理** | タスク完了をサーバーが検証（LLM のスキップ防止） |
 | **安全弁** | 無限ループをサーバー側カウンターで防止 |
+| **実装チェックリスト (v1.16)** | タスク完了時に全項目の evidence/reason 検証、空実装検出 |
 
 ---
 
@@ -89,6 +127,11 @@ LLM に決めさせない。従わないと進めない設計にする。
 │  │   Router    │  │   Session   │  │ QueryFrame  │ │
 │  │             │  │   Manager   │  │ Decomposer  │ │
 │  └─────────────┘  └─────────────┘  └─────────────┘ │
+│  ┌─────────────┐  ┌─────────────────────────────────┐│
+│  │  Phase      │  │         Checkpoint              ││
+│  │  Contract   │  │  sessions/{session_id}.json    ││
+│  │             │  │                                  ││
+│  └─────────────┘  └─────────────────────────────────┘│
 │  ┌─────────────────────────────────────────────────┐│
 │  │              ChromaDB Manager                   ││
 │  │  ┌─────────────────┐  ┌─────────────────────┐  ││
@@ -111,9 +154,11 @@ LLM に決めさせない。従わないと進めない設計にする。
 - **LLM**: 指示を実行し、`expected_payload` 形式で **`submit_phase` のみ**を呼ぶ
 - **サーバー**: ペイロードを検証し、次フェーズを決定する
 
-v1.13 以降はフェーズ契約（`instruction` / `expected_payload` / 必須ツール）を
-`.code-intel/phase_contract.yml` に集約し、**契約に沿わない送信は弾く**。
+フェーズ契約（`instruction` / `expected_payload` / 必須ツール）は
+`.code-intel/phase_contract.yml` に集約されており、**契約に沿わない送信は弾く**。
 契約の最小単位は **summary + tools_used**（READY 完了 / MERGE など一部例外あり）。
+
+詳細は [フェーズ契約](#フェーズ契約) セクションを参照。
 
 ### Forest/Map 2層構造
 
@@ -123,6 +168,69 @@ v1.13 以降はフェーズ契約（`instruction` / `expected_payload` / 必須�
 | **Map** | 成功パターンを再利用 | NL→Symbol ペア、合意事項 | `/outcome success` 時 |
 
 **ショートカットロジック**: Map スコア ≥ 0.7 → Forest 探索をスキップ
+
+---
+
+## フェーズ契約
+
+フェーズ契約は、フローの実現方法を形式化する仕組み。
+
+### 契約の3層構造
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  ①オーケストレーター                                             │
+│    ↓ instruction + expected_payload + required_tools            │
+├─────────────────────────────────────────────────────────────────┤
+│  ②LLM（作業実行）                                                │
+│    ↓ submit_phase(data={summary, tools_used, ...})              │
+├─────────────────────────────────────────────────────────────────┤
+│  ③サーバー（検証）                                               │
+│    → ペイロード検証 → 次フェーズ決定 → チェックポイント保存         │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### 契約の定義場所
+
+`.code-intel/phase_contract.yml` に以下を集約:
+
+| 要素 | 説明 |
+|------|------|
+| `instruction` | LLM が実行すべき作業の指示 |
+| `expected_payload` | submit_phase に送る payload の構造（擬似スキーマ） |
+| `required_tools` | 必須ツール（未使用なら弾く） |
+
+### 契約の最小単位
+
+| フェーズ種別 | 最小 payload |
+|-------------|-------------|
+| 通常フェーズ | `summary` + `tools_used` |
+| 完了フェーズ（READY 完了 / MERGE） | `summary` のみ |
+
+### サーバー側検証
+
+1. **必須ツールの使用確認**: `tools_used` に必須ツールが含まれているか
+2. **summary の存在確認**: 全フェーズで summary 必須
+3. **契約違反時**: `payload_mismatch` エラーで再指示
+
+### 契約のレスポンス形式
+
+```json
+{
+  "phase": "EXPLORATION",
+  "step": 5,
+  "instruction": "code-intel ツールを最低2種類使って探索し...",
+  "expected_payload": {
+    "explored_files": "list[str]",
+    "findings": "list[str]",
+    "tools_used": "list[str] (at least 2 types)",
+    "summary": "str"
+  },
+  "call": "submit_phase"
+}
+```
+
+詳細は [templates/code-intel/phase_contract.yml](../templates/code-intel/phase_contract.yml) を参照。
 
 ---
 
@@ -170,18 +278,108 @@ LLM 側前処理（サーバー呼び出しなし）:
 
 ---
 
-## チェックポイント復元（v1.12）
+## セッション管理と復元
 
-`submit_phase` 成功ごとに **セッション状態を永続化**し、CLI 再起動後も復元できる。
+### 課題
 
-- **保存先**: `.code-intel/sessions/{session_id}.json`
-- **復元方法**: `/code --resume` → `get_session_status` がチェックポイントを読み込み
-- **通常フロー**: `start_session` が `recovery_available` を返す場合は選択肢を提示
-- **完了時**: MERGE（SESSION_COMPLETE）でチェックポイントを削除
-- **掃除**: `--clean` で stale ブランチ削除 + チェックポイント全削除
+| シナリオ | MCP プロセス | SessionState | 課題 |
+|----------|-------------|-------------|------|
+| 自動コンパクト（同一セッション） | 生存 | 保持 | LLM の文脈喪失 |
+| `/clear`（同一 CLI） | 生存 | 保持 | LLM の文脈喪失 |
+| CLI 終了 → `--continue` | 再起動 | **消滅** | サーバー状態も消滅 |
+| コンテキスト枯渇 → 新規会話 | 再起動 | **消滅** | サーバー状態も消滅 |
+
+```
+LLM 会話    ← コンパクト対象（会話履歴が要約される）
+   ↕ MCP プロトコル
+MCP サーバー  ← インメモリ保持（CLI 終了で消滅）
+```
+
+### 対策の全体像
+
+| 対策 | 対象シナリオ | 仕組み |
+|------|-------------|--------|
+| **チェックポイント永続化** | CLI 跨ぎ | ファイル保存 → 復元 |
+| **compaction_count 方式** | 同一セッション内コンパクト | 値のずれで検知 → サマリー復元 |
+| **get_session_status** | 任意の状態喪失 | リカバリ用 API |
+
+### チェックポイント永続化
+
+```
+submit_phase 成功
+  → SessionState.to_dict() でシリアライズ
+  → .code-intel/sessions/{session_id}.json に保存
+
+CLI 再起動 → /code --resume
+  → get_session_status がチェックポイントを検出
+  → SessionState.from_dict() で復元
+```
+
+| 項目 | 内容 |
+|------|------|
+| **保存先** | `.code-intel/sessions/{session_id}.json` |
+| **保存タイミング** | `submit_phase` 成功後（毎フェーズ） |
+| **復元方法** | `/code --resume` → `get_session_status` |
+| **完了時** | MERGE（SESSION_COMPLETE）でチェックポイント削除 |
+| **掃除** | `--clean` で stale ブランチ削除 + チェックポイント全削除 |
+
+### 復元の2つの経路
+
+| 経路 | トリガー | 動作 |
+|------|---------|------|
+| **明示的再開** | `/code --resume` | code.md 読み込み + get_session_status で復元 |
+| **通常実行時の検出** | `/code <query>` | start_session が `recovery_available` を返し、ユーザーに選択を提示 |
 
 > 注意: `get_session_status` 単体で復元すると、LLM 側の文脈が不足するため
-> 原則 `/code --resume` で **LLM文脈 + サーバー状態**を同時に確保する。
+> 原則 `/code --resume` で **LLM 文脈 + サーバー状態**を同時に確保する。
+
+### compaction_count 方式
+
+同一セッション内でコンパクト発生を検知し、サマリーを自動復元する仕組み。
+
+**原理**: サーバーと LLM が `compaction_count`（整数）を共有し、**値のずれ**でコンパクト発生を検知する。
+
+```
+1. セッション開始: compaction_count = 0
+2. 通常の submit: LLM は count をエコーバック → サーバーと一致 → 通常応答
+3. コンパクト発生: LLM がコンテキスト喪失を検知 → count を +1 して送信
+4. サーバー: 値のずれを検知 → phase_summaries をレスポンスに付与 + count を更新
+5. LLM: サマリーを読んで文脈を復元
+```
+
+レスポンス例（ずれ検知時）:
+```json
+{
+  "success": true,
+  "phase": "Q1",
+  "step": 6,
+  "compaction_count": 1,
+  "phase_summaries": {
+    "step_03_DOCUMENT_RESEARCH": "要点の短い要約",
+    "step_05_EXPLORATION": "探索結果の要約"
+  }
+}
+```
+
+### コンパクト耐性の4層構造
+
+| 層 | 対策 | 効果 |
+|----|------|------|
+| ツール設計 | `submit_phase` 一本 | 「何を呼ぶか」を忘れない |
+| レスポンス設計 | `expected_payload` 付き | 「何を返すか」を忘れない |
+| リカバリ | `get_session_status` | 完全復元手段 |
+| 防御 | ペイロード不整合検知 | サイレント障害防止 |
+
+**ペイロード不整合検知**: LLM がフェーズと無関係なペイロードを送った場合、サーバーが現在フェーズの再指示を返す。
+
+### 永続化の粒度
+
+| カテゴリ | 永続化対象 |
+|---------|-----------|
+| オーケストレーター状態 | session_id, flags, phase_state, counters, tasks |
+| LLM 向けサマリー | 各フェーズの `summary` フィールドのみ |
+
+**方針**: 詳細情報は保存せず、`summary` に圧縮して永続化。再開時は要約に落ちることを許容する。
 
 ---
 
@@ -230,8 +428,9 @@ LLM 側前処理（サーバー呼び出しなし）:
 | `--quick` | `-q` | 探索スキップ（Steps 5-11）、ブランチなし、PRE_COMMIT/QUALITY_REVIEW/MERGE もスキップ |
 | `--no-doc-research` | — | DOCUMENT_RESEARCH をスキップ（Step 3） |
 | `--no-intervention` | `-ni` | VERIFY_INTERVENTION をスキップ（Step 16） |
-| `--clean` | `-c` | stale ブランチ削除 + SessionState リセット |
-| `--rebuild` | `-r` | 全インデックスを強制再構築 |
+| `--resume` | `-r` | チェックポイントからセッション再開 |
+| `--clean` | `-c` | stale ブランチ削除 + チェックポイント全削除 |
+| `--rebuild` | — | 全インデックスを強制再構築 |
 
 ---
 
@@ -248,7 +447,7 @@ start_session → submit_phase (×N) → SESSION_COMPLETE
 - LLM が呼ぶフェーズ遷移ツールは `submit_phase` のみ
 - サーバーが `SessionState.phase` から現在フェーズを特定し、ペイロードをバリデーション
 - サーバーが次フェーズを決定してレスポンスを返す
-- v1.13 以降は `phase_contract.yml` の契約に従い、**必須ツールの使用証跡**を要求する
+- `phase_contract.yml` の契約に従い、**必須ツールの使用証跡**を要求する
 
 ### レスポンス形式（自己完結型）
 
@@ -377,48 +576,6 @@ class SessionState:
 
 ---
 
-## コンパクト耐性設計
-
-### 前提
-
-```
-LLM 会話    ← コンパクト対象（会話履歴が要約される）
-   ↕ MCP プロトコル
-MCP サーバー  ← コンパクト対象外（SessionState をインメモリ保持）
-```
-
-### 4層の耐性
-
-| 層 | 対策 | 効果 |
-|----|------|------|
-| ツール設計 | `submit_phase` 一本 | 「何を呼ぶか」を忘れない |
-| レスポンス設計 | `expected_payload` 付き | 「何を返すか」を忘れない |
-| リカバリ | `get_session_status` | 完全復元手段 |
-| 防御 | ペイロード不整合検知 | サイレント障害防止 |
-
-### get_session_status によるリカバリ
-
-コンパクト後に LLM が状態を見失った場合:
-
-```json
-{
-  "session_id": "...",
-  "phase": "VERIFICATION",
-  "step": 9,
-  "completed_steps": [1, 2, 3, 4, 5, 6, 7, 8],
-  "instruction": "仮説検証を実施し submit_phase を呼んでください",
-  "expected_payload": {
-    "hypotheses_verified": "list[{hypothesis, result, evidence}]"
-  }
-}
-```
-
-### ペイロード不整合検知
-
-LLM がフェーズと無関係なペイロードを送った場合、サーバーが現在フェーズの再指示を返す。
-
----
-
 ## 2層コンテキスト
 
 ```
@@ -473,7 +630,6 @@ LLM がフェーズと無関係なペイロードを送った場合、サーバ�
 |--------|------|
 | `check_write_target` | ファイル修正可能か検証 |
 | `add_explored_files` | 探索済みリストにファイル追加 |
-| `revert_to_exploration` | EXPLORATION フェーズに戻る |
 | `review_changes` | PRE_COMMIT で全ファイル変更を表示 |
 
 ### ブランチ管理
@@ -482,44 +638,19 @@ LLM がフェーズと無関係なペイロードを送った場合、サーバ�
 |--------|------|
 | `cleanup_stale_branches` | 全 `llm_task_*` ブランチを削除 |
 
-### インデックス & 学習
+### インデックス
 
 | ツール | 説明 |
 |--------|------|
 | `sync_index` | ChromaDB インデックスを同期 |
 | `update_context` | context.yml の要約を更新 |
-| `record_outcome` | 成功/失敗を記録 |
-| `get_outcome_stats` | 学習統計を取得 |
 
 ---
 
-## セットアップガイド
+## プロジェクト構成
 
-### 前提条件
+`init-project.sh` 実行後のプロジェクト構造:
 
-| ツール | 必須 | 目的 |
-|--------|------|------|
-| Python 3.10+ | Yes | サーバー実行 |
-| Universal Ctags | Yes | シンボル定義 |
-| ripgrep | Yes | コード検索 |
-| tree-sitter | Yes | 構造分析 |
-| git | Yes | ブランチ分離 |
-
-### Step 1: サーバーセットアップ（初回のみ）
-
-```bash
-git clone https://github.com/tech-spoke/llm-helper.git
-cd llm-helper
-./setup.sh
-```
-
-### Step 2: プロジェクト初期化（プロジェクトごと）
-
-```bash
-./init-project.sh /path/to/your-project
-```
-
-作成されるもの:
 ```
 your-project/
 ├── .claude/
@@ -529,51 +660,20 @@ your-project/
 └── .code-intel/
     ├── config.json            (インデックス設定)
     ├── context.yml            (コンテキスト & doc_research 設定)
-    ├── task_planning.md       (タスク分割ガイド, v1.11)
+    ├── phase_contract.yml     (フェーズ契約定義)
+    ├── task_planning.md       (タスク分割ガイド)
+    ├── user_escalation.md     (ユーザーエスカレーション手順)
     ├── agreements/            (NL→Symbol ペア)
     ├── chroma/                (ChromaDB)
     ├── logs/                  (DecisionLog, OutcomeLog)
-    ├── sessions/              (チェックポイント保存先, v1.12)
+    ├── sessions/              (チェックポイント保存先)
     ├── verifiers/             (検証プロンプト)
     ├── doc_research/          (ドキュメント調査プロンプト)
     ├── review_prompts/        (ゴミ検出, 品質レビュー)
     └── interventions/         (介入プロンプト)
 ```
 
-### Step 3: .mcp.json 設定
-
-```json
-{
-  "mcpServers": {
-    "code-intel": {
-      "type": "stdio",
-      "command": "/path/to/llm-helper/venv/bin/python",
-      "args": ["/path/to/llm-helper/code_intel_server.py"],
-      "env": {"PYTHONPATH": "/path/to/llm-helper"}
-    }
-  }
-}
-```
-
-### Step 4: Claude Code を再起動
-
-`init-project.sh` が `.claude/commands/` へスキルファイルを自動コピーするため、手動コピーは不要。
-既存プロジェクトでスキルのみ更新する場合:
-
-```bash
-cp /path/to/llm-helper/templates/skills/claude/code.md /path/to/your-project/.claude/commands/
-```
-
 ---
-
-## 配付構成（v1.14）
-
-v1.14 では **private/public の 2 リポジトリ構成**で配付物を管理する。
-配付テンプレートは `templates/` に集約し、`init-project.sh` はテンプレートをコピーする。
-
-- **public**: 配付に必要な最小セットのみ（`templates/`, `tools/`, `docs/` など）
-- **private**: テスト・サンプル・内部運用ドキュメントを含む
-- **生成物**: `.code-intel/**`, `.claude/commands/**`, `.codex/**` は Git 管理しない
 
 ## 設定
 
@@ -659,16 +759,16 @@ class SessionState:
     phase: Phase                   # 現在のフェーズ
     query_frame: QueryFrame
     gate_level: str                # full/auto
-    # v1.11: フラグ
+    # フラグ
     fast_mode: bool
     quick_mode: bool
     no_doc: bool
     no_verify: bool
     no_quality: bool
     no_intervention: bool
-    # v1.11: タスク管理
+    # タスク管理
     tasks: list[TaskModel]
-    # v1.11: 安全弁カウンター
+    # 安全弁カウンター
     intervention_count: int
     quality_revert_count: int
 
@@ -687,6 +787,7 @@ class TaskModel:
 
 | Version | Description | Link |
 |---------|-------------|------|
+| v1.16 | タスク実装チェックリスト（evidence 検証、空実装検出、reason 必須化） | [v1.16](updates/v1.16_ja.md) |
 | v1.14 | 配付構成の再整理（private/public 2 リポジトリ方式、テンプレート集約） | [v1.14](updates/v1.14_ja.md) |
 | v1.13-1 | フェーズ失敗時のエラーハンドリング監査（契約違反の検知強化） | [v1.13-1](updates/v1.13-1_phase_failure_handling_audit.md) |
 | v1.13 | フェーズ契約形式化（instruction/expected_payload/tools_used の明文化） | [v1.13](updates/v1.13_ja.md) |

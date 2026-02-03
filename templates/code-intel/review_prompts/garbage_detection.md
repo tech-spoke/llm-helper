@@ -29,6 +29,21 @@ For each changed file, decide whether to **keep** or **discard**.
    - Adding/removing blank lines only
    - Import order changes only
 
+6. **Unreachable code**
+   - Dead code branches like `if (false) { ... }`
+   - Feature flags that are always off
+   - Code after unconditional `return`/`throw`
+
+7. **Unused imports**
+   - Imports added during debugging but not used
+   - Extra imports from copy-paste
+
+### Risk Level
+
+- **SAFE to discard**: Debug output, commented code, unused imports
+- **CAREFUL**: Code that might be used via dynamic imports or reflection
+- **RISKY (keep)**: Public API, shared utilities, config files
+
 ### Keep
 
 1. **Implementation code for the requested feature**
@@ -36,6 +51,12 @@ For each changed file, decide whether to **keep** or **discard**.
 3. **Related type definitions and interface changes**
 4. **Requested tests**
 5. **Necessary configuration file changes**
+
+## Before Discarding
+
+- [ ] Grep for all references in codebase
+- [ ] Check for dynamic imports (string patterns like `import()`)
+- [ ] Verify not part of public API or exports
 
 ## Notes
 

@@ -23,6 +23,8 @@ v1.1 Additions:
 
 import asyncio
 import json
+import os
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -41,8 +43,9 @@ from tools.session import (
     Hypothesis,
     IntentReclassificationRequired,
     InvalidSemanticReason, WriteTargetBlocked,
-    TaskModel, get_phase_response,
-    PHASE_STEP_MAP, EXPECTED_PAYLOADS, PHASE_INSTRUCTIONS,
+    TaskModel, ChecklistItem, get_phase_response,
+    PHASE_STEP_MAP, PhaseContractMissingError, _load_phase_contract,
+    _get_message,  # v1.15: メッセージ外部化
 )
 from tools.query_frame import (
     QueryFrame, QueryDecomposer, SlotSource, SlotEvidence,
@@ -84,12 +87,167 @@ def _truncate_response(content: str, max_bytes: int = MAX_RESPONSE_BYTES) -> tup
     truncated = truncated_bytes.decode("utf-8", errors="ignore")
 
     # Build warning
-    warning = {"_truncation_warning": {"truncated": True, "message": "レスポンスが 256KB を超えたため切り詰めました。パターンを絞り込んでください。"}}
+    warning = {"_truncation_warning": {"truncated": True, "message": "Response exceeded 256KB and was truncated. Please narrow down the pattern."}}
     if total_matches is not None:
         warning["_truncation_warning"]["total_matches"] = total_matches
     warning_str = "\n" + json.dumps(warning, ensure_ascii=False)
 
     return truncated + warning_str, True
+
+
+# =============================================================================
+# v1.16: Checklist Evidence Validation
+# =============================================================================
+
+# Evidence format: file.py:42 or file.py:42-58
+EVIDENCE_PATTERN = re.compile(r'^[\w./\-]+\.\w+:\d+(-\d+)?$')
+
+# Empty implementation patterns
+EMPTY_IMPL_PATTERNS = [
+    re.compile(r'^\s*pass\s*$', re.MULTILINE),
+    re.compile(r'^\s*\.\.\.\s*$', re.MULTILINE),
+    re.compile(r'^\s*#\s*TODO', re.MULTILINE),
+    re.compile(r'^\s*//\s*TODO', re.MULTILINE),
+    re.compile(r'^\s*raise\s+NotImplementedError', re.MULTILINE),
+]
+
+
+def validate_evidence_format(evidence: str) -> bool:
+    """Check if evidence matches the required format: file.py:42 or file.py:42-58"""
+    return bool(EVIDENCE_PATTERN.match(evidence))
+
+
+def validate_evidence_content(evidence: str, repo_path: str = ".") -> str | None:
+    """
+    Validate that evidence points to actual code.
+
+    Returns: error message or None if valid
+    """
+    # Parse evidence: "file.py:42-58" → file="file.py", start=42, end=58
+    match = re.match(r'^(.+):(\d+)(?:-(\d+))?$', evidence)
+    if not match:
+        return f"Invalid evidence format: {evidence}"
+
+    file_path_str, start_str, end_str = match.groups()
+    start_line = int(start_str)
+    end_line = int(end_str) if end_str else start_line
+
+    # Resolve file path relative to repo
+    full_path = Path(repo_path) / file_path_str
+    if not full_path.exists():
+        return f"File not found: {file_path_str}"
+
+    # Read file and check line range
+    try:
+        with open(full_path, encoding="utf-8") as f:
+            lines = f.readlines()
+    except Exception as e:
+        return f"Cannot read file {file_path_str}: {e}"
+
+    if start_line > len(lines):
+        return f"Line {start_line} exceeds file length ({len(lines)} lines)"
+
+    if end_line > len(lines):
+        return f"Line {end_line} exceeds file length ({len(lines)} lines)"
+
+    # Check for empty implementation
+    code_lines = lines[start_line - 1:end_line]
+    code = ''.join(code_lines).strip()
+
+    for pattern in EMPTY_IMPL_PATTERNS:
+        if pattern.search(code):
+            return f"Empty implementation detected (contains pass/TODO/NotImplementedError)"
+
+    return None
+
+
+def validate_task_completion(
+    task: TaskModel,
+    reported_checklist: list[dict],
+    repo_path: str = ".",
+) -> list[dict]:
+    """
+    Validate checklist completion report.
+
+    Returns: list of error dicts with 'error_key' and 'kwargs' for _get_message()
+    """
+    errors = []
+
+    # 1. Check all items are reported
+    original_items = {c.item for c in task.checklist}
+    reported_items = {c.get("item", "") for c in reported_checklist}
+
+    if original_items != reported_items:
+        errors.append({
+            "error_key": "checklist_items_mismatch",
+            "kwargs": {},
+        })
+        return errors  # Cannot continue validation if items don't match
+
+    # 2. Validate each item
+    for item in reported_checklist:
+        item_name = item.get("item", "")
+        status = item.get("status", "")
+
+        if status == "pending":
+            errors.append({
+                "error_key": "checklist_item_pending",
+                "kwargs": {"item": item_name},
+            })
+
+        elif status == "done":
+            evidence = item.get("evidence")
+            if not evidence:
+                errors.append({
+                    "error_key": "checklist_evidence_required",
+                    "kwargs": {"item": item_name},
+                })
+            else:
+                # Format validation
+                if not validate_evidence_format(evidence):
+                    errors.append({
+                        "error_key": "checklist_evidence_format_invalid",
+                        "kwargs": {"evidence": evidence},
+                    })
+                else:
+                    # Content validation
+                    content_error = validate_evidence_content(evidence, repo_path)
+                    if content_error:
+                        if "File not found" in content_error:
+                            # Extract file path from evidence
+                            file_path = evidence.split(":")[0]
+                            errors.append({
+                                "error_key": "checklist_evidence_file_not_found",
+                                "kwargs": {"file_path": file_path},
+                            })
+                        elif "exceeds file length" in content_error:
+                            # Extract line and total from error message
+                            match = re.search(r'Line (\d+) exceeds file length \((\d+) lines\)', content_error)
+                            if match:
+                                errors.append({
+                                    "error_key": "checklist_evidence_line_out_of_range",
+                                    "kwargs": {"line": match.group(1), "total": match.group(2)},
+                                })
+                            else:
+                                errors.append({
+                                    "error_key": "checklist_evidence_line_out_of_range",
+                                    "kwargs": {"line": "?", "total": "?"},
+                                })
+                        elif "Empty implementation" in content_error:
+                            errors.append({
+                                "error_key": "checklist_evidence_empty_impl",
+                                "kwargs": {"evidence": evidence},
+                            })
+
+        elif status == "skipped":
+            reason = item.get("reason", "")
+            if not reason or len(reason) < 10:
+                errors.append({
+                    "error_key": "checklist_reason_required",
+                    "kwargs": {"item": item_name},
+                })
+
+    return errors
 
 
 # Create MCP server, router, and session manager
@@ -108,8 +266,7 @@ _branch_managers: dict[str, BranchManager] = {}
 
 
 def _phase_response(session: SessionState | None, phase_name: str, step: int | None = None, extra: dict | None = None) -> dict:
-    repo_path = session.repo_path if session is not None else "."
-    return get_phase_response(phase_name, step=step, extra=extra, repo_path=repo_path)
+    return get_phase_response(phase_name, step=step, extra=extra)
 
 
 def _get_or_recreate_branch_manager(session, repo_path: str) -> BranchManager | None:
@@ -830,22 +987,6 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
-            name="revert_to_exploration",
-            description="Revert from any phase back to EXPLORATION phase. "
-                        "Use when additional exploration is needed after reaching READY phase. "
-                        "Previous exploration results are kept by default for incremental exploration.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "keep_results": {
-                        "type": "boolean",
-                        "default": True,
-                        "description": "Keep existing exploration results (default: true)",
-                    },
-                },
-            },
-        ),
-        Tool(
             name="review_changes",
             description="Get all changes captured in the task branch for garbage review. "
                         "Returns list of changed files with diffs for LLM to review.",
@@ -1004,33 +1145,45 @@ def _validate_phase_assessment(phase: str, assessment: dict) -> tuple[bool, str]
     """
     if phase == "SEMANTIC":
         if "needs_more_information" not in assessment:
-            return False, "needs_more_information field is required for SEMANTIC assessment"
+            msg = _get_message("tool_errors", "check_phase_necessity", "semantic_needs_more_information_required")
+            return False, msg.get("message", "needs_more_information field is required")
         if "needs_more_information_reason" not in assessment:
-            return False, "needs_more_information_reason field is required for SEMANTIC assessment"
+            msg = _get_message("tool_errors", "check_phase_necessity", "semantic_reason_required")
+            return False, msg.get("message", "needs_more_information_reason field is required")
         if not isinstance(assessment["needs_more_information"], bool):
-            return False, "needs_more_information must be a boolean"
+            msg = _get_message("tool_errors", "check_phase_necessity", "semantic_needs_more_information_type")
+            return False, msg.get("message", "needs_more_information must be a boolean")
         if len(assessment["needs_more_information_reason"]) < 10:
-            return False, "needs_more_information_reason must be at least 10 characters"
+            msg = _get_message("tool_errors", "check_phase_necessity", "semantic_reason_length")
+            return False, msg.get("message", "needs_more_information_reason must be at least 10 characters")
 
     elif phase == "VERIFICATION":
         if "has_unverified_hypotheses" not in assessment:
-            return False, "has_unverified_hypotheses field is required for VERIFICATION assessment"
+            msg = _get_message("tool_errors", "check_phase_necessity", "verification_has_unverified_required")
+            return False, msg.get("message", "has_unverified_hypotheses field is required")
         if "has_unverified_hypotheses_reason" not in assessment:
-            return False, "has_unverified_hypotheses_reason field is required for VERIFICATION assessment"
+            msg = _get_message("tool_errors", "check_phase_necessity", "verification_reason_required")
+            return False, msg.get("message", "has_unverified_hypotheses_reason field is required")
         if not isinstance(assessment["has_unverified_hypotheses"], bool):
-            return False, "has_unverified_hypotheses must be a boolean"
+            msg = _get_message("tool_errors", "check_phase_necessity", "verification_has_unverified_type")
+            return False, msg.get("message", "has_unverified_hypotheses must be a boolean")
         if len(assessment["has_unverified_hypotheses_reason"]) < 10:
-            return False, "has_unverified_hypotheses_reason must be at least 10 characters"
+            msg = _get_message("tool_errors", "check_phase_necessity", "verification_reason_length")
+            return False, msg.get("message", "has_unverified_hypotheses_reason must be at least 10 characters")
 
     elif phase == "IMPACT_ANALYSIS":
         if "needs_impact_analysis" not in assessment:
-            return False, "needs_impact_analysis field is required for IMPACT_ANALYSIS assessment"
+            msg = _get_message("tool_errors", "check_phase_necessity", "impact_needs_analysis_required")
+            return False, msg.get("message", "needs_impact_analysis field is required")
         if "needs_impact_analysis_reason" not in assessment:
-            return False, "needs_impact_analysis_reason field is required for IMPACT_ANALYSIS assessment"
+            msg = _get_message("tool_errors", "check_phase_necessity", "impact_reason_required")
+            return False, msg.get("message", "needs_impact_analysis_reason field is required")
         if not isinstance(assessment["needs_impact_analysis"], bool):
-            return False, "needs_impact_analysis must be a boolean"
+            msg = _get_message("tool_errors", "check_phase_necessity", "impact_needs_analysis_type")
+            return False, msg.get("message", "needs_impact_analysis must be a boolean")
         if len(assessment["needs_impact_analysis_reason"]) < 10:
-            return False, "needs_impact_analysis_reason must be at least 10 characters"
+            msg = _get_message("tool_errors", "check_phase_necessity", "impact_reason_length")
+            return False, msg.get("message", "needs_impact_analysis_reason must be at least 10 characters")
 
     return True, ""
 
@@ -1084,7 +1237,7 @@ def _tools_used_in_phase(session: SessionState, phase_name: str) -> set[str]:
 
 def _validate_tool_usage(session: SessionState, data: dict, payload_key: str) -> dict | None:
     phase_response = _phase_response_for_payload_key(session, payload_key)
-    expected = phase_response.get("expected_payload", EXPECTED_PAYLOADS.get(payload_key, {}))
+    expected = phase_response.get("expected_payload", {})
     if "tools_used" not in expected:
         return None
 
@@ -1093,32 +1246,32 @@ def _validate_tool_usage(session: SessionState, data: dict, payload_key: str) ->
     reported = set(data.get("tools_used", [])) if isinstance(data.get("tools_used"), list) else set()
 
     if payload_key == "EXPLORATION" and len(actual_tools) < 2:
+        msg = _get_message("common_failures", None, "exploration_min_tools")
         return {
-            "error": "payload_mismatch",
             "current_phase": session.phase.name,
             "step": READY_PAYLOAD_STEP_MAP.get(payload_key, PHASE_STEP_MAP.get(payload_key, 0)),
-            "message": "EXPLORATION requires at least 2 distinct tools before submit_phase.",
+            **msg,
             **phase_response,
         }
 
     missing = required - actual_tools
     if missing:
         missing_list = ", ".join(sorted(missing))
+        msg = _get_message("common_failures", None, "required_tools_not_used", missing_list=missing_list)
         return {
-            "error": "payload_mismatch",
             "current_phase": session.phase.name,
             "step": READY_PAYLOAD_STEP_MAP.get(payload_key, PHASE_STEP_MAP.get(payload_key, 0)),
-            "message": f"Required tools not used: {missing_list}.",
+            **msg,
             **phase_response,
         }
 
     if required and not required.issubset(reported):
         missing_reported = ", ".join(sorted(required - reported))
+        msg = _get_message("common_failures", None, "required_tools_not_reported", missing_reported=missing_reported)
         return {
-            "error": "payload_mismatch",
             "current_phase": session.phase.name,
             "step": READY_PAYLOAD_STEP_MAP.get(payload_key, PHASE_STEP_MAP.get(payload_key, 0)),
-            "message": f"tools_used must include required tools: {missing_reported}.",
+            **msg,
             **phase_response,
         }
 
@@ -1144,27 +1297,27 @@ def _phase_response_for_payload_key(session: SessionState, payload_key: str) -> 
 
 def _validate_common_payload(session: SessionState, data: dict, payload_key: str) -> dict | None:
     phase_response = _phase_response_for_payload_key(session, payload_key)
-    expected = phase_response.get("expected_payload", EXPECTED_PAYLOADS.get(payload_key, {}))
+    expected = phase_response.get("expected_payload", {})
 
     if "summary" in expected:
         summary = data.get("summary")
         if not isinstance(summary, str) or not summary.strip():
+            msg = _get_message("common_failures", None, "summary_required")
             return {
-                "error": "payload_mismatch",
                 "current_phase": session.phase.name,
                 "step": READY_PAYLOAD_STEP_MAP.get(payload_key, PHASE_STEP_MAP.get(payload_key, 0)),
-                "message": "summary is required for this phase.",
+                **msg,
                 **phase_response,
             }
 
     if "tools_used" in expected:
         tools_used = data.get("tools_used")
         if not isinstance(tools_used, list):
+            msg = _get_message("common_failures", None, "tools_used_invalid")
             return {
-                "error": "payload_mismatch",
                 "current_phase": session.phase.name,
                 "step": READY_PAYLOAD_STEP_MAP.get(payload_key, PHASE_STEP_MAP.get(payload_key, 0)),
-                "message": "tools_used must be a list (empty list allowed).",
+                **msg,
                 **phase_response,
             }
 
@@ -1256,11 +1409,11 @@ async def _submit_branch_intervention(session: SessionState, data: dict) -> dict
     """Step 2: Handle stale branch intervention choice."""
     choice = data.get("choice")
     if choice not in ("delete", "merge", "continue"):
+        msg = _get_message("failures", "BRANCH_INTERVENTION", "invalid_choice")
         return {
-            "error": "payload_mismatch",
             "current_phase": "BRANCH_INTERVENTION",
             "step": 2,
-            "message": "choice must be 'delete', 'merge', or 'continue'.",
+            **msg,
             **_phase_response(session, "BRANCH_INTERVENTION"),
         }
 
@@ -1285,16 +1438,15 @@ async def _submit_branch_intervention(session: SessionState, data: dict) -> dict
         # Check for cleanup errors — require user intervention if branch operation failed
         cleanup_errors = cleanup_result.get("errors", []) if isinstance(cleanup_result, dict) else []
         if cleanup_errors:
+            msg = _get_message("failures", "BRANCH_INTERVENTION", "branch_operation_failed",
+                               choice=choice, errors="; ".join(cleanup_errors))
             return {
                 "success": False,
-                "error": "branch_operation_failed",
                 "choice": choice,
                 "cleanup_result": cleanup_result,
                 "current_phase": "BRANCH_INTERVENTION",
                 "step": 2,
-                "message": f"Branch {choice} failed: {'; '.join(cleanup_errors)}",
-                "instruction": "ブランチ操作に失敗しました。ユーザーに失敗内容を通知し、手動での解決を依頼してください。再選択は行わないでください。",
-                "requires_user_intervention": True,
+                **msg,
             }
         session.branch_policy = None
 
@@ -1319,9 +1471,9 @@ def _submit_document_research(session: SessionState, data: dict) -> dict:
 
     # Validate: documents_reviewed must not be empty
     if not documents_reviewed:
+        msg = _get_message("failures", "DOCUMENT_RESEARCH", "empty_documents")
         return {
-            "error": "payload_mismatch",
-            "message": "指定ドキュメントを読み、`documents_reviewed` に結果を記載して再送してください",
+            **msg,
             **_phase_response(session, "DOCUMENT_RESEARCH"),
         }
 
@@ -1397,9 +1549,9 @@ def _submit_exploration_v11(session: SessionState, data: dict) -> dict:
 
     # Validate: explored_files and findings must not be empty
     if not explored_files or not findings:
+        msg = _get_message("failures", "EXPLORATION", "empty_result")
         return {
-            "error": "payload_mismatch",
-            "message": "探索結果が空です。code-intel ツールを使って探索し、`explored_files` と `findings` を記載して再送してください",
+            **msg,
             **_phase_response(session, "EXPLORATION"),
         }
 
@@ -1477,9 +1629,9 @@ def _submit_semantic_v11(session: SessionState, data: dict) -> dict:
 
     # Validate: search_results must not be empty
     if not search_results:
+        msg = _get_message("failures", "SEMANTIC", "empty_search_results")
         return {
-            "error": "payload_mismatch",
-            "message": "検索結果が空です。`semantic_search` を実行し、`search_results` を記載して再送してください",
+            **msg,
             **_phase_response(session, "SEMANTIC"),
         }
 
@@ -1534,18 +1686,18 @@ def _submit_verification_v11(session: SessionState, data: dict) -> dict:
 
     # Validate: hypotheses_verified must not be empty
     if not hypotheses_verified:
+        msg = _get_message("failures", "VERIFICATION", "empty_hypotheses")
         return {
-            "error": "payload_mismatch",
-            "message": "検証結果が空です。仮説を1件ずつ検証し、`hypotheses_verified` を記載して再送してください",
+            **msg,
             **_phase_response(session, "VERIFICATION"),
         }
 
     # Validate: all hypotheses must have result=true
     false_results = [h for h in hypotheses_verified if isinstance(h, dict) and h.get("result") is False]
     if false_results:
+        msg = _get_message("failures", "VERIFICATION", "result_false_exists")
         return {
-            "error": "payload_mismatch",
-            "message": "result=false の仮説があります。全仮説が result=true になるまで再検証し、`hypotheses_verified` を再送してください",
+            **msg,
             **_phase_response(session, "VERIFICATION"),
         }
 
@@ -1589,11 +1741,12 @@ async def _submit_q3(session: SessionState, data: dict) -> dict:
         # Skip IMPACT_ANALYSIS
         # For INVESTIGATE/QUESTION → SESSION_COMPLETE
         if session.intent in ("INVESTIGATE", "QUESTION") or session.skip_implementation:
+            msg = _get_message("success", "Q3", "investigation_complete")
             return {
                 "success": True,
                 "decision": "SESSION_COMPLETE (investigation only)",
                 "session_complete": True,
-                "message": "探索完了。セッションを終了します。",
+                **msg,
             }
 
         # For IMPLEMENT/MODIFY → READY (branch creation handled in _submit_ready)
@@ -1612,9 +1765,9 @@ def _submit_impact_analysis_v11(session: SessionState, data: dict) -> dict:
 
     # Validate: impact_summary must not be empty
     if not impact_summary:
+        msg = _get_message("failures", "IMPACT_ANALYSIS", "empty_impact_summary")
         return {
-            "error": "payload_mismatch",
-            "message": "影響分析結果が空です。`analyze_impact` を実行し、`impact_summary` を記載して再送してください",
+            **msg,
             **_phase_response(session, "IMPACT_ANALYSIS"),
         }
 
@@ -1626,10 +1779,11 @@ def _submit_impact_analysis_v11(session: SessionState, data: dict) -> dict:
 
     # For INVESTIGATE/QUESTION → SESSION_COMPLETE
     if session.intent in ("INVESTIGATE", "QUESTION") or session.skip_implementation:
+        msg = _get_message("success", "IMPACT_ANALYSIS", "investigation_complete")
         return {
             "success": True,
             "session_complete": True,
-            "message": "探索完了。セッションを終了します。",
+            **msg,
         }
 
     # For IMPLEMENT/MODIFY → READY
@@ -1651,10 +1805,9 @@ async def _submit_ready(session: SessionState, data: dict) -> dict:
     if not session.quick_mode:
         branch_result = await _create_branch_for_ready(session)
         if not branch_result.get("success", True):
+            msg = _get_message("failures", "READY", "branch_creation_failed")
             return {
-                "error": "branch_creation_failed",
-                "message": "タスクブランチの作成に失敗しました。ユーザーに状況を伝え、`git status` での作業ツリー確認・手動ブランチ作成・`/code --clean` でのリセットのいずれかを依頼してください",
-                "requires_user_intervention": True,
+                **msg,
                 **_phase_response(session, "READY"),
             }
         branch_info = branch_result.get("branch")
@@ -1691,7 +1844,37 @@ async def _submit_ready(session: SessionState, data: dict) -> dict:
     if "task_id" in data:
         task_id = data["task_id"]
         summary = data.get("summary", "")
-        return session.complete_task(task_id, summary)
+        checklist = data.get("checklist", [])
+
+        # v1.16: Validate checklist if task has checklist items
+        target_task = None
+        for t in session.tasks:
+            if t.id == task_id:
+                target_task = t
+                break
+
+        if target_task and target_task.checklist and checklist:
+            validation_errors = validate_task_completion(
+                target_task, checklist, session.repo_path
+            )
+            if validation_errors:
+                # Return first error with formatted message
+                first_error = validation_errors[0]
+                error_msg = _get_message(
+                    "failures", "READY", first_error["error_key"],
+                    **first_error["kwargs"]
+                )
+                return {
+                    "error": "checklist_validation_failed",
+                    "message": error_msg,
+                    "all_errors": [
+                        _get_message("failures", "READY", e["error_key"], **e["kwargs"])
+                        for e in validation_errors
+                    ],
+                    **_phase_response(session, "READY", step=13, extra={"ready_substep": "READY_IMPL"}),
+                }
+
+        return session.complete_task(task_id, summary, checklist)
 
     # --- Step 14: Implementation Complete (empty data or explicit) ---
     check = session.check_all_tasks_complete()
@@ -1703,10 +1886,11 @@ async def _submit_ready(session: SessionState, data: dict) -> dict:
 
     # All tasks complete → determine next phase
     if session.no_verify and session.quick_mode:
+        msg = _get_message("success", "READY", "session_complete_no_verify_quick")
         return {
             "success": True,
             "session_complete": True,
-            "message": "全タスク完了。セッション終了（--no-verify + --quick）。",
+            **msg,
         }
     elif session.no_verify:
         session.transition_to_phase(Phase.PRE_COMMIT, reason="ready_complete_no_verify")
@@ -1730,10 +1914,11 @@ def _submit_post_impl_verify(session: SessionState, data: dict) -> dict:
 
     if passed:
         if session.quick_mode:
+            msg = _get_message("success", "POST_IMPL_VERIFY", "session_complete_quick")
             return {
                 "success": True,
                 "session_complete": True,
-                "message": "検証通過。セッション終了（--quick）。",
+                **msg,
             }
         session.transition_to_phase(Phase.PRE_COMMIT, reason="post_impl_verify_passed")
         return {
@@ -1810,15 +1995,16 @@ def _submit_verify_intervention(session: SessionState, data: dict) -> dict:
     # Check if user escalation is needed
     if session.intervention_count >= 2:
         response = _phase_response(session, "VERIFY_INTERVENTION")
-        response["instruction"] = (
-            ".code-intel/user_escalation.md の手順に従いユーザーへヘルプ要請を行ってください。"
-            "使用した手順書の名前/パスを明記して submit_phase で送信してください。"
-        )
+        user_escalation_msg = _get_message("failures", "VERIFY_INTERVENTION", "user_escalation")
+        escalation_count_msg = _get_message("failures", "VERIFY_INTERVENTION", "escalation_count",
+                                            count=session.intervention_count)
+        if user_escalation_msg.get("message"):
+            response["instruction"] = user_escalation_msg["message"]
         return {
             "success": True,
             "user_escalation": True,
             "intervention_count": session.intervention_count,
-            "message": f"介入を {session.intervention_count} 回実行しました。ユーザーに相談してください。",
+            **escalation_count_msg,
             **response,
         }
 
@@ -1841,9 +2027,9 @@ async def _submit_pre_commit(session: SessionState, data: dict) -> dict:
     commit_message = data.get("commit_message", "")
 
     if not commit_message:
+        msg = _get_message("failures", "PRE_COMMIT", "missing_commit_message")
         return {
-            "error": "missing_commit_message",
-            "message": "commit_message is required.",
+            **msg,
             **_phase_response(session, "PRE_COMMIT"),
         }
 
@@ -1851,10 +2037,9 @@ async def _submit_pre_commit(session: SessionState, data: dict) -> dict:
     repo_path = session.repo_path or "."
     branch_manager = _get_or_recreate_branch_manager(session, repo_path)
     if branch_manager is None:
+        msg = _get_message("failures", "PRE_COMMIT", "branch_manager_not_found")
         return {
-            "error": "branch_manager_not_found",
-            "message": "タスクブランチが未作成の状態でコミットフェーズに到達しました。ユーザーに状況を伝え、`git branch` でのブランチ状態確認または `/code --clean` でのセッションリセットを依頼してください",
-            "requires_user_intervention": True,
+            **msg,
             **_phase_response(session, "PRE_COMMIT"),
         }
 
@@ -1865,9 +2050,12 @@ async def _submit_pre_commit(session: SessionState, data: dict) -> dict:
     )
 
     if not review_result.get("success"):
+        # Use message from review_result if present, otherwise fall back to YAML
+        if "message" not in review_result:
+            fallback_msg = _get_message("failures", "PRE_COMMIT", "review_failed")
+            review_result["message"] = fallback_msg.get("message", "Review failed")
         return {
             **review_result,
-            "message": review_result.get("message", "discard 判定のファイルに reason が未指定です。理由を付けて `reviewed_files` を再送してください"),
             **_phase_response(session, "PRE_COMMIT"),
         }
 
@@ -1882,11 +2070,10 @@ async def _submit_pre_commit(session: SessionState, data: dict) -> dict:
     )
 
     if not finalize_result.success:
+        msg = _get_message("failures", "PRE_COMMIT", "finalize_failed")
         return {
-            "error": "finalize_failed",
-            "message": "git commit に失敗しました。ユーザーに状況を伝え、pre-commit hook のエラー出力や `git status` の確認と手動での問題解決を依頼してください。解決後、再度 submit_phase を実行してください",
+            **msg,
             "details": finalize_result.error,
-            "requires_user_intervention": True,
             **_phase_response(session, "PRE_COMMIT"),
         }
 
@@ -1938,10 +2125,11 @@ async def _submit_quality_review_v11(session: SessionState, data: dict) -> dict:
         if session.quality_revert_count >= session.quality_review_max_revert:
             session.quality_review_completed = True
             session.transition_to_phase(Phase.MERGE, reason="quality_forced_completion")
+            msg = _get_message("failures", "QUALITY_REVIEW", "quality_forced_completion")
             return {
                 "success": True,
                 "forced_completion": True,
-                "warning": "品質問題が未解決のまま完了",
+                "warning": msg.get("message", "Completed with unresolved quality issues"),
                 "quality_revert_count": session.quality_revert_count,
                 **_phase_response(session, "MERGE"),
             }
@@ -1979,10 +2167,9 @@ async def _submit_quality_review_v11(session: SessionState, data: dict) -> dict:
                     session.commit_prepared = False
                 else:
                     # Commit execution failed — do NOT transition to MERGE
+                    msg = _get_message("failures", "QUALITY_REVIEW", "commit_execution_failed")
                     return {
-                        "error": "commit_execution_failed",
-                        "message": "品質レビュー後のコミット実行に失敗しました。ユーザーに状況を伝え、`git status` での working tree 確認と手動での問題解決を依頼してください",
-                        "requires_user_intervention": True,
+                        **msg,
                         **_phase_response(session, "QUALITY_REVIEW"),
                     }
 
@@ -2000,27 +2187,27 @@ async def _submit_quality_review_v11(session: SessionState, data: dict) -> dict:
 async def _submit_merge(session: SessionState, data: dict) -> dict:
     """Step 19: MERGE."""
     if not session.task_branch_enabled:
+        msg = _get_message("success", "MERGE", "no_task_branch_complete")
         return {
             "success": True,
             "session_complete": True,
-            "message": "No task branch. Session complete.",
+            **msg,
         }
 
     # Check quality review
     if session.quality_review_enabled and not session.quality_review_completed:
+        msg = _get_message("failures", "MERGE", "quality_review_required")
         return {
-            "error": "quality_review_required",
-            "message": "QUALITY_REVIEW not completed.",
+            **msg,
             **_phase_response(session, "QUALITY_REVIEW"),
         }
 
     repo_path = session.repo_path or "."
     branch_manager = _get_or_recreate_branch_manager(session, repo_path)
     if branch_manager is None:
+        msg = _get_message("failures", "MERGE", "branch_manager_not_found")
         return {
-            "error": "branch_manager_not_found",
-            "message": "ブランチ管理情報が不整合です。ユーザーに状況を伝え、`git branch` での状態確認または `/code --clean` でのセッションリセットを依頼してください",
-            "requires_user_intervention": True,
+            **msg,
             **_phase_response(session, "MERGE"),
         }
 
@@ -2031,20 +2218,23 @@ async def _submit_merge(session: SessionState, data: dict) -> dict:
         if session.session_id in _branch_managers:
             del _branch_managers[session.session_id]
 
+        msg = _get_message("success", "MERGE", "merge_success",
+                          from_branch=merge_result.get("from_branch"),
+                          to_branch=merge_result.get("to_branch"))
         return {
             "success": True,
             "session_complete": True,
             "merged": True,
             "from_branch": merge_result.get("from_branch"),
             "to_branch": merge_result.get("to_branch"),
-            "message": f"Merged {merge_result.get('from_branch')} → {merge_result.get('to_branch')}. Session complete.",
+            **msg,
         }
     else:
+        msg = _get_message("failures", "MERGE", "merge_failed")
         return {
             "success": False,
             "error": merge_result.get("error"),
-            "message": "ブランチのマージに失敗しました。ユーザーに状況を伝え、`git status` でのコンフリクト確認と手動解決を依頼してください。解決後、再度 submit_phase を実行してください",
-            "requires_user_intervention": True,
+            **msg,
             **_phase_response(session, "MERGE"),
         }
 
@@ -2309,9 +2499,9 @@ async def _call_tool_impl(name: str, arguments: dict) -> list[TextContent]:
                 result["recovery_available"] = True
                 result["checkpoint_info"] = latest
                 result["recovery_instruction"] = (
-                    "前回のセッションのチェックポイントが見つかりました。"
-                    "復元する場合は get_session_status(discard_active=true, repo_path=\".\") を呼び出してください。"
-                    "新規セッションで続行する場合はそのまま submit_phase を呼んでください。"
+                    "Previous session checkpoint found. "
+                    "To restore, call get_session_status(discard_active=true, repo_path=\".\"). "
+                    "To continue with a new session, call submit_phase directly."
                 )
         except Exception:
             pass
@@ -2439,17 +2629,6 @@ async def _call_tool_impl(name: str, arguments: dict) -> list[TextContent]:
         else:
             result = session.add_explored_files(
                 files=arguments["files"],
-            )
-        return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
-
-    elif name == "revert_to_exploration":
-        # v3.10: Revert to EXPLORATION phase
-        session = session_manager.get_active_session()
-        if session is None:
-            result = {"error": "no_active_session", "message": "No active session."}
-        else:
-            result = session.revert_to_exploration(
-                keep_results=arguments.get("keep_results", True),
             )
         return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 

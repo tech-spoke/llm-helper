@@ -8,9 +8,9 @@ v1.0: Code Intelligence MCP Server
 - ChromaDB-based semantic search (Forest/Map architecture)
 
 v1.1: Context-Aware Guardrails
-- Markup files (.html, .css, .blade.php等) への緩和要件
-- find_references/find_definitions 必須要件の条件付き解除
-- trigger_condition 欠損時のリスク緩和
+- Relaxed requirements for markup files (.html, .css, .blade.php, etc.)
+- Conditional removal of find_references/find_definitions requirements
+- Risk mitigation for missing trigger_condition
 """
 
 import json
@@ -151,12 +151,12 @@ def evaluate_exploration(
     gate_level: str = "high",
 ) -> tuple[str, list[str]]:
     """
-    サーバー側で confidence を算出する。
+    Calculate confidence on server side.
 
-    LLM の自己申告ではなく、成果物から機械的に判定。
+    Mechanically determined from artifacts, not LLM self-reporting.
 
     Args:
-        result: 探索結果
+        result: Exploration result
         intent: IMPLEMENT, MODIFY, INVESTIGATE, QUESTION
         gate_level: v1.2 gate level (high, middle, low, auto, none)
                    "none" should not reach here (skipped in create_session)
@@ -204,10 +204,10 @@ def can_proceed_to_ready(
     gate_level: str = "high",
 ) -> tuple[bool, list[str]]:
     """
-    IMPLEMENT/MODIFY は最低成果条件を満たさないと READY に進めない。
+    IMPLEMENT/MODIFY cannot proceed to READY without meeting minimum requirements.
 
     Args:
-        result: 探索結果
+        result: Exploration result
         intent: IMPLEMENT, MODIFY, INVESTIGATE, QUESTION
         gate_level: v1.2 gate level (high, middle, low, auto, none)
 
@@ -241,16 +241,16 @@ def evaluate_exploration_v36(
     gate_level: str = "auto",
 ) -> tuple[str, list[str]]:
     """
-    リスクレベルを考慮した成果評価。
+    Evaluate results considering risk level.
 
-    v1.1: マークアップファイルのみの場合は要件を緩和。
-    v1.2: gate_level で明示的に要件レベルを指定可能。
+    v1.1: Relaxed requirements for markup-only files.
+    v1.2: gate_level allows explicit specification of requirement level.
 
     Args:
-        result: 探索結果
+        result: Exploration result
         intent: IMPLEMENT, MODIFY, INVESTIGATE, QUESTION
         risk_level: HIGH, MEDIUM, LOW
-        query_frame: QueryFrame（スロット証拠チェック用）
+        query_frame: QueryFrame (for slot evidence check)
         gate_level: v1.2 gate level (high, middle, low, auto, none)
                    "auto" uses risk_level for determination
 
@@ -260,8 +260,8 @@ def evaluate_exploration_v36(
     missing = []
     tools_used = set(result.tools_used)
 
-    # v1.10: gate_level は "full" または "auto" のみ
-    # risk_level に応じた要件を使用（get_dynamic_requirements() の内容を直接展開）
+    # v1.10: gate_level is either "full" or "auto"
+    # Use requirements based on risk_level (expanded from get_dynamic_requirements())
     if intent not in ("IMPLEMENT", "MODIFY"):
         reqs = {
             "symbols_identified": 1,
@@ -295,10 +295,10 @@ def evaluate_exploration_v36(
             "required_slot_evidence": [],
         }
 
-    # v1.10: マークアップ検出による自動緩和を削除
-    # LLM が check_phase_necessity で判断するため、ファイル拡張子による事前判定は不要
+    # v1.10: Removed auto-relaxation based on markup detection
+    # LLM judges via check_phase_necessity, so pre-determination by file extension is unnecessary
 
-    # 基本チェック
+    # Basic checks
     if len(result.symbols_identified) < reqs["symbols_identified"]:
         missing.append(f"symbols_identified: {len(result.symbols_identified)}/{reqs['symbols_identified']}")
 
@@ -311,12 +311,12 @@ def evaluate_exploration_v36(
     if len(result.existing_patterns) < reqs.get("existing_patterns", 0):
         missing.append(f"existing_patterns: {len(result.existing_patterns)}/{reqs.get('existing_patterns', 0)}")
 
-    # v1.10: 必須ツールチェック（マークアップ検出による緩和を削除）
+    # v1.10: Required tools check (removed markup detection relaxation)
     if "required_tools" in reqs:
-        # 要件で指定された必須ツールを使用
+        # Use required tools specified in requirements
         required_tools = reqs["required_tools"]
     else:
-        # フォールバック: 基本的な要件
+        # Fallback: basic requirements
         required_tools = {"find_definitions", "find_references"}
 
     if not required_tools.issubset(tools_used):
@@ -334,7 +334,7 @@ def evaluate_exploration_v36(
 
 
 # =============================================================================
-# Exploration Consistency Check (量だけでなく意味的整合性)
+# Exploration Consistency Check (semantic consistency, not just quantity)
 # =============================================================================
 
 def validate_exploration_consistency(result: "ExplorationResult") -> list[str]:
@@ -504,18 +504,58 @@ def validate_write_target(
 # =============================================================================
 
 @dataclass
+@dataclass
+class ChecklistItem:
+    """
+    v1.16: Represents a single implementation item within a task.
+
+    status:
+    - pending: Initial state
+    - done: Completed (evidence required)
+    - skipped: Not implemented (reason required)
+    """
+    item: str
+    status: str = "pending"  # pending, done, skipped
+    evidence: str | None = None  # Required when status="done", format: "file.py:42" or "file.py:42-58"
+    reason: str | None = None  # Required when status="skipped", min 10 chars
+
+    def to_dict(self) -> dict:
+        d = {
+            "item": self.item,
+            "status": self.status,
+        }
+        if self.evidence:
+            d["evidence"] = self.evidence
+        if self.reason:
+            d["reason"] = self.reason
+        return d
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "ChecklistItem":
+        return cls(
+            item=data.get("item", ""),
+            status=data.get("status", "pending"),
+            evidence=data.get("evidence"),
+            reason=data.get("reason"),
+        )
+
+
+@dataclass
 class TaskModel:
     """
     v1.11: Represents a single implementation task within READY phase.
+    v1.16: Added checklist for tracking individual implementation items.
 
     failure_count is per-task (not session-level).
     revert_reason records why this task was added during revert.
+    checklist: List of specific implementation items to track completion.
     """
     id: str
     description: str
     status: str = "pending"  # pending, completed
     failure_count: int = 0
     revert_reason: str | None = None
+    checklist: list[ChecklistItem] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         d = {
@@ -527,7 +567,23 @@ class TaskModel:
             d["failure_count"] = self.failure_count
         if self.revert_reason:
             d["revert_reason"] = self.revert_reason
+        if self.checklist:
+            d["checklist"] = [item.to_dict() for item in self.checklist]
         return d
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "TaskModel":
+        checklist = []
+        if "checklist" in data:
+            checklist = [ChecklistItem.from_dict(item) for item in data["checklist"]]
+        return cls(
+            id=data.get("id", ""),
+            description=data.get("description", ""),
+            status=data.get("status", "pending"),
+            failure_count=data.get("failure_count", 0),
+            revert_reason=data.get("revert_reason"),
+            checklist=checklist,
+        )
 
 
 # =============================================================================
@@ -554,136 +610,11 @@ PHASE_STEP_MAP: dict[str, int] = {
     "MERGE": 19,
 }
 
-# Phase → expected payload schema
-EXPECTED_PAYLOADS: dict[str, dict] = {
-    "BRANCH_INTERVENTION": {
-        "choice": "str: 'delete' | 'merge' | 'continue'",
-        "tools_used": "list[str]",
-        "summary": "str",
-    },
-    "DOCUMENT_RESEARCH": {
-        "documents_reviewed": "list[str]",
-        "tools_used": "list[str]",
-        "summary": "str",
-    },
-    "QUERY_FRAME": {
-        "action_type": "str",
-        "target_symbols": "list[str]",
-        "scope": "str",
-        "constraints": "str",
-        "tools_used": "list[str]",
-        "summary": "str",
-    },
-    "EXPLORATION": {
-        "explored_files": "list[str]",
-        "findings": "list[str]",
-        "tools_used": "list[str]",
-        "summary": "str",
-    },
-    "Q1": {
-        "needs_more_information": "bool",
-        "reason": "str",
-        "tools_used": "list[str]",
-        "summary": "str",
-    },
-    "SEMANTIC": {
-        "search_query": "str",
-        "search_results": "list[str]",
-        "tools_used": "list[str]",
-        "summary": "str",
-    },
-    "Q2": {
-        "has_unverified_hypotheses": "bool",
-        "reason": "str",
-        "tools_used": "list[str]",
-        "summary": "str",
-    },
-    "VERIFICATION": {
-        "hypotheses_verified": "list[{hypothesis, result, evidence}]",
-        "tools_used": "list[str]",
-        "summary": "str",
-    },
-    "Q3": {
-        "needs_impact_analysis": "bool",
-        "reason": "str",
-        "tools_used": "list[str]",
-        "summary": "str",
-    },
-    "IMPACT_ANALYSIS": {
-        "impact_summary": "dict",
-        "tools_used": "list[str]",
-        "summary": "str",
-    },
-    "READY_PLAN": {
-        "tasks": "list[{id, description, status, failure_count?, revert_reason?}]",
-        "tools_used": "list[str]",
-        "summary": "str",
-    },
-    "READY_IMPL": {
-        "task_id": "str",
-        "summary": "str",
-        "tools_used": "list[str]",
-    },
-    "READY_COMPLETE": {
-        "summary": "str",
-    },
-    "POST_IMPL_VERIFY": {
-        "verifier_used": "str",
-        "passed": "bool",
-        "failed_tasks": "list[str] (if passed=false)",
-        "details": "str",
-        "tools_used": "list[str]",
-        "summary": "str",
-    },
-    "VERIFY_INTERVENTION": {
-        "prompt_used": "str",
-        "action_taken": "str",
-        "tools_used": "list[str]",
-        "summary": "str",
-    },
-    "PRE_COMMIT": {
-        "review_prompt_used": "str",
-        "reviewed_files": "list[str]",
-        "commit_message": "str",
-        "tools_used": "list[str]",
-        "summary": "str",
-    },
-    "QUALITY_REVIEW": {
-        "quality_prompt_used": "str",
-        "quality_score": "str",
-        "issues": "list[str]",
-        "tools_used": "list[str]",
-        "summary": "str",
-    },
-    "MERGE": {
-        "summary": "str",
-    },
-}
-
-# Phase → default instruction
-PHASE_INSTRUCTIONS: dict[str, str] = {
-    "BRANCH_INTERVENTION": "Stale ブランチが検出されました。delete/merge/continue の意味を説明して選択肢を提示し、選択結果を submit_phase で送信してください。",
-    "DOCUMENT_RESEARCH": "設計文書を調査してください。完了後 submit_phase で送信してください。",
-    "QUERY_FRAME": "ユーザーの指示から構造化スロットを抽出し submit_phase で送信してください。",
-    "EXPLORATION": "code-intel ツールを最低2種類使って探索し、結果を submit_phase で送信してください。",
-    "Q1": "SEMANTIC フェーズが必要か評価してください。submit_phase で結果を送信してください。",
-    "SEMANTIC": "semantic_search で追加情報を収集してください。完了後 submit_phase で送信してください。",
-    "Q2": "VERIFICATION フェーズが必要か評価してください。submit_phase で結果を送信してください。",
-    "VERIFICATION": "仮説検証を実施してください。完了後 submit_phase で送信してください。",
-    "Q3": "IMPACT_ANALYSIS フェーズが必要か評価してください。submit_phase で結果を送信してください。",
-    "IMPACT_ANALYSIS": "analyze_impact を実行して影響分析を実施し、完了後 submit_phase で送信してください。",
-    "READY_PLAN": "探索結果に基づきタスクを分割し、タスクリストを submit_phase で送信してください。",
-    "READY_IMPL": "変更対象ファイルは事前に check_write_target を実行し、次のタスクを実装して submit_phase で報告してください。",
-    "READY_COMPLETE": "全タスクが完了しました。summary を添えて submit_phase で送信してください。",
-    "POST_IMPL_VERIFY": "実装結果を検証してください。検証結果を submit_phase で送信してください。",
-    "VERIFY_INTERVENTION": "介入プロンプトを読み、指示に従ってください。実行結果を submit_phase で送信してください。",
-    "PRE_COMMIT": "review_changes で差分を取得してレビューし、コミットメッセージとともに submit_phase で送信してください。",
-    "QUALITY_REVIEW": "品質チェックを実施してください。結果を submit_phase で送信してください。",
-    "MERGE": "summary を添えて submit_phase で送信し、マージを実行してください。",
-}
 
 _PHASE_CONTRACT_CACHE: dict[str, dict] = {}
 _PHASE_CONTRACT_MTIME: dict[str, float] = {}
+_FULL_CONTRACT_CACHE: dict[str, dict] = {}
+_FULL_CONTRACT_MTIME: dict[str, float] = {}
 
 
 def _normalize_phase_contract(data: dict) -> dict[str, dict]:
@@ -699,18 +630,41 @@ def _normalize_phase_contract(data: dict) -> dict[str, dict]:
     return normalized
 
 
-def _load_phase_contract(repo_path: str | None) -> dict[str, dict]:
-    if not repo_path:
-        return {}
-    contract_path = Path(repo_path) / ".code-intel" / "phase_contract.yml"
+class PhaseContractMissingError(Exception):
+    """phase_contract.yml が見つからない場合のエラー"""
+    pass
+
+
+def _get_mcp_server_root() -> Path:
+    """MCP サーバーのルートディレクトリを取得"""
+    # tools/session.py → llm-helper/
+    return Path(__file__).parent.parent
+
+
+def _load_phase_contract() -> dict[str, dict]:
+    """
+    MCP サーバーの .code-intel/phase_contract.yml を読み込む。
+
+    phase_contract.yml はMCPサーバーの設定であり、
+    対象プロジェクト（repo_path）ではなくサーバー自身のディレクトリから読む。
+
+    Raises:
+        PhaseContractMissingError: phase_contract.yml が見つからない場合
+    """
+    mcp_root = _get_mcp_server_root()
+    contract_path = mcp_root / ".code-intel" / "phase_contract.yml"
+
     if not contract_path.exists():
-        return {}
+        raise PhaseContractMissingError(
+            f"phase_contract.yml not found at {contract_path}. "
+            f"Please run init-project.sh or copy from templates/code-intel/"
+        )
 
     cache_key = str(contract_path)
     try:
         mtime = contract_path.stat().st_mtime
-    except OSError:
-        return {}
+    except OSError as e:
+        raise PhaseContractMissingError(f"Cannot read phase_contract.yml: {e}")
 
     cached = _PHASE_CONTRACT_CACHE.get(cache_key)
     cached_mtime = _PHASE_CONTRACT_MTIME.get(cache_key)
@@ -720,8 +674,8 @@ def _load_phase_contract(repo_path: str | None) -> dict[str, dict]:
     try:
         raw = contract_path.read_text(encoding="utf-8")
         data = yaml.safe_load(raw)
-    except Exception:
-        return {}
+    except Exception as e:
+        raise PhaseContractMissingError(f"Failed to parse phase_contract.yml: {e}")
 
     normalized = _normalize_phase_contract(data if data else {})
     _PHASE_CONTRACT_CACHE[cache_key] = normalized
@@ -729,43 +683,128 @@ def _load_phase_contract(repo_path: str | None) -> dict[str, dict]:
     return normalized
 
 
-def _apply_phase_contract_overrides(
-    response: dict,
-    payload_key: str,
-    phase_name: str,
-    repo_path: str | None,
+def _load_full_phase_contract() -> dict:
+    """
+    v1.15: MCP サーバーの .code-intel/phase_contract.yml を完全に読み込む。
+
+    _load_phase_contract() と異なり、phases セクションだけでなく
+    failures, common_failures, success, tool_errors, warnings 等の
+    全セクションを含む完全な YAML データを返す。
+
+    Returns:
+        Complete YAML data as dict
+
+    Raises:
+        PhaseContractMissingError: phase_contract.yml が見つからない場合
+    """
+    mcp_root = _get_mcp_server_root()
+    contract_path = mcp_root / ".code-intel" / "phase_contract.yml"
+
+    if not contract_path.exists():
+        raise PhaseContractMissingError(
+            f"phase_contract.yml not found at {contract_path}. "
+            f"Please run init-project.sh or copy from templates/code-intel/"
+        )
+
+    cache_key = str(contract_path)
+    try:
+        mtime = contract_path.stat().st_mtime
+    except OSError as e:
+        raise PhaseContractMissingError(f"Cannot read phase_contract.yml: {e}")
+
+    cached = _FULL_CONTRACT_CACHE.get(cache_key)
+    cached_mtime = _FULL_CONTRACT_MTIME.get(cache_key)
+    if cached is not None and cached_mtime == mtime:
+        return cached
+
+    try:
+        raw = contract_path.read_text(encoding="utf-8")
+        data = yaml.safe_load(raw)
+    except Exception as e:
+        raise PhaseContractMissingError(f"Failed to parse phase_contract.yml: {e}")
+
+    _FULL_CONTRACT_CACHE[cache_key] = data if data else {}
+    _FULL_CONTRACT_MTIME[cache_key] = mtime
+    return data if data else {}
+
+
+def _get_message(
+    category: str,
+    phase_or_tool: str | None,
+    key: str,
+    **kwargs,
 ) -> dict:
-    contract = _load_phase_contract(repo_path)
-    if not contract:
-        return response
+    """
+    v1.15: phase_contract.yml からメッセージを取得する。
 
-    overrides = contract.get(payload_key) or contract.get(phase_name)
-    if not isinstance(overrides, dict):
-        return response
+    Args:
+        category: "failures", "common_failures", "success", "tool_errors",
+                  "session_messages", "hints", "query_frame_hints", "warnings"
+        phase_or_tool: フェーズ名またはツール名 (common_failures 等では None)
+        key: メッセージキー
+        **kwargs: メッセージ内のプレースホルダー置換用
+                  例: _get_message("failures", "READY", "unknown_task", task_id="task1")
 
-    instruction = overrides.get("instruction")
-    if isinstance(instruction, str) and instruction.strip():
-        response["instruction"] = instruction
+    Returns:
+        {"error": str, "message": str, ...} 形式の dict
+        見つからない場合は {"error": "message_not_found", "message": key}
+    """
+    try:
+        contract = _load_full_phase_contract()
+    except PhaseContractMissingError:
+        return {"error": "contract_not_loaded", "message": key}
 
-    expected_payload = overrides.get("expected_payload")
-    if isinstance(expected_payload, dict) and expected_payload:
-        response["expected_payload"] = expected_payload
+    section = contract.get(category, {})
+    if not section:
+        return {"error": "section_not_found", "message": key}
 
-    return response
+    # common_failures, session_messages, hints, warnings は phase_or_tool 不要
+    if phase_or_tool:
+        phase_section = section.get(phase_or_tool, {})
+        message_def = phase_section.get(key, {})
+    else:
+        message_def = section.get(key, {})
+
+    if not message_def:
+        return {"error": "message_not_found", "message": key}
+
+    # メッセージ定義をコピーして返す
+    result = {}
+    if "error" in message_def:
+        result["error"] = message_def["error"]
+    if "message" in message_def:
+        msg = message_def["message"]
+        # プレースホルダー置換
+        if kwargs:
+            try:
+                msg = msg.format(**kwargs)
+            except (KeyError, ValueError):
+                pass  # フォーマット失敗時は元のメッセージを使用
+        result["message"] = msg
+    if "instruction" in message_def:
+        result["instruction"] = message_def["instruction"]
+    if "requires_user_intervention" in message_def:
+        result["requires_user_intervention"] = message_def["requires_user_intervention"]
+
+    return result
 
 
 def get_phase_response(
     phase_name: str,
     step: int | None = None,
     extra: dict | None = None,
-    repo_path: str | None = None,
 ) -> dict:
     """
-    v1.11: Generate self-contained response for a phase.
+    Generate self-contained response for a phase.
 
     Every response includes instruction + expected_payload so the LLM
     always knows what to do next, even after context compaction.
+
+    Raises:
+        PhaseContractMissingError: phase_contract.yml が見つからない場合
     """
+    contract = _load_phase_contract()
+
     if step is None:
         step = PHASE_STEP_MAP.get(phase_name, 0)
 
@@ -775,13 +814,24 @@ def get_phase_response(
         # READY has sub-steps; caller should use READY_PLAN, READY_IMPL, or READY_COMPLETE
         payload_key = extra.get("ready_substep", "READY_PLAN") if extra else "READY_PLAN"
 
-    instruction_key = payload_key
+    # Get phase config from contract (no fallback - phase_contract.yml must be complete)
+    phase_config = contract.get(payload_key) or contract.get(phase_name)
+    if not phase_config:
+        raise ValueError(f"Phase '{phase_name}' (payload_key='{payload_key}') not found in phase_contract.yml")
+
+    instruction = phase_config.get("instruction")
+    if not instruction:
+        raise ValueError(f"Phase '{phase_name}' missing 'instruction' in phase_contract.yml")
+
+    expected_payload = phase_config.get("expected_payload")
+    if expected_payload is None:
+        raise ValueError(f"Phase '{phase_name}' missing 'expected_payload' in phase_contract.yml")
 
     response = {
         "phase": phase_name,
         "step": step,
-        "instruction": PHASE_INSTRUCTIONS.get(instruction_key, "submit_phase で次のフェーズに進んでください。"),
-        "expected_payload": EXPECTED_PAYLOADS.get(payload_key, {}),
+        "instruction": instruction,
+        "expected_payload": expected_payload,
         "call": "submit_phase",
     }
 
@@ -790,17 +840,15 @@ def get_phase_response(
             if k != "ready_substep":
                 response[k] = v
 
-    response = _apply_phase_contract_overrides(response, payload_key, phase_name, repo_path)
-
     # v1.13: Append compaction protocol note to instruction
     compaction_note = (
-        "\n[compaction_protocol] submit_phase の data に compaction_count（整数）を含めてください。"
-        "直前の submit_phase レスポンスに含まれる compaction_count をそのまま送信してください。"
-        "コンテキスト圧縮が発生して直前の submit_phase レスポンスが参照できない場合は、"
-        "最後に確認した compaction_count に +1 した値を送信してください（不明な場合は 1）。"
-        "レスポンスに phase_summaries が含まれていた場合は、前フェーズまでの文脈復元に活用してください。"
+        "\n[compaction_protocol] Include compaction_count (integer) in submit_phase data. "
+        "Send the same compaction_count from the previous submit_phase response. "
+        "If context compaction occurred and you cannot access the previous response, "
+        "send last known compaction_count + 1 (use 1 if unknown). "
+        "If response contains phase_summaries, use them to restore context from previous phases."
     )
-    response["instruction"] = response.get("instruction", "") + compaction_note
+    response["instruction"] = response["instruction"] + compaction_note
 
     return response
 
@@ -1411,10 +1459,6 @@ class SessionState:
                     "description": "Add files/directories to explored list without leaving READY phase",
                     "example": "session.add_explored_files(['tests_with_code/'])",
                 },
-                "revert_to_exploration": {
-                    "description": "Go back to EXPLORATION phase for thorough re-exploration",
-                    "example": "session.revert_to_exploration()",
-                },
             },
         }
 
@@ -1460,268 +1504,10 @@ class SessionState:
             "message": f"Added {len(added)} file(s) to explored list.",
         }
 
-    def revert_to_exploration(self, keep_results: bool = True) -> dict:
-        """
-        EXPLORATIONフェーズに戻る。
+    # v1.15: submit_exploration, _validate_nl_symbol_mapping, _check_hypothesis_slots removed
+    # (integrated into submit_phase via code_intel_server._submit_exploration_v11)
 
-        check_write_target でブロックされた場合や、
-        追加の探索が必要な場合に使用。
-
-        Args:
-            keep_results: True の場合、既存の探索結果を保持
-
-        Returns:
-            {"success": bool, "previous_phase": str, "current_phase": str}
-        """
-        previous_phase = self.phase.name
-
-        if self.phase == Phase.EXPLORATION:
-            return {
-                "success": True,
-                "previous_phase": previous_phase,
-                "current_phase": Phase.EXPLORATION.name,
-                "message": "Already in EXPLORATION phase.",
-            }
-
-        # フェーズを戻す
-        self.transition_to_phase(Phase.EXPLORATION, reason="revert_to_exploration")
-
-        # 結果をクリアするかどうか
-        if not keep_results:
-            self.semantic = None
-            self.verification = None
-            # exploration は保持（追加探索のため）
-
-        # フェーズ履歴に記録
-        self.phase_history.append({
-            "action": "revert_to_exploration",
-            "from": previous_phase,
-            "to": Phase.EXPLORATION.name,
-            "keep_results": keep_results,
-            "timestamp": datetime.now().isoformat(),
-        })
-
-        return {
-            "success": True,
-            "previous_phase": previous_phase,
-            "current_phase": Phase.EXPLORATION.name,
-            "kept_exploration": self.exploration.to_dict() if self.exploration else None,
-            "message": f"Reverted from {previous_phase} to EXPLORATION. "
-                      f"{'Previous exploration results kept.' if keep_results else 'Results cleared.'}",
-        }
-
-    def submit_exploration(self, result: ExplorationResult) -> dict:
-        """
-        Submit exploration results and determine next phase.
-
-        Features:
-        - risk_level と QueryFrame を考慮した動的成果条件
-        - confidence はサーバー側で算出（LLM の自己申告は無視）
-        - 成果物の相互整合性チェック
-        - v1.1: マークアップコンテキストでのリスクレベル再評価
-
-        Returns: {"success": bool, "next_phase": str, "message": str}
-        """
-        if self.phase != Phase.EXPLORATION:
-            return {
-                "success": False,
-                "next_phase": self.phase.name,
-                "message": f"Cannot submit exploration in phase {self.phase.name}",
-            }
-
-        # v1.10: マークアップ検出による自動緩和を削除
-        # LLM が check_phase_necessity で判断するため、ファイル拡張子による事前判定は不要
-
-        # v3.6: リスクレベルを考慮した成果評価
-        # v1.2: gate_level も渡す
-        confidence, missing = evaluate_exploration_v36(
-            result,
-            self.intent,
-            self.risk_level,  # v1.10: effective_risk_levelではなく直接risk_levelを使用
-            self.query_frame,
-            self._gate_level,
-        )
-
-        # v3.4: 成果物の相互整合性チェック
-        consistency_errors = validate_exploration_consistency(result)
-        if consistency_errors:
-            confidence = "low"
-            missing.extend([f"consistency: {e}" for e in consistency_errors])
-
-        # v3.6: NL→シンボル整合性チェック
-        nl_symbol_errors = self._validate_nl_symbol_mapping(result)
-        if nl_symbol_errors:
-            confidence = "low"
-            missing.extend(nl_symbol_errors)
-
-        result._evaluated_confidence = confidence
-        result._missing_requirements = missing
-
-        self.exploration = result
-
-        # Record phase transition
-        self.phase_history.append({
-            "from": Phase.EXPLORATION.name,
-            "result": result.to_dict(),
-            "evaluated_confidence": confidence,
-            "missing_requirements": missing,
-            "consistency_errors": consistency_errors,
-            "risk_level": self.risk_level,
-            "timestamp": datetime.now().isoformat(),
-        })
-
-        # v3.6: HYPOTHESISスロットが残っていればREADYに進めない
-        hypothesis_block = self._check_hypothesis_slots()
-        if hypothesis_block:
-            missing.extend(hypothesis_block)
-            confidence = "low"
-
-        # IMPLEMENT/MODIFY は最低成果条件を満たさないと IMPACT_ANALYSIS に進めない
-        can_proceed = confidence == "high" and not consistency_errors and not hypothesis_block
-
-        if can_proceed:
-            # v1.10: EXPLORATION complete, stay in EXPLORATION for Q1 check
-            # Do not auto-transition to next phase
-            response = {
-                "success": True,
-                "evaluated_confidence": confidence,
-                "risk_level": self.risk_level,
-                "message": "Exploration sufficient. Proceed to Q1 check (check_phase_necessity).",
-                "next_step": "Call check_phase_necessity(phase='SEMANTIC') to determine if semantic search is needed.",
-            }
-            return response
-        else:
-            self.transition_to_phase(Phase.SEMANTIC, reason="semantic_gate_required")
-            response = {
-                "success": True,
-                "next_phase": Phase.SEMANTIC.name,
-                "evaluated_confidence": confidence,
-                "missing_requirements": missing,
-                "risk_level": self.risk_level,
-                "message": "Exploration insufficient. Use semantic_search to gather more context.",
-                "hint": "Use semantic_search, then submit_semantic with hypotheses and semantic_reason.",
-            }
-            if consistency_errors:
-                response["consistency_errors"] = consistency_errors
-                response["consistency_hint"] = (
-                    "Your exploration results have consistency issues. "
-                    "Ensure entry_points are linked to symbols, no duplicates, etc."
-                )
-            return response
-
-    def _validate_nl_symbol_mapping(self, result: ExplorationResult) -> list[str]:
-        """
-        NL用語とシンボルの整合性チェック。
-
-        target_feature に対応するシンボルが見つかっているか検証。
-        """
-        errors = []
-
-        if not self.query_frame or not self.query_frame.target_feature:
-            return errors
-
-        from tools.query_frame import validate_nl_symbol_mapping
-
-        has_match, matched = validate_nl_symbol_mapping(
-            self.query_frame.target_feature,
-            result.symbols_identified,
-        )
-
-        if not has_match:
-            errors.append(
-                f"nl_symbol_mapping: '{self.query_frame.target_feature}' "
-                f"has no matching symbol in {result.symbols_identified}"
-            )
-
-        return errors
-
-    def _check_hypothesis_slots(self) -> list[str]:
-        """
-        HYPOTHESISスロットが残っていないかチェック。
-
-        HYPOTHESISはVERIFICATION必須。
-        """
-        if not self.query_frame:
-            return []
-
-        from tools.query_frame import validate_for_ready
-
-        return validate_for_ready(self.query_frame)
-
-    def submit_semantic(self, result: SemanticResult) -> dict:
-        """
-        Submit semantic search results and move to verification.
-
-        semantic_reason は SemanticReason Enum のみ許可。
-        semantic_reason が missing_requirements に対応しているかチェック。
-
-        Returns: {"success": bool, "next_phase": str, "message": str}
-        """
-        if self.phase != Phase.SEMANTIC:
-            return {
-                "success": False,
-                "next_phase": self.phase.name,
-                "message": f"Cannot submit semantic in phase {self.phase.name}",
-            }
-
-        # semantic_reason は Enum 必須
-        if result.semantic_reason is None:
-            return {
-                "success": False,
-                "next_phase": self.phase.name,
-                "message": "semantic_reason is required (must be SemanticReason enum).",
-                "valid_reasons": [r.value for r in SemanticReason],
-            }
-
-        if not isinstance(result.semantic_reason, SemanticReason):
-            return {
-                "success": False,
-                "next_phase": self.phase.name,
-                "message": f"semantic_reason must be SemanticReason enum, got: {type(result.semantic_reason)}",
-                "valid_reasons": [r.value for r in SemanticReason],
-            }
-
-        # semantic_reason が missing_requirements に対応しているかチェック
-        if self.exploration and self.exploration._missing_requirements:
-            is_valid, error = validate_semantic_reason(
-                self.exploration._missing_requirements,
-                result.semantic_reason,
-            )
-            if not is_valid:
-                return {
-                    "success": False,
-                    "next_phase": self.phase.name,
-                    "message": error,
-                    "missing_requirements": self.exploration._missing_requirements,
-                    "hint": "Choose a semantic_reason that matches why exploration failed.",
-                }
-
-        if not result.hypotheses:
-            return {
-                "success": False,
-                "next_phase": self.phase.name,
-                "message": "At least one hypothesis is required from semantic search results.",
-            }
-
-        self.semantic = result
-
-        # Record phase transition
-        self.phase_history.append({
-            "from": Phase.SEMANTIC.name,
-            "result": result.to_dict(),
-            "reason_validated": True,
-            "timestamp": datetime.now().isoformat(),
-        })
-
-        # v1.10: SEMANTIC complete, return to EXPLORATION to trigger Q2 check
-        # Stay in SEMANTIC phase, LLM will call check_phase_necessity for Q2
-        return {
-            "success": True,
-            "next_phase": "Q2_CHECK",
-            "message": "Semantic search complete. Now check if VERIFICATION is necessary.",
-            "hypotheses_to_verify": [h.to_dict() for h in result.hypotheses],
-            "next_step": "Call check_phase_necessity(phase='VERIFICATION', assessment={...}) to determine if hypothesis verification is needed.",
-        }
+    # v1.15: submit_semantic removed (integrated into submit_phase)
 
     def submit_verification(self, result: VerificationResult) -> dict:
         """
@@ -1929,44 +1715,7 @@ class SessionState:
 
     # v1.10: submit_verification_and_impact removed (v1.9 integration reverted)
     # Use separate submit_verification and submit_impact_analysis instead
-
-    def submit_for_review(self) -> dict:
-        """
-        v1.2: Transition from READY to PRE_COMMIT for garbage detection.
-
-        This should be called after implementation is complete.
-
-        Returns: {"success": bool, "next_phase": str, "message": str}
-        """
-        if self.phase != Phase.READY:
-            return {
-                "success": False,
-                "next_phase": self.phase.name,
-                "message": f"Cannot submit for review in phase {self.phase.name}. Must be in READY phase.",
-            }
-
-        if not self.task_branch_enabled:
-            return {
-                "success": False,
-                "next_phase": self.phase.name,
-                "message": "Task branch not enabled. submit_for_review requires task branch to be active.",
-            }
-
-        # Record phase transition
-        self.phase_history.append({
-            "from": Phase.READY.name,
-            "to": Phase.PRE_COMMIT.name,
-            "timestamp": datetime.now().isoformat(),
-        })
-
-        self.transition_to_phase(Phase.PRE_COMMIT, reason="submit_for_review")
-
-        return {
-            "success": True,
-            "next_phase": Phase.PRE_COMMIT.name,
-            "message": "Implementation complete. Now in PRE_COMMIT phase for garbage detection.",
-            "next_step": "Call review_changes to get all changes, then finalize_changes with decisions.",
-        }
+    # v1.15: submit_for_review removed (integrated into submit_phase)
 
     def submit_pre_commit_review(
         self,
@@ -2064,7 +1813,6 @@ class SessionState:
             phase_name,
             step=step,
             extra={"ready_substep": ready_substep} if ready_substep else None,
-            repo_path=self.repo_path,
         )
 
         status = {
@@ -2197,12 +1945,23 @@ class SessionState:
         # Build task list
         self.tasks = []
         for t in tasks_data:
+            # v1.16: Parse checklist if present
+            checklist = []
+            if "checklist" in t:
+                for item in t["checklist"]:
+                    checklist.append(ChecklistItem(
+                        item=item.get("item", ""),
+                        status=item.get("status", "pending"),
+                        evidence=item.get("evidence"),
+                        reason=item.get("reason"),
+                    ))
             self.tasks.append(TaskModel(
                 id=t["id"],
                 description=t.get("description", ""),
                 status=t.get("status", "pending"),
                 failure_count=t.get("failure_count", 0),
                 revert_reason=t.get("revert_reason"),
+                checklist=checklist,
             ))
 
         self.ready_substep = "implement"
@@ -2222,11 +1981,18 @@ class SessionState:
             "next_task": next_task.to_dict() if next_task else None,
         }
 
-    def complete_task(self, task_id: str, summary: str) -> dict:
+    def complete_task(
+        self,
+        task_id: str,
+        summary: str,
+        checklist: list[dict] | None = None,
+    ) -> dict:
         """
         v1.11 Step 13: Report task completion.
+        v1.16: Added checklist parameter for tracking individual implementation items.
 
         Validates order (must complete in registered order for pending tasks).
+        Checklist validation is done in code_intel_server.py before calling this.
         """
         if self.phase != Phase.READY:
             return {
@@ -2274,6 +2040,18 @@ class SessionState:
                 "message": f"Must complete '{first_pending.id}' before '{task_id}'.",
                 "expected_task": first_pending.to_dict(),
             }
+
+        # v1.16: Update checklist with reported status
+        if checklist:
+            updated_checklist = []
+            for reported_item in checklist:
+                updated_checklist.append(ChecklistItem(
+                    item=reported_item.get("item", ""),
+                    status=reported_item.get("status", "pending"),
+                    evidence=reported_item.get("evidence"),
+                    reason=reported_item.get("reason"),
+                ))
+            target.checklist = updated_checklist
 
         # Mark as completed
         target.status = "completed"
@@ -2412,51 +2190,6 @@ class SessionState:
                 "4. Follow the instructions in the prompt\n"
                 "5. If force_user_escalation is true, MUST use user_escalation.md"
             ),
-        }
-
-    def record_intervention_used(self, prompt_name: str) -> dict:
-        """
-        Record that an intervention prompt was used.
-
-        Args:
-            prompt_name: Name of the intervention prompt used (e.g., "step_back")
-
-        Returns:
-            {"recorded": bool, "intervention_count": int}
-        """
-        self.intervention_count += 1
-
-        # Record in phase history
-        self.phase_history.append({
-            "action": "intervention",
-            "prompt_name": prompt_name,
-            "intervention_count": self.intervention_count,
-            "verification_failures_at_trigger": self.verification_failure_count,
-            "timestamp": datetime.now().isoformat(),
-        })
-
-        return {
-            "recorded": True,
-            "intervention_count": self.intervention_count,
-            "message": f"Intervention '{prompt_name}' recorded. Total interventions: {self.intervention_count}",
-        }
-
-    def reset_verification_failures(self) -> dict:
-        """
-        Reset verification failure count after successful verification.
-
-        Called when verification passes after intervention.
-
-        Returns:
-            {"reset": bool, "previous_count": int}
-        """
-        previous_count = self.verification_failure_count
-        self.verification_failure_count = 0
-
-        return {
-            "reset": True,
-            "previous_count": previous_count,
-            "message": "Verification failure count reset after successful verification.",
         }
 
     def get_intervention_status(self) -> dict:

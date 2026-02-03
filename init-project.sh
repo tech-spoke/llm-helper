@@ -4,12 +4,13 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEMPLATE_DIR="$SCRIPT_DIR/templates/code-intel"
 SKILLS_TEMPLATE_DIR="$SCRIPT_DIR/templates/skills/claude"
+CLAUDE_TEMPLATE_DIR="$SCRIPT_DIR/templates/claude"
 
 # Usage
 usage() {
     echo "Usage: $0 <project-path> [options]"
     echo ""
-    echo "Initialize a project for Code Intel MCP Server v1.13"
+    echo "Initialize a project for Code Intel MCP Server v1.15"
     echo ""
     echo "Arguments:"
     echo "  project-path    Path to the target project (required)"
@@ -82,7 +83,7 @@ PROJECT_PATH="$(cd "$PROJECT_PATH" 2>/dev/null && pwd)" || {
     exit 1
 }
 
-echo "=== Code Intel Project Initialization v1.13 ==="
+echo "=== Code Intel Project Initialization v1.15 ==="
 echo ""
 echo "Project: $PROJECT_PATH"
 echo "MCP Server: $SCRIPT_DIR"
@@ -93,6 +94,7 @@ echo "Creating .code-intel/ directory..."
 mkdir -p "$PROJECT_PATH/.code-intel/agreements"
 mkdir -p "$PROJECT_PATH/.code-intel/chroma"
 mkdir -p "$PROJECT_PATH/.code-intel/logs"
+mkdir -p "$PROJECT_PATH/.code-intel/sessions"
 mkdir -p "$PROJECT_PATH/.code-intel/verifiers"
 mkdir -p "$PROJECT_PATH/.code-intel/doc_research"
 mkdir -p "$PROJECT_PATH/.code-intel/review_prompts"
@@ -101,6 +103,7 @@ echo "  ✓ .code-intel/"
 echo "  ✓ .code-intel/agreements/"
 echo "  ✓ .code-intel/chroma/"
 echo "  ✓ .code-intel/logs/"
+echo "  ✓ .code-intel/sessions/"
 echo "  ✓ .code-intel/verifiers/"
 echo "  ✓ .code-intel/doc_research/"
 echo "  ✓ .code-intel/review_prompts/"
@@ -344,9 +347,9 @@ EOF
         echo "  ✓ .claude/CLAUDE.md (template)"
     fi
 
-    # Copy PARALLEL_GUIDE.md
-    if [ -f "$SCRIPT_DIR/.claude/PARALLEL_GUIDE.md" ] && [ ! -f "$PROJECT_PATH/.claude/PARALLEL_GUIDE.md" ]; then
-        cp "$SCRIPT_DIR/.claude/PARALLEL_GUIDE.md" "$PROJECT_PATH/.claude/"
+    # Copy PARALLEL_GUIDE.md from templates
+    if [ -f "$CLAUDE_TEMPLATE_DIR/PARALLEL_GUIDE.md" ] && [ ! -f "$PROJECT_PATH/.claude/PARALLEL_GUIDE.md" ]; then
+        cp "$CLAUDE_TEMPLATE_DIR/PARALLEL_GUIDE.md" "$PROJECT_PATH/.claude/"
         echo "  ✓ .claude/PARALLEL_GUIDE.md"
     fi
 
@@ -380,6 +383,7 @@ GITIGNORE_ENTRIES="
 .code-intel/vectors-*.db
 .code-intel/chroma/
 .code-intel/ctags_cache/
+.code-intel/sessions/
 .code-intel/sync_state.json
 .code-intel/.last_sync
 .code-intel/learned_pairs.json
@@ -420,14 +424,17 @@ echo "  │   └── commands/            (skill files: /code, /exp, etc.)"
 echo "  └── .code-intel/"
 echo "      ├── config.json          (indexing configuration)"
 echo "      ├── context.yml          (context & doc research settings)"
+echo "      ├── phase_contract.yml   (phase contract definitions, v1.13)"
 echo "      ├── agreements/          (learned NL->Symbol pairs)"
 echo "      ├── chroma/              (ChromaDB vector database)"
 echo "      ├── logs/                (DecisionLog, OutcomeLog)"
+echo "      ├── sessions/            (checkpoint persistence, v1.12)"
 echo "      ├── verifiers/           (verification prompts)"
 echo "      ├── doc_research/        (document research prompts)"
 echo "      ├── review_prompts/      (garbage detection, quality review)"
 echo "      ├── interventions/       (intervention prompts)"
 echo "      ├── task_planning.md     (task decomposition guide, v1.11)"
+echo "      ├── user_escalation.md   (user escalation procedure, v1.13)"
 echo "      └── sync_state.json      (incremental sync state)"
 echo ""
 echo "=== Next Steps ==="
@@ -471,6 +478,10 @@ echo "• Phase necessity checks Q1/Q2/Q3 (v1.10)"
 echo "• Deferred branch creation to READY phase (v1.11)"
 echo "• Unified submit_phase API with compaction resilience (v1.11)"
 echo "• Server-enforced task orchestration (v1.11)"
+echo "• Session checkpoint persistence for CLI restart recovery (v1.12)"
+echo "• Phase contract formalization with tools_used enforcement (v1.13)"
+echo "• Distribution structure reorganization with templates/ (v1.14)"
+echo "• LLM message externalization to phase_contract.yml (v1.15)"
 echo ""
 echo "Use '/code' skill for guided implementation workflow."
 echo "Use 'sync_index' tool to manually trigger re-indexing."
